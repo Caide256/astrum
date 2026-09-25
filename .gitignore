@@ -1,0 +1,20 @@
+# dependencies and build output
+node_modules/
+dist/
+release/
+native/*/target/
+
+# local settings: the default server and anything else personal
+.env
+.env.*
+!.env.example
+
+# editors and systems
+.vscode/
+.idea/
+*.log
+Thumbs.db
+.DS_Store
+
+# local tooling
+.claude

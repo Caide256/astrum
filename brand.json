@@ -1,0 +1,9 @@
+{
+  "name": "Astrum",
+  "appId": "chat.astrum.app",
+  "description": "Discord-like desktop client for Matrix: voice, screen sharing and chats",
+  "publisher": "Astrum",
+  "logo": "assets/icon.png",
+  "updateRepo": "Caide256/astrum",
+  "defaultServer": ""
+}

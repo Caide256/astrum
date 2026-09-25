@@ -1,0 +1,33 @@
+{
+  "name": "matrix-voice-client",
+  "version": "0.6.0",
+  "description": "Discord-like desktop client for Matrix: voice, screen sharing and chats",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite",
+    "desktop": "node scripts/dev-desktop.mjs",
+    "desktop:build": "npm run native:build && vite build && electron-builder --config electron-builder.config.cjs --publish never && node scripts/release-files.cjs",
+    "build": "tsc --noEmit && vite build",
+    "check": "tsc --noEmit",
+    "preview": "vite preview",
+    "native:build": "cargo build --release --offline --manifest-path native/helper/Cargo.toml"
+  },
+  "dependencies": {
+    "@sapphi-red/web-noise-suppressor": "^0.4.1",
+    "livekit-client": "^2.22.3",
+    "matrix-js-sdk": "^42.4.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "electron": "^44.4.4",
+    "electron-builder": "^26.15.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0"
+  }
+}
