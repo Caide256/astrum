@@ -4,6 +4,7 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const brand = require("../brand.json");
+const preview = require("./preview.cjs");
 const tray = require("./tray.cjs");
 const updater = require("./updater.cjs");
 
@@ -288,6 +289,32 @@ function shellBridge() {
     if (win && !win.isDestroyed() && !win.isFocused()) win.flashFrame(true);
   });
   ipcMain.handle("app:copy", (_e, text) => electron.clipboard.writeText(String(text ?? "")));
+  linkPreviews();
+}
+
+/* ------------------------------------------------------------ link previews */
+
+/**
+ * Link previews are fetched here, not in the page: no CORS in the way, and
+ * the proxy and certificate settings of the system apply. Only the sender's
+ * app fetches; the result travels inside the message.
+ */
+function linkPreviews() {
+  const fetchPreview = preview.createPreviewer(
+    (url, init) => electron.net.fetch(url, init),
+    `Mozilla/5.0 (compatible; ${brand.name.replace(/[^\w.-]+/g, "")}Bot/1.0; link preview)`,
+  );
+  ipcMain.handle("app:link-preview", (_e, url) => fetchPreview(String(url ?? "")).catch(() => null));
+
+  // YouTube refuses to play embedded videos without a Referer (error 153), and
+  // a page loaded from a file sends none. Apps are asked to send their id.
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: ["https://www.youtube-nocookie.com/embed/*", "https://www.youtube.com/embed/*"] },
+    (details, done) => {
+      details.requestHeaders.Referer = `https://${brand.appId}/`;
+      done({ requestHeaders: details.requestHeaders });
+    },
+  );
 }
 
 /* ----------------------------------------------------------- window frame */
@@ -316,10 +343,29 @@ function frameBridge() {
 }
 
 function watchFrame(win) {
-  const push = () => {
+  const send = () => {
     if (!win.isDestroyed()) win.webContents.send("app:window-state", windowState(win));
   };
-  for (const ev of ["maximize", "unmaximize", "enter-full-screen", "leave-full-screen", "focus", "blur", "restore"]) {
+  // Leaving the full screen of a video (Esc) is reported before the window
+  // itself is out of it: the state sent right away still said "full screen"
+  // and the title bar stayed hidden. It is sent again once things settled.
+  const push = () => {
+    send();
+    setTimeout(send, 150);
+    setTimeout(send, 600);
+  };
+  for (const ev of [
+    "maximize",
+    "unmaximize",
+    "enter-full-screen",
+    "leave-full-screen",
+    "enter-html-full-screen",
+    "leave-html-full-screen",
+    "focus",
+    "blur",
+    "restore",
+    "show",
+  ]) {
     win.on(ev, push);
   }
   win.webContents.on("did-finish-load", push);

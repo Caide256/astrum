@@ -145,30 +145,91 @@ function registerError(e: unknown): Error {
   return new Error(serverMessage || t("session.err.registerFailed"));
 }
 
+/** Invite code stage: the stable name and the one from MSC3231. */
+const TOKEN_STAGES = ["m.login.registration_token", "org.matrix.msc3231.login.registration_token"];
+const SUPPORTED_STAGES = new Set(["m.login.dummy", ...TOKEN_STAGES]);
+
+type Uia = {
+  session?: string;
+  flows?: { stages: string[] }[];
+  completed?: string[];
+  errcode?: string;
+  error?: string;
+};
+
+/** The user-interactive auth state from a 401 answer, or null for any other error. */
+function uiaOf(e: unknown): Uia | null {
+  const err = e as { httpStatus?: number; data?: Uia };
+  return err?.httpStatus === 401 && err.data?.flows ? err.data : null;
+}
+
 /**
- * Create an account. Only the plain m.login.dummy stage is supported: captcha,
- * email and registration tokens are left to Element.
+ * Check an invite code before using it, for a clear message. Codes are case
+ * sensitive; a code typed in lower case is tried in upper case too. Servers
+ * without the check endpoint get the code as typed.
  */
-export async function register(server: string, username: string, password: string): Promise<Session> {
+async function checkInvite(homeserver: string, code: string): Promise<string> {
+  const valid = async (c: string): Promise<boolean | null> => {
+    try {
+      const res = await fetch(
+        `${homeserver}/_matrix/client/v1/register/m.login.registration_token/validity?token=${encodeURIComponent(c)}`,
+      );
+      if (!res.ok) return null;
+      return !!(await res.json())?.valid;
+    } catch {
+      return null;
+    }
+  };
+  const first = await valid(code);
+  if (first !== false) return code;
+  const upper = code.toUpperCase();
+  if (upper !== code && (await valid(upper))) return upper;
+  throw new Error(t("session.err.badInvite"));
+}
+
+/**
+ * Create an account. Supported registration stages: the plain m.login.dummy
+ * and an invite code (m.login.registration_token, Synapse registration
+ * tokens). Captcha and email are left to Element.
+ */
+export async function register(server: string, username: string, password: string, invite = ""): Promise<Session> {
   const homeserver = await discoverHomeserver(server);
   const tmp = createClient({ baseUrl: homeserver });
   const body = { username: cleanUsername(username), password, initial_device_display_name: BRAND.name };
+  const code = invite.trim();
 
   let res;
   try {
     res = await tmp.registerRequest(body);
   } catch (e) {
-    const err = e as { httpStatus?: number; data?: { session?: string; flows?: { stages: string[] }[] } };
-    if (err?.httpStatus !== 401 || !err.data?.flows) throw registerError(e);
-    const simple = err.data.flows.some((f) => f.stages.every((st) => st === "m.login.dummy"));
-    if (!simple) {
-      throw new Error(t("session.err.needsCaptcha"));
+    let uia = uiaOf(e);
+    if (!uia) throw registerError(e);
+    const flow = uia.flows?.find((f) => f.stages.every((st) => SUPPORTED_STAGES.has(st)));
+    if (!flow) throw new Error(t("session.err.needsCaptcha"));
+    const needsCode = flow.stages.some((st) => TOKEN_STAGES.includes(st));
+    if (needsCode && !code) throw new Error(t("session.err.needsInvite"));
+    const token = needsCode ? await checkInvite(homeserver, code) : "";
+    const session = uia.session;
+
+    // stages go one by one; each answer lists what is completed so far
+    for (let step = 0; step < flow.stages.length + 1 && !res; step += 1) {
+      const done = new Set(uia?.completed ?? []);
+      const stage = flow.stages.find((st) => !done.has(st));
+      if (!stage) break;
+      const auth = TOKEN_STAGES.includes(stage) ? { type: stage, token, session } : { type: stage, session };
+      try {
+        res = await tmp.registerRequest({ ...body, auth } as never);
+      } catch (e2) {
+        const next = uiaOf(e2);
+        if (!next) throw registerError(e2);
+        const advanced = (next.completed ?? []).includes(stage);
+        if (!advanced) {
+          throw TOKEN_STAGES.includes(stage) ? new Error(t("session.err.badInvite")) : registerError(e2);
+        }
+        uia = next;
+      }
     }
-    try {
-      res = await tmp.registerRequest({ ...body, auth: { type: "m.login.dummy", session: err.data.session } });
-    } catch (e2) {
-      throw registerError(e2);
-    }
+    if (!res) throw new Error(t("session.err.registerFailed"));
   }
   if (!res.access_token || !res.device_id) {
     throw new Error(t("session.err.noAutoLogin"));

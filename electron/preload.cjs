@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld("desktop", {
   showWindow: () => ipcRenderer.invoke("app:show"),
   flashWindow: () => ipcRenderer.invoke("app:flash"),
   copyText: (text) => ipcRenderer.invoke("app:copy", text),
+  linkPreview: (url) => ipcRenderer.invoke("app:link-preview", url),
 
   windowAction: (action) => ipcRenderer.invoke("app:window", action),
   onWindowState: (cb) => listen("app:window-state", cb),

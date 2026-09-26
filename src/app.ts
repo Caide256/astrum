@@ -12,12 +12,15 @@ import {
   type MatrixEvent,
   type Room,
 } from "matrix-js-sdk";
+import type { GeneratedSecretStorageKey } from "matrix-js-sdk/lib/crypto-api/index.js";
 
+import type { MentionResolver } from "./markdown.ts";
 import { createStore } from "./store.ts";
 import * as session from "./matrix/session.ts";
 import {
   browseChannels,
   createChannel,
+  createServer,
   deleteChannel,
   joinChannel,
   joinDefaultChannels,
@@ -28,14 +31,15 @@ import {
   type Channel,
   type Server,
 } from "./matrix/servers.ts";
-import { joinServer, lookupServer, type ServerCard } from "./matrix/discovery.ts";
+import { joinServer, lookupServer, suggestAddress, type ServerCard } from "./matrix/discovery.ts";
 import * as rtc from "./matrix/rtc.ts";
 import * as admin from "./matrix/admin.ts";
 import * as crypto from "./matrix/crypto.ts";
 import * as msg from "./matrix/messages.ts";
 import * as people from "./matrix/people.ts";
 import { configureMedia, encryptAttachment, mediaUrl, type EncryptedFile } from "./media.ts";
-import { copyToClipboard, flashWindow, idleSeconds, onBeforeQuit, showWindow } from "./desktop.ts";
+import { BRAND } from "./brand.ts";
+import { copyToClipboard, fetchLinkPreview, flashWindow, idleSeconds, onBeforeQuit, showWindow, type RawPreview } from "./desktop.ts";
 import { startHotkeys } from "./hotkeys.ts";
 import { compareText, t } from "./i18n/index.ts";
 import { getNotifyMode, getSoundPrefs, isMuted, startPrefsSync, stopPrefsSync } from "./prefs.ts";
@@ -65,7 +69,19 @@ export type Upload = { id: string; name: string; progress: number };
 
 export type StatusMode = "auto" | "unavailable" | "offline";
 
-export type ReplyPreview = { eventId: string; sender: string; senderName: string; body: string };
+/** `quote`: the reply quotes a piece of the message, and `body` is that piece. */
+export type ReplyPreview = { eventId: string; sender: string; senderName: string; body: string; quote?: boolean };
+
+/** A link preview inside a message (MSC4095 fields, the picture already on the homeserver). */
+export type LinkPreview = {
+  url: string;
+  title: string;
+  description: string;
+  site: string;
+  image: { mxc: string; file: EncryptedFile | null; w: number; h: number; mime: string } | null;
+  /** YouTube video id: the card plays the video in place. */
+  youtube: string;
+};
 
 export type Message = {
   id: string;
@@ -88,6 +104,14 @@ export type Message = {
   locked: boolean;
   /** Checklist items toggled in the room: the latest toggle per item key. */
   checks: Record<string, msg.CheckState>;
+  /** The sender deleted the account. */
+  deleted: boolean;
+  /** The message pings this user: by name, by a reply, or @room. */
+  mentionsMe: boolean;
+  previews: LinkPreview[];
+  pinned: boolean;
+  /** Color of the sender's role on this server, empty for none. */
+  color: string;
 };
 
 export type Member = {
@@ -98,15 +122,19 @@ export type Member = {
   /** Server owner. */
   owner: boolean;
   presence: people.Presence;
+  /** Role name for the badge (empty for plain members) and its color. */
+  role: string;
+  color: string;
 };
 
-export type UserMenu = { userId: string; roomId: string | null; x: number; y: number };
+/** `voice`: opened on a person in the call, so call volume and removal from the call apply. */
+export type UserMenu = { userId: string; roomId: string | null; x: number; y: number; voice: boolean };
 
 export type Lightbox = { url: string; name: string };
 
 export type SettingsTab = "profile" | "audio" | "keys" | "appearance" | "app" | "crypto" | "sessions";
 
-export type ServerTab = "overview" | "channels" | "members" | "bans" | "perms";
+export type ServerTab = "overview" | "channels" | "members" | "roles" | "bans" | "perms";
 
 export type AppState = {
   phase: "login" | "loading" | "ready";
@@ -128,6 +156,8 @@ export type AppState = {
   addServerOpen: boolean;
   serverCard: ServerCard | null;
   profileUser: string | null;
+  /** The profile card was opened from the call: its volume slider applies. */
+  profileVoice: boolean;
   userMenu: UserMenu | null;
   settingsOpen: boolean;
   settingsTab: SettingsTab;
@@ -147,7 +177,8 @@ export type AppState = {
   uploads: Upload[];
   lightbox: Lightbox | null;
   replyTo: ReplyPreview | null;
-  editing: { eventId: string; body: string } | null;
+  /** A message being edited; `media`: an attachment, only its caption changes. */
+  editing: { eventId: string; body: string; media: boolean } | null;
   myName: string;
   myAvatar: string;
   tick: number;
@@ -167,6 +198,20 @@ export type AppState = {
   lastFocus: string | null;
   /** Context menu of a channel or a server icon. */
   placeMenu: { kind: "room" | "server"; id: string; x: number; y: number } | null;
+  /** The server whose leave confirmation is open. */
+  leaveServerAsk: string | null;
+  /** The pinned messages panel is open. */
+  pinsOpen: boolean;
+  /** Pinned message ids of the open chat, newest pin last. */
+  pins: string[];
+  /** The first message the user has not read yet when the chat was opened: the "new" line goes above it. */
+  unreadFrom: string | null;
+  /**
+   * Older history of the open chat: "more" can still be loaded, "start" is
+   * the very beginning, "hidden" means the channel hides what was written
+   * before the user joined.
+   */
+  history: "more" | "start" | "hidden";
 };
 
 function loadFlag(key: string): boolean {
@@ -213,6 +258,7 @@ export const app = createStore<AppState>({
   addServerOpen: false,
   serverCard: null,
   profileUser: null,
+  profileVoice: false,
   userMenu: null,
   settingsOpen: false,
   settingsTab: "profile",
@@ -244,6 +290,11 @@ export const app = createStore<AppState>({
   callChat: loadFlag("app.call-chat"),
   lastFocus: null,
   placeMenu: null,
+  leaveServerAsk: null,
+  pinsOpen: false,
+  pins: [],
+  unreadFrom: null,
+  history: "more",
 });
 
 /** Wake subscribers when data changed outside the store fields. */
@@ -346,6 +397,12 @@ let stopVerifyListener: (() => void) | null = null;
 function afterConnect(s: session.Session, c: MatrixClient): void {
   configureMedia(c, s.accessToken);
   profileCache.clear();
+  people.onDeletedChange(() => {
+    profileCache.clear();
+    scheduleMessages();
+    refreshDirects();
+    bump();
+  });
   // call memberships expire by time without any event, so they are re-read every minute
   window.clearInterval(occupantsTimer);
   occupantsTimer = window.setInterval(() => refreshOccupants(), 60_000);
@@ -376,6 +433,13 @@ async function launch(s: session.Session, c: MatrixClient): Promise<void> {
   wire(c);
   restoreView();
   await session.start(c);
+  // a fresh account gets its encryption keys here, no other client needed
+  void crypto.setupFreshAccount(c).catch((e) => console.warn("encryption setup skipped", e));
+  // invites the server failed to decline last time
+  void people
+    .retryHiddenInvites(c)
+    .then(() => refreshDirects())
+    .catch(() => undefined);
   startPrefsSync(c);
   refreshRooms();
   refreshMe();
@@ -440,11 +504,17 @@ export async function doLogin(server: string, user: string, password: string): P
 }
 
 /** Create an account and sign in. The display name can be set right away. */
-export async function doRegister(server: string, username: string, password: string, shownName: string): Promise<void> {
+export async function doRegister(
+  server: string,
+  username: string,
+  password: string,
+  shownName: string,
+  invite: string,
+): Promise<void> {
   app.set({ busy: t("busy.registering"), error: "" });
   let s: session.Session;
   try {
-    s = await session.register(server, username, password);
+    s = await session.register(server, username, password, invite);
   } catch (e) {
     app.set({ busy: "", phase: "login", error: humanError(e) });
     return;
@@ -537,6 +607,9 @@ function wire(c: MatrixClient): void {
   c.on(RoomEvent.Timeline, (event: MatrixEvent, room: Room | undefined) => {
     if (!room) return;
     if (room.roomId === app.get().activeChannel) {
+      if (!chatAtBottom && !app.get().unreadFrom && event.getType() === "m.room.message" && event.getSender() !== c.getUserId()) {
+        app.set({ unreadFrom: event.getId() ?? null });
+      }
       scheduleMessages();
       readActive();
     }
@@ -571,6 +644,8 @@ function wire(c: MatrixClient): void {
       profileCache.clear();
       scheduleMessages();
       bump();
+    } else if (type === msg.PINNED) {
+      scheduleMessages();
     } else if (type === "m.room.power_levels") {
       // a role was granted or revoked: buttons, badges and cards must see it without a restart
       profileCache.clear();
@@ -582,9 +657,9 @@ function wire(c: MatrixClient): void {
   c.on(ClientEvent.Room, () => scheduleRooms());
   // own read receipts from another device clear the badges here too
   c.on(RoomEvent.Receipt, () => scheduleRooms());
-  c.on(RoomEvent.MyMembership, () => scheduleRooms());
+  c.on(RoomEvent.MyMembership, (room, membership, prev) => onMyMembership(room, membership, prev));
   c.on(ClientEvent.AccountData, (ev) => {
-    if (ev.getType() === "m.direct") refreshDirects();
+    if (ev.getType() === "m.direct" || people.isHiddenInvitesEvent(ev.getType())) refreshDirects();
   });
   // presence arrives as a separate stream of events
   c.on(UserEvent.Presence, () => bump());
@@ -632,10 +707,20 @@ export function refreshRooms(): void {
   const state = app.get();
 
   let activeServer = state.activeServer;
-  if (activeServer && !servers.some((g) => g.spaceId === activeServer)) activeServer = null;
+  const lost = !!activeServer && !servers.some((g) => g.spaceId === activeServer);
+  if (lost) activeServer = null;
   if (!activeServer && servers.length) activeServer = servers[0].spaceId;
 
   app.set({ servers, loose, activeServer });
+  // the server is gone (left, kicked, banned): nothing of it may stay on screen
+  if (lost && state.view === "server") {
+    app.set({ activeChannel: null, messages: [], callView: false, serverSettingsOpen: false });
+    if (!activeServer) app.set({ view: "direct" });
+    restoreChannel();
+  }
+  // a call in a room we are no longer in ends here, whoever took us out
+  const vc = state.voiceChannel;
+  if (vc && client.getRoom(vc) && client.getRoom(vc)?.getMyMembership() !== "join") void leaveVoice();
   refreshDirects();
   refreshOccupants();
 }
@@ -643,7 +728,8 @@ export function refreshRooms(): void {
 export function refreshDirects(): void {
   if (!client) return;
   const directs = people.listDirects(client);
-  const invites = people.listInvites(client);
+  // channel invites of own servers are joined by themselves, not listed
+  const invites = people.listInvites(client).filter((inv) => inv.space || !parentSpace(inv.roomId) || !joinChannelInvite(inv.roomId));
   app.set({ directs, invites });
   setTrayUnread(unreadForTray());
 }
@@ -696,12 +782,32 @@ export async function acceptInvite(invite: people.Invite): Promise<void> {
   }
 }
 
-export async function declineInvite(roomId: string): Promise<void> {
+/**
+ * Remove a direct chat from the list: leave it, forget it, drop it from
+ * m.direct. The other person keeps the history; writing again starts a new chat.
+ */
+export async function deleteDirect(roomId: string): Promise<void> {
   if (!client) return;
+  if (app.get().voiceChannel === roomId) await leaveVoice();
   try {
-    await people.declineInvite(client, roomId);
+    await people.deleteDirect(client, roomId);
   } catch (e) {
     app.set({ error: humanError(e) });
+    return;
+  }
+  if (app.get().activeChannel === roomId) app.set({ activeChannel: null, messages: [] });
+  refreshDirects();
+}
+
+export async function declineInvite(invite: people.Invite): Promise<void> {
+  if (!client) return;
+  try {
+    await people.declineInvite(client, invite.roomId);
+  } catch (e) {
+    // the server could not decline it: hide it and try again on a later start
+    const error = humanError(e);
+    await people.hideInvite(client, invite).catch(() => undefined);
+    app.set({ error: t("invite.err.stuck", { error }) });
   }
   refreshRooms();
 }
@@ -769,9 +875,20 @@ export function refreshOccupants(): void {
   app.set({ occupants });
 }
 
-function replyPreview(room: Room, eventId: string): ReplyPreview | null {
+function replyPreview(room: Room, eventId: string, quoted?: unknown): ReplyPreview | null {
   if (!eventId) return null;
   const target = room.findEventById(eventId);
+  // a quoted piece is known from the reply itself, even if the message is not loaded
+  if (typeof quoted === "string" && quoted.trim()) {
+    const sender = target?.getSender() ?? "";
+    return {
+      eventId,
+      sender,
+      senderName: sender ? (people.isDeleted(sender) ? t("people.deleted") : room.getMember(sender)?.name || sender) : "",
+      body: quoted.slice(0, 500),
+      quote: true,
+    };
+  }
   if (!target) {
     return { eventId, sender: "", senderName: "", body: t("chat.replyNotLoaded") };
   }
@@ -780,7 +897,7 @@ function replyPreview(room: Room, eventId: string): ReplyPreview | null {
   return {
     eventId,
     sender,
-    senderName: room.getMember(sender)?.name || sender,
+    senderName: people.isDeleted(sender) ? t("people.deleted") : room.getMember(sender)?.name || sender,
     body: msg.stripReplyFallback(String(content.body ?? "")).slice(0, 180),
   };
 }
@@ -803,19 +920,28 @@ function scheduleMessages(): void {
 function refreshMessages(): void {
   const roomId = app.get().activeChannel;
   if (!client || !roomId) {
-    app.set({ messages: [] });
+    app.set({ messages: [], history: "more" });
     return;
   }
   const room = client.getRoom(roomId);
   if (!room) {
-    app.set({ messages: [] });
+    app.set({ messages: [], history: "more" });
     return;
   }
   const self = client.getUserId() ?? "";
   const messages: Message[] = [];
   const checks = msg.collectChecks(room);
+  const events = room.getLiveTimeline().getEvents();
+  const resolve = mentionResolver(roomId);
+  const pins = msg.pinnedIds(room);
+  const pinSet = new Set(pins);
+  // names take the color of their role on the server, as in Discord
+  const home = serverOf(roomId);
+  const space = home ? client.getRoom(home.spaceId) : null;
+  const roles = home ? admin.serverRoles(client, home.spaceId) : [];
+  const colorOf = (userId: string) => (space ? (admin.roleAt(roles, admin.levelOf(space, userId))?.color ?? "") : "");
 
-  for (const ev of room.getLiveTimeline().getEvents()) {
+  for (const ev of events) {
     const type = ev.getType();
     const locked = type === "m.room.encrypted";
     if (type !== "m.room.message" && !locked) continue;
@@ -829,22 +955,25 @@ function refreshMessages(): void {
     const sender = ev.getSender() ?? "";
     const member = room.getMember(sender);
     const media = locked ? null : mediaOf(content);
+    // people who left may have deleted the account: checked in the background
+    if (!member || member.membership === "leave") people.checkDeleted(client, sender);
+    const gone = people.isDeleted(sender);
 
     messages.push({
       id: ev.getId() ?? String(ev.getTs()),
       sender,
-      senderName: member?.name || sender,
-      avatar: member?.getMxcAvatarUrl() || "",
+      senderName: gone ? t("people.deleted") : member?.name || sender,
+      avatar: gone ? "" : member?.getMxcAvatarUrl() || "",
       body: locked
         ? t("chat.locked")
         : media
           ? media.caption || media.name
-          : msg.stripReplyFallback(String(content.body ?? "")),
+          : msg.mentionsFromHtml(msg.stripReplyFallback(String(content.body ?? "")), content, resolve),
       ts: ev.getTs(),
       own: sender === self,
       media,
       edited,
-      reply: replyPreview(room, msg.replyTargetId(ev.getContent())),
+      reply: replyPreview(room, msg.replyTargetId(ev.getContent()), ev.getContent()[msg.QUOTE_KEY]),
       reactions: msg.reactionsFor(room, ev.getId() ?? "", self),
       canEdit: !locked && !ev.status && msg.isEditable(ev, self),
       canDelete: !ev.status && msg.mayRedact(room, ev, self),
@@ -852,10 +981,174 @@ function refreshMessages(): void {
       failReason: ev.status === "not_sent" ? String(ev.error?.message ?? "") : "",
       locked,
       checks: checks.get(ev.getId() ?? "") ?? {},
+      deleted: gone,
+      mentionsMe: sender !== self && !locked && pingsMe(ev, content, self),
+      previews: locked ? [] : previewsOf(content),
+      pinned: pinSet.has(ev.getId() ?? ""),
+      color: colorOf(sender),
     });
   }
 
-  app.set({ messages: messages.slice(-400) });
+  app.set({ messages: messages.slice(-400), history: historyOf(room, events), pins });
+}
+
+/* ------------------------------------------------------------ link previews */
+
+/**
+ * Link previews travel inside the message (MSC4095, as Beeper does): the
+ * sender's app fetches the page once and uploads the picture, so readers
+ * never contact the linked site and all see the same card. The sender can
+ * remove a card later, which is an edit of the message.
+ */
+const PREVIEWS = "com.beeper.linkpreviews";
+const EMBED = `${BRAND.appId}.embed`;
+const MAX_PREVIEWS = 3;
+const PREVIEW_WAIT_MS = 4000;
+
+/** Links of a text that get a card: bare links outside code; <link> in angle brackets opts out, as in Discord. */
+export function previewUrls(text: string): string[] {
+  const plain = text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`[^`\n]*`/g, " ")
+    .replace(/<https?:\/\/[^\s>]+>/gi, " ");
+  const out: string[] = [];
+  for (const m of plain.matchAll(/https?:\/\/[^\s<>"'`]+/gi)) {
+    const url = m[0].replace(/[.,:;!?)\]}'"»]+$/, "");
+    if (url.length > 10 && !out.includes(url)) out.push(url);
+    if (out.length >= MAX_PREVIEWS) break;
+  }
+  return out;
+}
+
+const rawPreviews = new Map<string, Promise<RawPreview | null>>();
+const uploadedPreviews = new Map<string, Promise<Record<string, unknown> | null>>();
+
+function rawPreview(url: string): Promise<RawPreview | null> {
+  let p = rawPreviews.get(url);
+  if (!p) {
+    p = fetchLinkPreview(url);
+    rawPreviews.set(url, p);
+    if (rawPreviews.size > 200) rawPreviews.delete(rawPreviews.keys().next().value as string);
+  }
+  return p;
+}
+
+/** Start fetching the previews of a text being typed, so sending does not wait for them. */
+export function prefetchPreviews(text: string): void {
+  for (const url of previewUrls(text)) void rawPreview(url);
+}
+
+/** One preview as message content, the picture uploaded (encrypted in encrypted rooms). */
+function previewEntry(url: string, encrypted: boolean): Promise<Record<string, unknown> | null> {
+  const key = `${encrypted ? "e" : "p"}|${url}`;
+  let p = uploadedPreviews.get(key);
+  if (p) return p;
+  p = (async () => {
+    const c = client;
+    const raw = await rawPreview(url);
+    if (!c || !raw) return null;
+    const entry: Record<string, unknown> = { matched_url: url, "og:url": raw.url };
+    if (raw.title) entry["og:title"] = raw.title;
+    if (raw.description) entry["og:description"] = raw.description;
+    if (raw.site) entry["og:site_name"] = raw.site;
+    if (raw.youtube) entry[EMBED] = `youtube:${raw.youtube}`;
+    if (raw.image) {
+      try {
+        const blob = new Blob([raw.image.data as Uint8Array<ArrayBuffer>], { type: raw.image.mime });
+        const dims = await imageSize(new File([blob], "preview", { type: raw.image.mime }));
+        if (encrypted) {
+          const { data, file } = await encryptAttachment(await blob.arrayBuffer());
+          const up = await c.uploadContent(new Blob([data]), { type: "application/octet-stream", includeFilename: false });
+          entry["beeper:image:encryption"] = { ...file, url: up.content_uri };
+        } else {
+          const up = await c.uploadContent(blob, { type: raw.image.mime, includeFilename: false });
+          entry["og:image"] = up.content_uri;
+        }
+        entry["matrix:image:size"] = raw.image.data.byteLength;
+        entry["og:image:type"] = raw.image.mime;
+        if (dims) {
+          entry["og:image:width"] = dims.w;
+          entry["og:image:height"] = dims.h;
+        }
+      } catch {
+        // the card goes without the picture
+      }
+    }
+    return entry;
+  })();
+  uploadedPreviews.set(key, p);
+  return p;
+}
+
+/** Previews for these links, or none if they take too long: the message is not held up for them. */
+async function buildPreviews(roomId: string, urls: string[]): Promise<Record<string, unknown>[]> {
+  if (!urls.length || !client) return [];
+  const encrypted = !!client.getRoom(roomId)?.hasEncryptionStateEvent();
+  const all = Promise.all(urls.map((u) => previewEntry(u, encrypted).catch(() => null)));
+  const done = await Promise.race([all, new Promise<null>((r) => window.setTimeout(() => r(null), PREVIEW_WAIT_MS))]);
+  return (done ?? []).filter((e): e is Record<string, unknown> => !!e);
+}
+
+function previewsOf(content: Record<string, any>): LinkPreview[] {
+  const list = content[PREVIEWS];
+  if (!Array.isArray(list)) return [];
+  const out: LinkPreview[] = [];
+  for (const p of list.slice(0, MAX_PREVIEWS)) {
+    if (!p || typeof p !== "object") continue;
+    const url = String(p.matched_url ?? p["og:url"] ?? "");
+    if (!/^https?:\/\//i.test(url)) continue;
+    const enc = p["beeper:image:encryption"];
+    const file = enc && typeof enc.url === "string" ? (enc as EncryptedFile) : null;
+    const mxc = String(file?.url ?? p["og:image"] ?? "");
+    const embed = String(p[EMBED] ?? "");
+    out.push({
+      url,
+      title: String(p["og:title"] ?? ""),
+      description: String(p["og:description"] ?? ""),
+      site: String(p["og:site_name"] ?? ""),
+      image: mxc.startsWith("mxc://")
+        ? {
+            mxc,
+            file,
+            w: Number(p["og:image:width"] ?? 0),
+            h: Number(p["og:image:height"] ?? 0),
+            mime: String(p["og:image:type"] ?? "image/jpeg"),
+          }
+        : null,
+      youtube: embed.startsWith("youtube:") ? embed.slice(8) : "",
+    });
+  }
+  return out;
+}
+
+/** Remove one card from an own message: an edit with the same text and the card gone. */
+export async function removePreview(eventId: string, url: string): Promise<void> {
+  const roomId = app.get().activeChannel;
+  const ev = roomId ? client?.getRoom(roomId)?.findEventById(eventId) : null;
+  if (!client || !roomId || !ev) return;
+  const { content } = msg.currentContent(ev);
+  const list = Array.isArray(content[PREVIEWS]) ? (content[PREVIEWS] as Record<string, any>[]) : [];
+  const keep = list.filter((p) => String(p?.matched_url ?? p?.["og:url"] ?? "") !== url);
+  const body = msg.stripReplyFallback(String(content.body ?? ""));
+  try {
+    await msg.editText(client, roomId, eventId, body, mentionResolver(roomId), { [PREVIEWS]: keep });
+  } catch (e) {
+    app.set({ error: humanError(e) });
+  }
+}
+
+/** The server's push rules decide what pings; m.mentions is checked too for clients that lag behind. */
+function pingsMe(ev: MatrixEvent, content: Record<string, any>, self: string): boolean {
+  const ids = content["m.mentions"]?.user_ids;
+  if (Array.isArray(ids) && ids.includes(self)) return true;
+  return !!client?.getPushActionsForEvent(ev)?.tweaks?.highlight;
+}
+
+function historyOf(room: Room, events: MatrixEvent[]): AppState["history"] {
+  const sawCreate = events[0]?.getType() === "m.room.create";
+  if (!sawCreate && room.oldState.paginationToken !== null) return "more";
+  const visibility = room.currentState.getStateEvents("m.room.history_visibility", "")?.getContent()?.history_visibility;
+  return !sawCreate && (visibility === "joined" || visibility === "invited") ? "hidden" : "start";
 }
 
 /**
@@ -1003,6 +1296,22 @@ export function showDirects(): void {
   restoreChannel();
 }
 
+/** The first message from someone else after the own read receipt, or null when all is read. */
+function firstUnread(roomId: string): string | null {
+  const room = client?.getRoom(roomId);
+  const self = client?.getUserId() ?? "";
+  if (!room) return null;
+  const upTo = room.getEventReadUpTo(self);
+  if (!upTo) return null;
+  const events = room.getLiveTimeline().getEvents();
+  const at = events.findIndex((e) => e.getId() === upTo);
+  if (at === -1) return null;
+  for (const e of events.slice(at + 1)) {
+    if (e.getType() === "m.room.message" && e.getSender() !== self) return e.getId() ?? null;
+  }
+  return null;
+}
+
 /** Open the chat of a channel without touching voice. Voice channels have chats too. */
 export async function openChat(roomId: string, joined = true): Promise<void> {
   app.set({
@@ -1018,6 +1327,8 @@ export async function openChat(roomId: string, joined = true): Promise<void> {
     highlight: null,
   });
   remember(roomId, false);
+  chatAtBottom = true;
+  app.set({ unreadFrom: client ? firstUnread(roomId) : null, pinsOpen: false });
   if (!joined && client) {
     app.set({ busy: t("busy.joiningChannel") });
     try {
@@ -1081,23 +1392,37 @@ export async function openDirectWith(userId: string): Promise<void> {
 export async function send(text: string): Promise<void> {
   const state = app.get();
   const roomId = state.activeChannel;
-  if (!client || !roomId || !text.trim()) return;
+  // an attachment's caption may be cleared, so an empty edit is allowed
+  if (!client || !roomId || (!text.trim() && !state.editing?.media)) return;
   typingNow(false);
 
   if (state.editing) {
     const target = state.editing.eventId;
     app.set({ editing: null });
-    await msg.editText(client, roomId, target, text);
+    const ev = client.getRoom(roomId)?.findEventById(target);
+    const current = ev ? msg.currentContent(ev).content : null;
+    if (current && msg.isMediaContent(current)) await msg.editCaption(client, roomId, target, current, text);
+    else if (text.trim()) {
+      const before = previewUrls(msg.stripReplyFallback(String(current?.body ?? "")));
+      const now = previewUrls(text);
+      const old = Array.isArray(current?.[PREVIEWS]) ? (current?.[PREVIEWS] as Record<string, any>[]) : [];
+      const kept = old.filter((p) => now.includes(String(p?.matched_url ?? "")));
+      const added = await buildPreviews(roomId, now.filter((u) => !before.includes(u)));
+      await msg.editText(client, roomId, target, text, mentionResolver(roomId), { [PREVIEWS]: [...kept, ...added] });
+    }
     return;
   }
 
   const reply = state.replyTo;
   app.set({ replyTo: null });
+  const previews = await buildPreviews(roomId, previewUrls(text));
   await msg.sendText(
     client,
     roomId,
     text,
-    reply ? { eventId: reply.eventId, sender: reply.sender, senderName: reply.senderName, body: reply.body } : null,
+    reply ? { eventId: reply.eventId, sender: reply.sender, senderName: reply.senderName, body: reply.body, quote: reply.quote } : null,
+    mentionResolver(roomId),
+    previews.length ? { [PREVIEWS]: previews } : {},
   );
 }
 
@@ -1220,7 +1545,7 @@ export async function sendMessage(text: string, files: File[]): Promise<void> {
   const caption = files.length === 1 ? text.trim() : "";
   if (text.trim() && !caption) {
     try {
-      await msg.sendText(client, roomId, text, reply);
+      await msg.sendText(client, roomId, text, reply, mentionResolver(roomId));
     } catch (e) {
       app.set({ error: humanError(e) });
     }
@@ -1233,7 +1558,7 @@ export async function sendMessage(text: string, files: File[]): Promise<void> {
 
 /** The last own text message: Up Arrow in an empty field edits it. */
 export function editLastOwn(): boolean {
-  const mine = [...app.get().messages].reverse().find((m) => m.own && m.canEdit);
+  const mine = [...app.get().messages].reverse().find((m) => m.own && m.canEdit && !m.media);
   if (!mine) return false;
   startEdit(mine);
   return true;
@@ -1269,8 +1594,70 @@ export function startReply(m: Message): void {
   });
 }
 
+/** Reply to a piece of a message: the piece shows above the answer and leads to the message. */
+export function startQuote(m: Message, piece: string): void {
+  const body = piece.trim() || m.body;
+  app.set({
+    replyTo: { eventId: m.id, sender: m.sender, senderName: m.senderName, body: body.slice(0, 500), quote: true },
+    editing: null,
+    userMenu: null,
+  });
+}
+
+export function canPinHere(): boolean {
+  const room = client?.getRoom(app.get().activeChannel ?? "");
+  return !!client && !!room && msg.canPin(room, client.getUserId() ?? "");
+}
+
+export async function togglePin(id: string): Promise<void> {
+  const roomId = app.get().activeChannel;
+  const room = roomId ? client?.getRoom(roomId) : null;
+  if (!client || !roomId || !room) return;
+  const list = msg.pinnedIds(room);
+  const next = list.includes(id) ? list.filter((x) => x !== id) : [...list, id];
+  try {
+    await msg.setPinned(client, roomId, next);
+  } catch (e) {
+    app.set({ error: humanError(e) });
+  }
+}
+
+export type PinnedItem = { id: string; sender: string; name: string; body: string; ts: number };
+
+/** Pinned messages of the open chat, newest pin first; fetched from the server if not loaded. */
+export async function pinnedMessages(): Promise<PinnedItem[]> {
+  const roomId = app.get().activeChannel;
+  const room = roomId ? client?.getRoom(roomId) : null;
+  if (!client || !roomId || !room) return [];
+  const c = client;
+  const out: PinnedItem[] = [];
+  for (const id of [...msg.pinnedIds(room)].reverse()) {
+    let sender = "";
+    let body = "";
+    let ts = 0;
+    const local = room.findEventById(id);
+    if (local) {
+      sender = local.getSender() ?? "";
+      body = String(msg.currentContent(local).content.body ?? "");
+      ts = local.getTs();
+    } else {
+      try {
+        const raw = (await c.fetchRoomEvent(roomId, id)) as { sender?: string; content?: { body?: string }; origin_server_ts?: number; type?: string };
+        sender = raw.sender ?? "";
+        body = raw.type === "m.room.encrypted" ? t("chat.locked") : String(raw.content?.body ?? "");
+        ts = raw.origin_server_ts ?? 0;
+      } catch {
+        body = t("pins.gone");
+      }
+    }
+    out.push({ id, sender, name: sender ? displayName(sender, roomId) : "", body: msg.stripReplyFallback(body), ts });
+  }
+  return out;
+}
+
 export function startEdit(m: Message): void {
-  app.set({ editing: { eventId: m.id, body: m.body }, replyTo: null, userMenu: null });
+  const media = !!m.media;
+  app.set({ editing: { eventId: m.id, body: media ? (m.media?.caption ?? "") : m.body, media }, replyTo: null, userMenu: null });
 }
 
 export function cancelCompose(): void {
@@ -1390,10 +1777,22 @@ export function typingNow(active: boolean): void {
 
 let reading = false;
 
+/**
+ * Whether the open chat shows its newest messages. Scrolled up, new messages
+ * are not read yet: the receipt waits until the user comes back down.
+ */
+let chatAtBottom = true;
+
+export function setChatAtBottom(at: boolean): void {
+  if (at === chatAtBottom) return;
+  chatAtBottom = at;
+  if (at) readActive();
+}
+
 function readActive(): void {
   const roomId = app.get().activeChannel;
   const room = roomId ? client?.getRoom(roomId) : null;
-  if (!client || !room || reading || document.hidden) return;
+  if (!client || !room || reading || document.hidden || !chatAtBottom) return;
   reading = true;
   void msg
     .markRead(client, room)
@@ -1519,11 +1918,29 @@ export const serverAdmin = {
     String(client?.getRoom(roomId)?.currentState.getStateEvents("m.room.topic", "")?.getContent()?.topic ?? ""),
 
   setRole: (spaceId: string, userId: string, level: number) =>
-    adminRun(t("busy.role"), t("admin.what.role"), () => admin.setRole(need(), spaceId, userId, level)),
+    adminRun(t("busy.role"), t("admin.what.role"), async () => {
+      const r = await admin.setRole(need(), spaceId, userId, level);
+      // hidden channels follow the new role: invited to new ones, removed from lost ones
+      const s = await admin.syncServerAccess(need(), spaceId);
+      return { ok: r.ok + s.ok, failed: [...r.failed, ...s.failed] };
+    }),
+  roles: (spaceId: string): admin.RoleDef[] => (client ? admin.serverRoles(client, spaceId) : []),
+  roleAt: (roles: admin.RoleDef[], level: number) => admin.roleAt(roles, level),
+  saveRoles: (spaceId: string, roles: admin.RoleDef[]) =>
+    adminRun(t("busy.roles"), "", () => admin.saveRoles(need(), spaceId, roles)),
+  channelAccess: (roomId: string): admin.ChannelAccess => (client ? admin.channelAccess(client, roomId) : { view: 0, send: 0, voice: 0 }),
+  setChannelAccess: (spaceId: string, roomId: string, next: admin.ChannelAccess) =>
+    adminRun(t("busy.channelPerms"), t("admin.what.access"), () => admin.setChannelAccess(need(), spaceId, roomId, next)),
   kick: (spaceId: string, userId: string, reason: string) =>
-    adminRun(t("busy.kick"), t("admin.what.kick"), () => admin.kick(need(), spaceId, userId, reason)),
+    adminRun(t("busy.kick"), t("admin.what.kick"), async () => {
+      await dropFromCalls(spaceId, userId);
+      return admin.kick(need(), spaceId, userId, reason);
+    }),
   ban: (spaceId: string, userId: string, reason: string) =>
-    adminRun(t("busy.ban"), t("admin.what.ban"), () => admin.ban(need(), spaceId, userId, reason)),
+    adminRun(t("busy.ban"), t("admin.what.ban"), async () => {
+      await dropFromCalls(spaceId, userId);
+      return admin.ban(need(), spaceId, userId, reason);
+    }),
   unban: (spaceId: string, userId: string) =>
     adminRun(t("busy.unban"), t("admin.what.unban"), () => admin.unban(need(), spaceId, userId)),
   writePerms: (spaceId: string, perms: admin.Perms) =>
@@ -1547,6 +1964,107 @@ export const serverAdmin = {
       app.set({ channelEdit: null });
     }),
 };
+
+/**
+ * Before a kick or ban: out of every voice channel of the server. The own call
+ * tells the person's app to leave at once; memberships in other channels are
+ * cleared so nobody sees a ghost. The app of the banned person also leaves on
+ * its own when it sees the ban.
+ */
+async function dropFromCalls(spaceId: string, userId: string): Promise<void> {
+  const c = client;
+  if (!c) return;
+  const server = app.get().servers.find((g) => g.spaceId === spaceId);
+  if (server?.channels.some((ch) => ch.roomId === app.get().voiceChannel)) {
+    for (const identity of voice.presentIdentities()) {
+      if (identity.startsWith(`${userId}:`)) voice.kick(identity);
+    }
+  }
+  for (const ch of server?.channels ?? []) {
+    if (ch.kind !== "voice") continue;
+    const room = c.getRoom(ch.roomId);
+    if (!room) continue;
+    for (const m of rtc.memberships(room)) {
+      if (m.sender === userId) await rtc.clearMembership(c, room.roomId, m).catch(() => undefined);
+    }
+  }
+}
+
+/**
+ * Own membership changed. A kick or ban from a server takes the whole server
+ * away: its channels are left here too, the call ends, and the reason is
+ * shown. Without this the channels the admin could not reach stayed behind
+ * as orphans.
+ */
+/** The joined server a room is a channel of, if any. */
+function parentSpace(roomId: string): string | null {
+  for (const room of client?.getRooms() ?? []) {
+    if (!room.isSpaceRoom() || room.getMyMembership() !== "join") continue;
+    const child = room.currentState.getStateEvents("m.space.child", roomId);
+    if (child?.getContent()?.via) return room.roomId;
+  }
+  return null;
+}
+
+/**
+ * An invite into a channel of a server we are on: a hidden channel opened to
+ * our role. It is joined at once instead of waiting under the home button.
+ */
+const joiningInvites = new Set<string>();
+
+function joinChannelInvite(roomId: string): boolean {
+  if (!client || !parentSpace(roomId)) return false;
+  if (joiningInvites.has(roomId)) return true;
+  joiningInvites.add(roomId);
+  void client
+    .joinRoom(roomId)
+    .then(() => refreshRooms())
+    .catch(() => undefined)
+    .finally(() => joiningInvites.delete(roomId));
+  return true;
+}
+
+function onMyMembership(room: Room, membership: string, prev: string | undefined): void {
+  scheduleRooms();
+  if (membership === "invite" && joinChannelInvite(room.roomId)) return;
+  const c = client;
+  if (!c || prev !== "join" || (membership !== "leave" && membership !== "ban")) return;
+  const self = c.getUserId() ?? "";
+  const ev = room.getMember(self)?.events.member;
+  const by = ev?.getSender() ?? self;
+  const reason = String(ev?.getContent()?.reason ?? "");
+
+  if (app.get().voiceChannel === room.roomId) void leaveVoice();
+  if (by === self) return;
+
+  if (room.isSpaceRoom()) {
+    const children = room.currentState
+      .getStateEvents("m.space.child")
+      .map((e) => e.getStateKey() ?? "")
+      .filter((id) => id && c.getRoom(id)?.getMyMembership() === "join");
+    if (children.includes(app.get().voiceChannel ?? "")) void leaveVoice();
+    void (async () => {
+      for (const id of children) await c.leave(id).catch(() => undefined);
+      refreshRooms();
+    })();
+    const text = membership === "ban" ? "server.bannedYou" : "server.kickedYou";
+    app.set({
+      error: t(text, { name: room.name || room.roomId, who: displayName(by, room.roomId) }) + (reason ? t("server.reason", { reason }) : ""),
+    });
+    if (app.get().activeServer === room.roomId) {
+      const next = app.get().servers.find((g) => g.spaceId !== room.roomId);
+      app.set({ activeServer: null, activeChannel: null, messages: [], callView: false, serverSettingsOpen: false });
+      if (next) selectServer(next.spaceId);
+      else showDirects();
+    }
+    return;
+  }
+
+  if (app.get().activeChannel === room.roomId) {
+    app.set({ activeChannel: null, messages: [], callView: false });
+    restoreChannel();
+  }
+}
 
 /* ------------------------------------------------------ own channel list */
 
@@ -1581,6 +2099,90 @@ export async function hideChannel(roomId: string): Promise<boolean> {
     refreshRooms();
   }
   return true;
+}
+
+/* ---------------------------------------------------------- leave a server */
+
+export type LeaveInfo = {
+  /** Nobody else on the server can manage it after this user leaves. */
+  lastAdmin: boolean;
+  /** Nobody else is on the server at all. */
+  alone: boolean;
+};
+
+export function leaveInfo(spaceId: string): LeaveInfo {
+  const space = client?.getRoom(spaceId);
+  const self = me();
+  if (!space) return { lastAdmin: false, alone: false };
+  const others = space.getJoinedMembers().filter((m) => m.userId !== self);
+  return {
+    lastAdmin:
+      admin.levelOf(space, self) >= admin.ADMIN_LEVEL && !others.some((m) => admin.levelOf(space, m.userId) >= admin.ADMIN_LEVEL),
+    alone: others.length === 0,
+  };
+}
+
+/**
+ * Leave a server: every joined channel, then the server itself. It can be
+ * joined again by its address or a new invite.
+ */
+export async function leaveServer(spaceId: string): Promise<boolean> {
+  if (!client) return false;
+  const c = client;
+  app.set({ busy: t("busy.leavingServer"), error: "", leaveServerAsk: null });
+  const rooms = admin.serverRooms(c, spaceId);
+  if (rooms.some((r) => r.roomId === app.get().voiceChannel)) await leaveVoice();
+
+  const failed: string[] = [];
+  for (const room of rooms) {
+    if (room.roomId === spaceId) continue;
+    try {
+      await c.leave(room.roomId);
+    } catch {
+      failed.push(room.name || room.roomId);
+    }
+  }
+  try {
+    await c.leave(spaceId);
+  } catch (e) {
+    app.set({ busy: "", error: humanError(e) });
+    refreshRooms();
+    return false;
+  }
+
+  refreshRooms();
+  app.set({ busy: "", serverSettingsOpen: false, error: failed.length ? t("server.leave.partial", { names: failed.join(", ") }) : "" });
+  if (app.get().activeServer === spaceId) {
+    const next = app.get().servers.find((g) => g.spaceId !== spaceId);
+    app.set({ activeServer: null, activeChannel: null, messages: [], callView: false });
+    if (next) selectServer(next.spaceId);
+    else showDirects();
+  }
+  return true;
+}
+
+/* ---------------------------------------------------------- delete account */
+
+/**
+ * Delete the account on the server, then clean up here like a sign-out. The
+ * server has already ended every session, so the sign-out request just fails.
+ */
+export async function deleteAccount(password: string, erase: boolean): Promise<void> {
+  if (!client) return;
+  await leaveVoice();
+  // the sync loop is about to see the token die: expected here, not "session expired"
+  endingSession = true;
+  try {
+    await people.deactivateAccount(client, password, erase);
+  } catch (e) {
+    endingSession = false;
+    throw e;
+  }
+  try {
+    await doLogout();
+  } finally {
+    endingSession = false;
+  }
 }
 
 /* ------------------------------------------------------- invite to a server */
@@ -1686,6 +2288,53 @@ export async function addServer(): Promise<void> {
   }
 }
 
+/** Address suggestion for a new server, e.g. the one the host already announces. */
+export function suggestServerAddress(): Promise<string> {
+  return client ? suggestAddress(client).catch(() => "") : Promise.resolve("");
+}
+
+/** Resolves once the sync brought the room in, or after the timeout. */
+function roomArrived(roomId: string, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const check = () => {
+      if (client?.getRoom(roomId) || Date.now() - started > ms) resolve();
+      else window.setTimeout(check, 200);
+    };
+    check();
+  });
+}
+
+/** Create an own server with a text and a voice channel and open it. */
+export async function newServer(name: string, address: string, open: boolean): Promise<boolean> {
+  if (!client || !name.trim()) return false;
+  const alias = address.trim().replace(/^#/, "").split(":")[0].toLowerCase();
+  if (alias && !/^[a-z0-9._=-]+$/.test(alias)) {
+    app.set({ error: t("address.err.latin") });
+    return false;
+  }
+  const full = `#${alias}:${client.getDomain() ?? ""}`;
+  app.set({ busy: t("busy.creatingServer"), error: "" });
+  try {
+    const spaceId = await createServer(client, {
+      name: name.trim(),
+      alias,
+      open,
+      textName: t("server.create.textChannel"),
+      voiceName: t("server.create.voiceChannel"),
+    });
+    await roomArrived(spaceId, 10_000);
+    refreshRooms();
+    app.set({ busy: "", addServerOpen: false, serverCard: null });
+    selectServer(spaceId);
+    return true;
+  } catch (e) {
+    const text = humanError(e);
+    app.set({ busy: "", error: /M_ROOM_IN_USE|in use/i.test(text) ? t("address.err.taken", { alias: full }) : text });
+    return false;
+  }
+}
+
 export async function addChannel(name: string, kind: "text" | "voice"): Promise<void> {
   const spaceId = app.get().activeServer;
   if (!client || !spaceId || !name.trim()) return;
@@ -1703,6 +2352,10 @@ export async function addChannel(name: string, kind: "text" | "voice"): Promise<
 
 export async function joinVoice(channel: Channel): Promise<void> {
   if (!client) return;
+  if (channel.voiceLocked) {
+    app.set({ error: t("voice.err.noAccess", { channel: channel.name }) });
+    return;
+  }
   if (app.get().voiceChannel === channel.roomId) return;
   await leaveVoice();
 
@@ -2053,6 +2706,8 @@ export function setStatusMode(mode: StatusMode): void {
 
 export type ProfileInfo = {
   userId: string;
+  /** The account was deleted. */
+  deleted: boolean;
   name: string;
   avatar: string;
   server: string;
@@ -2080,7 +2735,8 @@ export function roleOf(userId: string, roomId?: string | null): { level: number;
   const room = client?.getRoom(server?.spaceId ?? roomId ?? "") ?? null;
   const level = admin.levelOf(room, userId);
   const owner = !!server && admin.creatorOf(room) === userId && level >= 100;
-  return { level, name: admin.roleName(level, owner), owner };
+  const named = server && client && !owner ? admin.roleAt(admin.serverRoles(client, server.spaceId), level) : null;
+  return { level, name: named?.name ?? admin.roleName(level, owner), owner };
 }
 
 export function profileOf(userId: string, roomId?: string | null): ProfileInfo {
@@ -2097,10 +2753,12 @@ export function profileOf(userId: string, roomId?: string | null): ProfileInfo {
     }
   }
 
+  const gone = people.isDeleted(userId);
   return {
     userId,
-    name: bits.name,
-    avatar: bits.avatar,
+    deleted: gone,
+    name: gone ? t("people.deleted") : bits.name,
+    avatar: gone ? "" : bits.avatar,
     server: userId.split(":").slice(1).join(":"),
     power: role.level,
     role: role.name,
@@ -2111,12 +2769,12 @@ export function profileOf(userId: string, roomId?: string | null): ProfileInfo {
   };
 }
 
-export function openProfile(userId: string): void {
-  app.set({ profileUser: userId, userMenu: null });
+export function openProfile(userId: string, fromVoice = false): void {
+  app.set({ profileUser: userId, profileVoice: fromVoice, userMenu: null });
 }
 
-export function openUserMenu(userId: string, x: number, y: number, roomId: string | null = null): void {
-  app.set({ userMenu: { userId, roomId, x, y } });
+export function openUserMenu(userId: string, x: number, y: number, roomId: string | null = null, voice = false): void {
+  app.set({ userMenu: { userId, roomId, x, y, voice } });
 }
 
 export function closeUserMenu(): void {
@@ -2179,9 +2837,23 @@ export function renameSession(deviceId: string, name: string): Promise<void> {
 /* --------------------------------------------------------------- encryption */
 
 export function encryptionStatus(): Promise<crypto.CryptoStatus> {
-  return client
-    ? crypto.cryptoStatus(client)
-    : Promise.resolve({ enabled: false, verified: false, secretStorage: false, backup: false });
+  return client ? crypto.cryptoStatus(client) : Promise.resolve(crypto.NO_CRYPTO);
+}
+
+/** A new recovery key to show the user. Nothing changes on the account yet. */
+export function newRecoveryKey(): Promise<GeneratedSecretStorageKey> {
+  if (!client) return Promise.reject(new Error(t("crypto.err.noCrypto")));
+  return crypto.newRecoveryKey(client);
+}
+
+/**
+ * Put the shown recovery key in place, or with `reset` start encryption over.
+ * Throws NeedPassword when the server wants the account password.
+ */
+export async function applyRecoveryKey(key: GeneratedSecretStorageKey, password: string, reset: boolean): Promise<void> {
+  if (!client) return;
+  await crypto.setupRecovery(client, key, password, reset);
+  scheduleMessages();
 }
 
 /** Verify this sign-in with the recovery key. Returns the number of restored message keys. */
@@ -2221,11 +2893,19 @@ export async function loadMore(): Promise<boolean> {
   if (!room) return false;
 
   loading = true;
+  const firstBefore = app.get().messages[0]?.id ?? "";
   try {
-    const before = room.getLiveTimeline().getEvents().length;
-    await client.scrollback(room, 40);
+    // voice channels are full of call state: a page may hold no message at all
+    for (let i = 0; i < 6 && room.oldState.paginationToken !== null; i += 1) {
+      const count = room.getLiveTimeline().getEvents().length;
+      await client.scrollback(room, 50);
+      if (app.get().activeChannel !== roomId) return false;
+      refreshMessages();
+      if ((app.get().messages[0]?.id ?? "") !== firstBefore) break;
+      if (room.getLiveTimeline().getEvents().length === count) break;
+    }
     refreshMessages();
-    return room.getLiveTimeline().getEvents().length > before;
+    return (app.get().messages[0]?.id ?? "") !== firstBefore;
   } catch {
     return false;
   } finally {
@@ -2299,7 +2979,7 @@ function notify(event: MatrixEvent, room: Room): void {
     });
     n.onclick = () => {
       showWindow();
-      jumpToRoom(room.roomId);
+      void jumpToRoom(room.roomId).then(() => (id ? jumpTo(id) : undefined));
       n.close();
     };
   } catch {
@@ -2308,7 +2988,7 @@ function notify(event: MatrixEvent, room: Room): void {
 }
 
 /** Open a chat wherever it is: in direct messages or on one of the servers. */
-export function jumpToRoom(roomId: string): void {
+export function jumpToRoom(roomId: string): Promise<void> {
   const s = app.get();
   if (s.directs.some((d) => d.roomId === roomId)) {
     app.set({ view: "direct" });
@@ -2316,7 +2996,85 @@ export function jumpToRoom(roomId: string): void {
     const home = s.servers.find((g) => g.channels.some((c) => c.roomId === roomId));
     if (home) app.set({ view: "server", activeServer: home.spaceId });
   }
-  void openChat(roomId);
+  return openChat(roomId);
+}
+
+/* ---------------------------------------------------------------- mentions */
+
+function localOf(userId: string): string {
+  return userId.slice(1).split(":")[0].toLowerCase();
+}
+
+/**
+ * Who an @mention in a room means. A full id is a person as is; a bare name
+ * matches the name part of the room's members (people who left included),
+ * preferring those present and on the own server when names repeat.
+ */
+export function mentionResolver(roomId: string | null): MentionResolver {
+  return (id) => {
+    const c = client;
+    const room = roomId ? c?.getRoom(roomId) : null;
+    if (!c || !room) return null;
+    const raw = (id.startsWith("@") ? id.slice(1) : id).toLowerCase();
+    if (!raw) return null;
+    if (raw.includes(":")) {
+      const userId = `@${raw}`;
+      return { userId, name: people.isDeleted(userId) ? t("people.deleted") : displayName(userId, roomId) };
+    }
+    const found = room.getMembers().filter((m) => localOf(m.userId) === raw);
+    if (!found.length) return null;
+    const domain = c.getDomain() ?? "";
+    const pick =
+      found.find((m) => m.membership === "join" && m.userId.endsWith(`:${domain}`)) ??
+      found.find((m) => m.membership === "join") ??
+      found[0];
+    return { userId: pick.userId, name: displayName(pick.userId, roomId) };
+  };
+}
+
+export type MentionHit = { userId: string; name: string; avatar: string; insert: string };
+
+/**
+ * People to offer after "@" in the message field: the name part of the id
+ * first, then the display name or any word of it. The inserted text is
+ * "@name", or the full id when another member has the same name part.
+ */
+export function mentionCandidates(roomId: string | null, query: string): MentionHit[] {
+  const c = client;
+  const room = roomId ? c?.getRoom(roomId) : null;
+  if (!c || !room) return [];
+  const q = query.toLowerCase();
+  const self = c.getUserId();
+  const count = new Map<string, number>();
+  for (const m of room.getMembers()) count.set(localOf(m.userId), (count.get(localOf(m.userId)) ?? 0) + 1);
+  return room
+    .getJoinedMembers()
+    .filter((m) => m.userId !== self)
+    .map((m) => {
+      const local = localOf(m.userId);
+      const name = (m.name || local).toLowerCase();
+      const score = !q
+        ? 1
+        : local.startsWith(q)
+          ? 0
+          : name.startsWith(q)
+            ? 1
+            : name.split(/\s+/).some((w) => w.startsWith(q))
+              ? 2
+              : m.userId.toLowerCase().includes(q)
+                ? 3
+                : -1;
+      return { m, local, score };
+    })
+    .filter((x) => x.score >= 0)
+    .sort((a, b) => a.score - b.score || compareText(a.m.name, b.m.name))
+    .slice(0, 8)
+    .map(({ m, local }) => ({
+      userId: m.userId,
+      name: m.name || local,
+      avatar: m.getMxcAvatarUrl() || "",
+      insert: (count.get(local) ?? 0) > 1 ? m.userId : `@${local}`,
+    }));
 }
 
 /** Channel members for the right column, highest role first. */
@@ -2328,16 +3086,24 @@ export function channelMembers(roomId: string | null): Member[] {
   const self = c.getUserId();
   // role badges come from the server, so an admin stays an admin in every channel
   const space = client.getRoom(serverOf(roomId)?.spaceId ?? "");
+  const roles = space ? admin.serverRoles(c, space.roomId) : [];
   return room
     .getJoinedMembers()
-    .map((m) => ({
-      userId: m.userId,
-      name: m.name || m.userId,
-      avatar: m.getMxcAvatarUrl() || "",
-      power: space ? admin.levelOf(space, m.userId) : (m.powerLevel ?? 0),
-      owner: !!space && admin.creatorOf(space) === m.userId,
-      presence: m.userId === self ? app.get().myPresence : people.presenceOf(c, m.userId),
-    }))
+    .map((m) => {
+      const power = space ? admin.levelOf(space, m.userId) : (m.powerLevel ?? 0);
+      const owner = !!space && admin.creatorOf(space) === m.userId;
+      const role = admin.roleAt(roles, power);
+      return {
+        userId: m.userId,
+        name: m.name || m.userId,
+        avatar: m.getMxcAvatarUrl() || "",
+        power,
+        owner,
+        presence: m.userId === self ? app.get().myPresence : people.presenceOf(c, m.userId),
+        role: owner ? t("role.owner") : role && role.level > 0 ? role.name : "",
+        color: owner ? "" : (role?.color ?? ""),
+      };
+    })
     .sort((a, b) => b.power - a.power || compareText(a.name, b.name))
     .slice(0, 200);
 }

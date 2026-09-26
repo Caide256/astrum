@@ -3,9 +3,20 @@ import { ClientEvent, type MatrixClient, type MatrixEvent } from "matrix-js-sdk"
 
 import { BRAND } from "./brand.ts";
 import { LANGS, getLang, onLangChange, setLang, type Lang } from "./i18n/index.ts";
-import { CUSTOM, THEMES, getCustomTheme, getTheme, importCustomTheme, onThemeChange, setTheme, type ThemeDef } from "./theme.ts";
+import {
+  THEMES,
+  getCustomTheme,
+  getTheme,
+  importCustomTheme,
+  importOwnThemes,
+  isOwnTheme,
+  listOwnThemes,
+  onThemeChange,
+  setTheme,
+  type ThemeDef,
+} from "./theme.ts";
 import { setBlipVolumes } from "./voice/audio.ts";
-import { voice, type VoicePrefs } from "./voice/voice.ts";
+import { voice, type TileLook, type VoicePrefs } from "./voice/voice.ts";
 
 /**
  * Preferences that follow the account between installs and computers:
@@ -172,6 +183,114 @@ export function setSoundPrefs(patch: Partial<SoundPrefs>): void {
 
 /* ------------------------------------------------------------------- sync */
 
+/* -------------------------------------------------------------- call tile */
+
+const TILE_KEY = "app.tile";
+const TILE_DEFAULT: TileLook = { mode: "dominant", color: "#5865f2" };
+
+function cleanTile(raw: Partial<TileLook> | null | undefined): TileLook {
+  const mode = raw?.mode === "edge" || raw?.mode === "color" || raw?.mode === "dominant" ? raw.mode : TILE_DEFAULT.mode;
+  const color = typeof raw?.color === "string" && /^#[0-9a-f]{6}$/i.test(raw.color) ? raw.color.toLowerCase() : TILE_DEFAULT.color;
+  return { mode, color };
+}
+
+const tile = cell<TileLook>(cleanTile(loadJson<Partial<TileLook>>(TILE_KEY, TILE_DEFAULT)));
+// others see the tile background from the first call on
+voice.setTile(tile.get());
+
+export function useTileLook(): TileLook {
+  return tile.use();
+}
+
+export function setTileLook(patch: Partial<TileLook>): void {
+  const next = cleanTile({ ...tile.get(), ...patch });
+  saveJson(TILE_KEY, next);
+  tile.set(next);
+  voice.setTile(next);
+}
+
+/* ------------------------------------------------------------ chat look */
+
+/**
+ * How messages are laid out, apart from the theme: where messages stand
+ * (all on the left, own on the right, all on the right), how dense the
+ * timeline is and the text size.
+ */
+export type ChatLook = { align: "left" | "own-right" | "right"; density: "cozy" | "compact"; size: number };
+
+const LOOK_KEY = "app.chat-look";
+const LOOK_DEFAULT: ChatLook = { align: "left", density: "cozy", size: 14 };
+
+function cleanLook(raw: Partial<ChatLook> | null | undefined): ChatLook {
+  const align = raw?.align === "own-right" || raw?.align === "right" ? raw.align : "left";
+  const density = raw?.density === "compact" ? "compact" : "cozy";
+  const size = Math.max(12, Math.min(20, Math.round(Number(raw?.size ?? 14)) || 14));
+  return { align, density, size };
+}
+
+const look = cell<ChatLook>(cleanLook(loadJson<Partial<ChatLook>>(LOOK_KEY, LOOK_DEFAULT)));
+
+function applyLook(l: ChatLook): void {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  root.dataset.msgAlign = l.align;
+  root.dataset.msgDensity = l.density;
+  root.style.setProperty("--msg-size", `${l.size}px`);
+}
+applyLook(look.get());
+
+export function useChatLook(): ChatLook {
+  return look.use();
+}
+
+export function setChatLook(patch: Partial<ChatLook>): void {
+  const next = cleanLook({ ...look.get(), ...patch });
+  saveJson(LOOK_KEY, next);
+  look.set(next);
+  applyLook(next);
+}
+
+/* -------------------------------------------------------- own channel order */
+
+/**
+ * Everyone may arrange a server's channels for themselves by dragging them.
+ * Only the own copy changes; the order the server set stays for the others
+ * and comes back with "reset".
+ */
+export type ChannelOrders = Record<string, string[]>;
+
+const ORDER_KEY = "app.channel-order";
+
+function cleanOrders(raw: unknown): ChannelOrders {
+  const out: ChannelOrders = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const [space, list] of Object.entries(raw as Record<string, unknown>)) {
+    if (!space.startsWith("!") || !Array.isArray(list)) continue;
+    const ids = list.filter((x): x is string => typeof x === "string" && x.startsWith("!")).slice(0, 300);
+    if (ids.length) out[space] = ids;
+  }
+  return out;
+}
+
+const orders = cell<ChannelOrders>(cleanOrders(loadJson<ChannelOrders>(ORDER_KEY, {})));
+
+export function useChannelOrders(): ChannelOrders {
+  return orders.use();
+}
+
+export function hasOwnOrder(spaceId: string): boolean {
+  return !!orders.get()[spaceId];
+}
+
+/** The own order of a server's channels, or null to go back to the server's. */
+export function setChannelOrder(spaceId: string, ids: string[] | null): void {
+  const next = { ...orders.get() };
+  if (ids && ids.length) next[spaceId] = ids;
+  else delete next[spaceId];
+  saveJson(ORDER_KEY, next);
+  orders.set(next);
+}
+
 const TYPE = `${BRAND.appId}.prefs`;
 const SYNCED_KEY = "app.prefs-synced";
 const PUSH_DELAY_MS = 3000;
@@ -179,11 +298,16 @@ const PUSH_DELAY_MS = 3000;
 type Synced = VoicePrefs & {
   v: 1;
   theme: string;
+  /** Older versions read this one; newer ones use the list. */
   customTheme: ThemeDef;
+  customThemes: ThemeDef[];
   lang: Lang;
   notify: NotifyMode;
   mutes: Mutes;
   sound: SoundPrefs;
+  tile: TileLook;
+  look: ChatLook;
+  order: ChannelOrders;
   origin: string;
 };
 
@@ -198,10 +322,14 @@ function collect(origin: string): Synced {
     ...voice.exportPrefs(),
     theme: getTheme(),
     customTheme: getCustomTheme(),
+    customThemes: listOwnThemes(),
     lang: getLang(),
     notify: notify.get(),
     mutes: mutes.get(),
     sound: sound.get(),
+    tile: tile.get(),
+    look: look.get(),
+    order: orders.get(),
     origin,
   };
 }
@@ -215,11 +343,14 @@ function essence(p: Partial<Synced>): string {
     p.limiter,
     p.sounds,
     p.theme,
-    p.customTheme ?? null,
+    p.customThemes ?? p.customTheme ?? null,
     p.lang,
     p.notify,
     p.mutes ?? null,
     p.sound ?? null,
+    p.tile ?? null,
+    p.look ?? null,
+    p.order ?? null,
   ]);
 }
 
@@ -246,9 +377,27 @@ function apply(remote: Partial<Synced>, all: boolean): void {
   try {
     voice.importPrefs(remote, all);
     if (remote.mutes) saveMutes(cleanMutes(remote.mutes));
-    if (remote.customTheme && typeof remote.customTheme === "object") importCustomTheme(remote.customTheme);
+    if (Array.isArray(remote.customThemes)) importOwnThemes(remote.customThemes);
+    else if (remote.customTheme && typeof remote.customTheme === "object") importCustomTheme(remote.customTheme);
+    if (remote.order && typeof remote.order === "object") {
+      const next = cleanOrders(remote.order);
+      saveJson(ORDER_KEY, next);
+      orders.set(next);
+    }
+    if (remote.look && typeof remote.look === "object") {
+      const next = cleanLook(remote.look);
+      saveJson(LOOK_KEY, next);
+      look.set(next);
+      applyLook(next);
+    }
+    if (remote.tile && typeof remote.tile === "object") {
+      const next = cleanTile(remote.tile);
+      saveJson(TILE_KEY, next);
+      tile.set(next);
+      voice.setTile(next);
+    }
     if (!all) return;
-    if (remote.theme && (remote.theme === CUSTOM || THEMES.some((th) => th.id === remote.theme))) setTheme(remote.theme);
+    if (remote.theme && (isOwnTheme(remote.theme) || THEMES.some((th) => th.id === remote.theme))) setTheme(remote.theme);
     if (remote.lang && LANGS.some((l) => l.id === remote.lang)) setLang(remote.lang);
     if (remote.notify === "all" || remote.notify === "mentions" || remote.notify === "off") setNotifyMode(remote.notify);
     if (remote.sound) setSoundPrefs(remote.sound);
@@ -291,6 +440,9 @@ export function startPrefsSync(c: MatrixClient): void {
     notify.on(schedule),
     mutes.on(schedule),
     sound.on(schedule),
+    tile.on(schedule),
+    look.on(schedule),
+    orders.on(schedule),
   ];
 }
 

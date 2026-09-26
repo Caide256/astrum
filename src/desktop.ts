@@ -74,6 +74,17 @@ export type UpdateState = {
   canInstall: boolean;
 };
 
+/** A link preview from the shell: the page's tags and its picture as bytes. */
+export type RawPreview = {
+  url: string;
+  site: string;
+  title: string;
+  description: string;
+  color: string;
+  youtube: string;
+  image: { data: Uint8Array; mime: string } | null;
+};
+
 type Bridge = {
   getScreenSources: () => Promise<ScreenSource[]>;
   setScreenSource: (id: string, loopback: boolean) => Promise<void>;
@@ -89,6 +100,7 @@ type Bridge = {
   onScreenAudio?: (cb: (chunk: ArrayBuffer) => void) => () => void;
   onScreenAudioEnd?: (cb: (reason: string) => void) => () => void;
   copyText?: (text: string) => Promise<void>;
+  linkPreview?: (url: string) => Promise<RawPreview | null>;
   windowAction?: (action: "minimize" | "maximize" | "close" | "state") => Promise<WindowState | null>;
   onWindowState?: (cb: (s: WindowState) => void) => () => void;
   getUpdate?: () => Promise<UpdateState>;
@@ -246,6 +258,15 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** Preview of a link, fetched by the shell. A plain browser has no way around CORS and gets none. */
+export async function fetchLinkPreview(url: string): Promise<RawPreview | null> {
+  try {
+    return (await bridge?.linkPreview?.(url)) ?? null;
+  } catch {
+    return null;
   }
 }
 

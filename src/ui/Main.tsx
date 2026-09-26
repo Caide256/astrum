@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore, type DragEvent, type FormEvent, type MouseEvent, type UIEvent } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type DragEvent, type FormEvent, type MouseEvent, type UIEvent } from "react";
 
 import {
   acceptInvite,
@@ -13,16 +13,21 @@ import {
   closePlaceMenu,
   closeUserMenu,
   declineInvite,
+  deleteDirect,
   deleteMessage,
   discard,
   displayName,
   jumpTo,
+  leaveInfo,
+  leaveServer,
   leaveVoice,
   loadMore,
   markRoomRead,
   markServerRead,
   me,
   mediaUrl,
+  mentionResolver,
+  newServer,
   openChat,
   openDirectWith,
   openImage,
@@ -33,6 +38,7 @@ import {
   presenceOf,
   presenceWorks,
   previewServer,
+  removePreview,
   resend,
   roomMuted,
   runSearch,
@@ -41,24 +47,32 @@ import {
   searchPeopleNow,
   selectChannel,
   selectServer,
+  setChatAtBottom,
+  startQuote,
+  togglePin,
+  canPinHere,
+  pinnedMessages,
   showCall,
   showDirects,
   startEdit,
+  suggestServerAddress,
   startReply,
   toggleCamera,
   toggleCheck,
   toggleMembers,
   toggleReaction,
+  type LinkPreview,
+  type PinnedItem,
   type Media,
   type Message,
 } from "../app.ts";
 import { fmtDateTime, fmtTime, t, tn } from "../i18n/index.ts";
 import { encryptedMediaUrl } from "../media.ts";
 import type { UserHit } from "../matrix/people.ts";
-import { isMuted, setMuted, useMutes } from "../prefs.ts";
+import { hasOwnOrder, isMuted, setChannelOrder, setMuted, useChannelOrders, useMutes } from "../prefs.ts";
 import type { Channel, Server } from "../matrix/servers.ts";
 import { useStore } from "../store.ts";
-import { voice, type VoiceMember } from "../voice/voice.ts";
+import { voice, type NetSample, type NetStats, type VoiceMember } from "../voice/voice.ts";
 import { Avatar, initials } from "./Avatar.tsx";
 import { CallView } from "./CallView.tsx";
 import { CameraPicker } from "./CameraPicker.tsx";
@@ -66,7 +80,7 @@ import { Composer, attachFiles, humanSize } from "./Composer.tsx";
 import { useEscape, useLinger } from "./controls.tsx";
 import { EmojiPicker } from "./EmojiPicker.tsx";
 import { Lightbox } from "./Lightbox.tsx";
-import { Markdown } from "./Markdown.tsx";
+import { InlineMarkdown, Markdown } from "./Markdown.tsx";
 import { ScreenMenu, StreamMenu, StreamPeek, peekEnter, peekLeave } from "./Menus.tsx";
 import { MiniStream } from "./MiniStream.tsx";
 import { ProfileCard, UserMenu } from "./Profile.tsx";
@@ -78,9 +92,11 @@ import {
   IconBell,
   IconBellOff,
   IconChat,
+  IconCheck,
   IconChevron,
   IconClip,
   IconClose,
+  IconDoorOut,
   IconEdit,
   IconEye,
   IconGear,
@@ -89,15 +105,20 @@ import {
   IconHeadset,
   IconHeadsetOff,
   IconHome,
+  IconLock,
   IconMarkRead,
   IconMic,
   IconMicOff,
+  IconPin,
   IconPlay,
   IconPlus,
+  IconQuote,
+  IconRefresh,
   IconReply,
   IconScreen,
   IconScreenOff,
   IconSearch,
+  IconSignal,
   IconSmile,
   IconSpeaker,
   IconTrash,
@@ -108,11 +129,11 @@ import {
 } from "./icons.tsx";
 
 /** Right click on a person opens the user menu. */
-function menuHandler(userId: string, roomId: string | null = null) {
+function menuHandler(userId: string, roomId: string | null = null, voiceCtx = false) {
   return (e: MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    openUserMenu(userId, e.clientX, e.clientY, roomId);
+    openUserMenu(userId, e.clientX, e.clientY, roomId, voiceCtx);
   };
 }
 
@@ -142,8 +163,8 @@ function PersonRow({
     <div
       className={`occupant clickable ${flags?.speaking ? "speaking" : ""}`}
       title={live ? undefined : userId}
-      onClick={() => openProfile(userId)}
-      onContextMenu={menuHandler(userId, roomId)}
+      onClick={() => openProfile(userId, true)}
+      onContextMenu={menuHandler(userId, roomId, true)}
       // hovering someone who shares the screen shows a preview with a watch button
       onMouseEnter={(e) => {
         if (live && flags) peekEnter(flags.id, userId, e.currentTarget);
@@ -330,6 +351,7 @@ function DirectList() {
   const invites = useStore(app, (s) => s.invites);
   const activeChannel = useStore(app, (s) => s.activeChannel);
   const [term, setTerm] = useState("");
+  const [dropping, setDropping] = useState<string | null>(null);
 
   return (
     <div className="channel-scroll">
@@ -369,10 +391,10 @@ function DirectList() {
                       {inv.direct ? t("dm.invite.direct") : inv.space ? t("dm.invite.server") : t("dm.invite.channel")}
                     </div>
                   </div>
-                  <button className="icon live" title={t("common.accept")} onClick={() => void acceptInvite(inv)}>
-                    <IconPlus />
+                  <button className="invite-accept" title={t("common.accept")} onClick={() => void acceptInvite(inv)}>
+                    <IconCheck size={14} /> {t("common.accept")}
                   </button>
-                  <button className="ghost icon" title={t("common.decline")} onClick={() => void declineInvite(inv.roomId)}>
+                  <button className="ghost icon" title={t("common.decline")} onClick={() => void declineInvite(inv)}>
                     <IconClose />
                   </button>
                 </div>
@@ -382,19 +404,35 @@ function DirectList() {
 
           <div className="group-title">{t("dm.title")}</div>
           {directs.length === 0 && <div className="state pad">{t("dm.empty")}</div>}
-          {directs.map((d) => (
-            <button
-              key={d.roomId}
-              className={`channel direct ${d.roomId === activeChannel ? "active" : ""} ${isMuted("users", d.userId) ? "muted" : ""}`}
-              onClick={() => void openChat(d.roomId)}
-              onContextMenu={menuHandler(d.userId, d.roomId)}
-            >
-              <Avatar mxc={d.avatar} name={d.name} size={24} status={presenceOf(d.userId)} />
-              <span className="ellipsis">{d.name}</span>
-              {isMuted("users", d.userId) && <IconBellOff className="mute-mark" />}
-              {d.unread > 0 && <span className="count">{d.unread}</span>}
-            </button>
-          ))}
+          {directs.map((d) =>
+            dropping === d.roomId ? (
+              <div key={d.roomId} className="direct-drop">
+                <span className="ellipsis">{t("dm.deleteConfirm", { name: d.name })}</span>
+                <button className="danger small" onClick={() => (setDropping(null), void deleteDirect(d.roomId))}>
+                  {t("common.delete")}
+                </button>
+                <button className="ghost small" onClick={() => setDropping(null)}>
+                  {t("common.cancel")}
+                </button>
+              </div>
+            ) : (
+              <div key={d.roomId} className="channel-row direct-row">
+                <button
+                  className={`channel direct ${d.roomId === activeChannel ? "active" : ""} ${isMuted("users", d.userId) ? "muted" : ""}`}
+                  onClick={() => void openChat(d.roomId)}
+                  onContextMenu={menuHandler(d.userId, d.roomId)}
+                >
+                  <Avatar mxc={d.avatar} name={d.name} size={24} status={presenceOf(d.userId)} />
+                  <span className="ellipsis">{d.name}</span>
+                  {isMuted("users", d.userId) && <IconBellOff className="mute-mark" />}
+                  {d.unread > 0 && <span className="count">{d.unread}</span>}
+                </button>
+                <button className="ghost icon tiny" title={t("dm.delete")} onClick={() => setDropping(d.roomId)}>
+                  <IconClose />
+                </button>
+              </div>
+            ),
+          )}
         </>
       )}
     </div>
@@ -415,9 +453,34 @@ function ChannelList() {
   useMutes();
 
   const tick = useStore(app, (s) => s.tick);
+  const orders = useChannelOrders();
   const server = servers.find((g) => g.spaceId === activeServer);
-  const textChannels = server ? server.channels.filter((c) => c.kind === "text") : loose;
-  const voiceChannels = server ? server.channels.filter((c) => c.kind === "voice") : [];
+  // the own order, if the user dragged channels around; new channels go last
+  const own = server ? orders[server.spaceId] : undefined;
+  const arrange = (list: Channel[]) => {
+    if (!own) return list;
+    const rank = new Map(own.map((id, i) => [id, i]));
+    return list
+      .map((c, i) => ({ c, r: rank.get(c.roomId) ?? own.length + i }))
+      .sort((a, b) => a.r - b.r)
+      .map((x) => x.c);
+  };
+  const textChannels = server ? arrange(server.channels.filter((c) => c.kind === "text")) : loose;
+  const voiceChannels = server ? arrange(server.channels.filter((c) => c.kind === "voice")) : [];
+
+  // dragging a channel: which one, and where it would land
+  const [drag, setDrag] = useState<string | null>(null);
+  const [over, setOver] = useState<{ id: string; after: boolean } | null>(null);
+  const dropOn = (target: Channel) => {
+    if (!server || !drag || !over || drag === target.roomId) return;
+    const kind = target.kind;
+    const list = (kind === "text" ? textChannels : voiceChannels).map((c) => c.roomId).filter((id) => id !== drag);
+    if (!(kind === "text" ? textChannels : voiceChannels).some((c) => c.roomId === drag)) return;
+    const at = list.indexOf(target.roomId) + (over.after ? 1 : 0);
+    list.splice(at, 0, drag);
+    const other = (kind === "text" ? voiceChannels : textChannels).map((c) => c.roomId);
+    setChannelOrder(server.spaceId, kind === "text" ? [...list, ...other] : [...other, ...list]);
+  };
   const can = access(server?.spaceId ?? null);
   void tick;
 
@@ -446,8 +509,37 @@ function ChannelList() {
   const row = (c: Channel) => {
     const muted = roomMuted(c.roomId);
     const fresh = c.kind === "text" && c.unread > 0 && c.roomId !== activeChannel;
+    const dropMark = over?.id === c.roomId && drag && drag !== c.roomId ? (over.after ? "drop-after" : "drop-before") : "";
     return (
-    <div key={c.roomId}>
+    <div
+      key={c.roomId}
+      draggable={!!server}
+      onDragStart={(e) => {
+        setDrag(c.roomId);
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", c.roomId);
+      }}
+      onDragOver={(e) => {
+        if (!drag) return;
+        const same = (c.kind === "text" ? textChannels : voiceChannels).some((x) => x.roomId === drag);
+        if (!same) return;
+        e.preventDefault();
+        const r = e.currentTarget.getBoundingClientRect();
+        const after = e.clientY > r.top + r.height / 2;
+        if (over?.id !== c.roomId || over.after !== after) setOver({ id: c.roomId, after });
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        dropOn(c);
+        setDrag(null);
+        setOver(null);
+      }}
+      onDragEnd={() => {
+        setDrag(null);
+        setOver(null);
+      }}
+      className={`channel-item ${drag === c.roomId ? "dragging" : ""} ${dropMark}`}
+    >
       <div className="channel-row">
         <button
           className={`channel ${c.roomId === activeChannel ? "active" : ""} ${c.roomId === voiceChannel ? "live" : ""} ${muted ? "muted" : ""} ${fresh ? "fresh" : ""}`}
@@ -459,6 +551,11 @@ function ChannelList() {
         >
           <span className="sigil">{c.kind === "voice" ? <IconSpeaker /> : <IconHash />}</span>
           <span className="ellipsis">{c.name}</span>
+          {(c.hidden || c.voiceLocked) && (
+            <span className="lock-mark" title={c.voiceLocked ? t("access.voiceLocked") : t("access.hiddenMark")}>
+              <IconLock size={11} />
+            </span>
+          )}
           {muted && <IconBellOff className="mute-mark" />}
           {c.mentions > 0 ? (
             <span className="count">{c.mentions}</span>
@@ -488,14 +585,32 @@ function ChannelList() {
     );
   };
 
-  const addButton = (kind: "text" | "voice") => (
-    <button className="channel" onClick={() => setCreating(kind)}>
-      <span className="sigil">
-        <IconPlus />
-      </span>
-      <span>{t("channels.create")}</span>
-    </button>
-  );
+  const addButton = (kind: "text" | "voice") =>
+    creating === kind ? (
+      <form onSubmit={create} className="create-channel">
+        <span className="sigil">{kind === "voice" ? <IconSpeaker /> : <IconHash />}</span>
+        <input
+          autoFocus
+          value={name}
+          placeholder={kind === "voice" ? t("channels.voiceName") : t("channels.textName")}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.preventDefault();
+              setCreating(null);
+            }
+          }}
+          onBlur={() => setCreating(null)}
+        />
+      </form>
+    ) : (
+      <button className="channel" onClick={() => (setName(""), setCreating(kind))}>
+        <span className="sigil">
+          <IconPlus />
+        </span>
+        <span>{t("channels.create")}</span>
+      </button>
+    );
 
   return (
     <section className="channels">
@@ -526,23 +641,6 @@ function ChannelList() {
             </>
           )}
 
-          {creating && (
-            <form onSubmit={create} className="create-channel">
-              <input
-                autoFocus
-                value={name}
-                placeholder={creating === "voice" ? t("channels.voiceName") : t("channels.textName")}
-                onChange={(e) => setName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") {
-                    e.preventDefault();
-                    setCreating(null);
-                  }
-                }}
-                onBlur={() => setCreating(null)}
-              />
-            </form>
-          )}
         </div>
       )}
 
@@ -563,15 +661,21 @@ function VoiceDock() {
 
   const channelName = servers.flatMap((g) => g.channels).find((c) => c.roomId === voiceChannel)?.name;
   const ptt = state.settings.inputMode === "ptt";
+  const [netOpen, setNetOpen] = useState(false);
+  const hint = voiceChannel ? state.hint : "";
 
   return (
     <div className="dock">
       {voiceChannel && (
         <>
-          <span className="state">
-            {state.connected ? <b>{t("dock.connected")}</b> : t("dock.connecting")}
-            {channelName ? ` · ${channelName}` : ""}
-          </span>
+          <button className="dock-status" title={t("net.open")} onClick={() => setNetOpen(!netOpen)}>
+            <IconSignal />
+            <span className="state ellipsis">
+              {state.connected ? <b>{t("dock.connected")}</b> : t("dock.connecting")}
+              {channelName ? ` · ${channelName}` : ""}
+            </span>
+          </button>
+          {netOpen && state.connected && <NetPanel onClose={() => setNetOpen(false)} />}
 
           <div className="dock-members">
             {state.members.map((m) => (
@@ -616,7 +720,7 @@ function VoiceDock() {
         </span>
 
         <button
-          className={`icon ${state.muted ? "on" : ""}`}
+          className={`icon ${state.muted ? "on" : ""} ${hint === "muted-talk" ? "attention" : ""}`}
           title={state.muted ? t("call.unmute") : t("call.mute")}
           onClick={() => void voice.setMuted(!state.muted)}
         >
@@ -629,11 +733,168 @@ function VoiceDock() {
         >
           {state.deafened ? <IconHeadsetOff /> : <IconHeadset />}
         </button>
-        <button className="icon" title={t("settings.title")} onClick={() => app.set({ settingsOpen: true })}>
+        <button
+          className={`icon ${hint === "mic-silent" ? "attention" : ""}`}
+          title={t("settings.title")}
+          onClick={() => app.set({ settingsOpen: true, settingsTab: hint === "mic-silent" ? "audio" : app.get().settingsTab })}
+        >
           <IconGear />
         </button>
+        {hint === "muted-talk" && (
+          <button className="dock-hint mic" onClick={() => void voice.setMuted(false)}>
+            {t("hint.mutedTalk")}
+          </button>
+        )}
+        {hint === "mic-silent" && (
+          <button className="dock-hint gear" onClick={() => app.set({ settingsOpen: true, settingsTab: "audio" })}>
+            {t("hint.micSilent")}
+          </button>
+        )}
       </div>
     </div>
+  );
+}
+
+/* ------------------------------------------------------- connection panel */
+
+/** A line chart of the last minutes: time goes right, zero is at the bottom. */
+function Chart({ samples, pick, floor, unit, danger }: { samples: NetSample[]; pick: (s: NetSample) => number; floor: number; unit: string; danger: number }) {
+  const W = 260;
+  const H = 76;
+  const values = samples.map(pick);
+  const top = Math.max(floor, ...values) * 1.15;
+  const x = (i: number) => (samples.length < 2 ? W : (i / (samples.length - 1)) * W);
+  const y = (v: number) => H - (v / top) * H;
+  const points = values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const warn = values.some((v) => v >= danger);
+  return (
+    <div className="net-chart">
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
+        {[0.25, 0.5, 0.75].map((k) => (
+          <line key={k} x1={0} x2={W} y1={H * k} y2={H * k} className="net-grid" />
+        ))}
+        {values.length > 0 && <polyline points={`0,${H} ${points} ${W},${H}`} className={`net-area ${warn ? "warn" : ""}`} />}
+        {values.length > 0 && <polyline points={points} className={`net-line ${warn ? "warn" : ""}`} />}
+      </svg>
+      <div className="net-scale">
+        <span>{Math.round(top)}</span>
+        <span>{Math.round(top / 2)}</span>
+        <span>0 {unit}</span>
+      </div>
+    </div>
+  );
+}
+
+function codecLine(c: { codec: string; engine: string; gpu: boolean; width: number; height: number; fps: number } | null): string {
+  if (!c) return "";
+  const where = c.gpu ? t("net.gpu") : t("net.cpu");
+  const size = c.width && c.height ? ` · ${c.width}×${c.height}` : "";
+  const fps = c.fps ? ` · ${t("net.fps", { n: c.fps })}` : "";
+  return `${c.codec || "?"} · ${where}${c.engine ? ` (${c.engine})` : ""}${size}${fps}`;
+}
+
+/**
+ * Connection details for the call, opened from "Voice connected": the round
+ * trip to the media server and packet loss over the last minutes, and how the
+ * own share and camera are being encoded.
+ */
+function NetPanel({ onClose }: { onClose: () => void }) {
+  const [stats, setStats] = useState<NetStats | null>(null);
+  useEscape(true, onClose);
+  useEffect(() => {
+    let alive = true;
+    const load = () => void voice.netStats().then((s) => alive && setStats(s));
+    load();
+    const timer = window.setInterval(load, 2000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const samples = stats?.samples ?? [];
+  const last = samples[samples.length - 1];
+  const avg = samples.length ? Math.round(samples.reduce((a, s) => a + s.rtt, 0) / samples.length) : 0;
+  const recent = samples.slice(-15);
+  const outLoss = recent.length ? recent.reduce((a, s) => a + s.outLoss, 0) / recent.length : 0;
+  const inLoss = recent.length ? recent.reduce((a, s) => a + s.inLoss, 0) / recent.length : 0;
+
+  return (
+    <>
+      <div className="net-back" onMouseDown={onClose} />
+      <div className="net-panel" onMouseDown={(e) => e.stopPropagation()}>
+        <div className="net-head">
+          <b>{t("net.title")}</b>
+          <span className="state ellipsis">{stats?.server ?? ""}</span>
+          <button className="ghost icon tiny" title={t("common.close")} onClick={onClose}>
+            <IconClose />
+          </button>
+        </div>
+        {samples.length === 0 ? (
+          <div className="state">{t("net.collecting")}</div>
+        ) : (
+          <>
+            <div className="net-caption">{t("net.ping")}</div>
+            <Chart samples={samples} pick={(s) => s.rtt} floor={60} unit={t("net.ms")} danger={250} />
+            <div className="net-caption">{t("net.loss")}</div>
+            <Chart samples={samples} pick={(s) => Math.max(s.outLoss, s.inLoss)} floor={5} unit="%" danger={10} />
+          </>
+        )}
+        <dl className="net-facts">
+          <div>
+            <dt>{t("net.avg")}</dt>
+            <dd>{samples.length ? `${avg} ${t("net.ms")}` : "..."}</dd>
+          </div>
+          <div>
+            <dt>{t("net.last")}</dt>
+            <dd className={last && last.rtt >= 250 ? "bad" : ""}>{last ? `${last.rtt} ${t("net.ms")}` : "..."}</dd>
+          </div>
+          <div>
+            <dt>{t("net.outLoss")}</dt>
+            <dd className={outLoss >= 10 ? "bad" : ""}>{outLoss.toFixed(1)}%</dd>
+          </div>
+          <div>
+            <dt>{t("net.inLoss")}</dt>
+            <dd className={inLoss >= 10 ? "bad" : ""}>{inLoss.toFixed(1)}%</dd>
+          </div>
+          {stats?.share && (
+            <div>
+              <dt>{t("net.share")}</dt>
+              <dd>{codecLine(stats.share)}</dd>
+            </div>
+          )}
+          {stats?.camera && (
+            <div>
+              <dt>{t("net.camera")}</dt>
+              <dd>{codecLine(stats.camera)}</dd>
+            </div>
+          )}
+          {stats?.link && (
+            <div>
+              <dt>{t("net.link")}</dt>
+              <dd className={stats.link.protocol === "TCP" ? "bad" : ""}>
+                {[stats.link.protocol, stats.link.relay ? t("net.relay") : "", stats.link.upKbps ? t("net.up", { n: (stats.link.upKbps / 1000).toFixed(1) }) : ""].filter(Boolean).join(" · ")}
+              </dd>
+            </div>
+          )}
+          {(stats?.incoming.length ?? 0) > 0 && (
+            <div>
+              <dt>{t("net.incoming")}</dt>
+              <dd>
+                {stats?.incoming.map((v, i) => (
+                  <div key={i}>
+                    {v.codec} · {v.width}×{v.height} · {t("net.fps", { n: v.fps })}
+                    {v.kbps ? ` · ${t("net.mbps", { n: (v.kbps / 1000).toFixed(1) })}` : ""}
+                  </div>
+                ))}
+              </dd>
+            </div>
+          )}
+        </dl>
+        {stats?.link?.protocol === "TCP" && <div className="note warn net-note">{t("net.tcpWarn")}</div>}
+        <div className="state net-note">{t("net.note")}</div>
+      </div>
+    </>
   );
 }
 
@@ -670,6 +931,71 @@ async function downloadMedia(media: Media): Promise<void> {
   a.href = url;
   a.download = media.name;
   a.click();
+}
+
+/* ------------------------------------------------------------- link cards */
+
+function previewMedia(p: LinkPreview): Media | null {
+  const img = p.image;
+  if (!img) return null;
+  return { mxc: img.mxc, file: img.file, kind: "image", name: p.title || p.site, mime: img.mime, size: 0, caption: "", w: img.w, h: img.h };
+}
+
+/**
+ * A link card like Discord's: site, title, description and the picture, a
+ * large one below or a small one on the side. YouTube plays in place. The
+ * sender sees a cross to take the card away.
+ */
+function LinkCard({ preview, onRemove }: { preview: LinkPreview; onRemove?: () => void }) {
+  const media = previewMedia(preview);
+  const src = useMediaSrc(media ?? ({ mxc: "" } as Media), !!media);
+  const [playing, setPlaying] = useState(false);
+  const wide = !!preview.youtube || (media ? media.w >= 360 && media.w >= media.h * 1.15 : false) || (!preview.title && !preview.description);
+
+  return (
+    <div className={`embed ${preview.youtube ? "video" : ""} ${wide ? "wide" : ""}`}>
+      <div className="embed-text">
+        {preview.site && <div className="embed-site ellipsis">{preview.site}</div>}
+        {preview.title && (
+          <a className="embed-title" href={preview.url} target="_blank" rel="noreferrer" title={preview.url}>
+            {preview.title}
+          </a>
+        )}
+        {preview.description && <div className="embed-desc">{preview.description}</div>}
+      </div>
+      {preview.youtube ? (
+        playing ? (
+          <div className="embed-player">
+            <iframe
+              src={`https://www.youtube-nocookie.com/embed/${preview.youtube}?autoplay=1&rel=0`}
+              title={preview.title || "YouTube"}
+              allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+              allowFullScreen
+            />
+          </div>
+        ) : (
+          <button className="embed-shot" onClick={() => setPlaying(true)} title={t("embed.play")}>
+            {src && <img src={src} alt="" loading="lazy" />}
+            <span className="embed-play">
+              <IconPlay size={22} />
+            </span>
+          </button>
+        )
+      ) : (
+        media &&
+        src && (
+          <button className={wide ? "embed-shot" : "embed-thumb"} onClick={() => openImage(src, media.name)} title={t("chat.openImage")}>
+            <img src={src} alt="" loading="lazy" />
+          </button>
+        )
+      )}
+      {onRemove && (
+        <button className="embed-remove ghost icon tiny" title={t("embed.remove")} onClick={onRemove}>
+          <IconClose />
+        </button>
+      )}
+    </div>
+  );
 }
 
 /** Images load at once, video and audio only on click: they can be heavy. */
@@ -831,9 +1157,14 @@ function MessageRow({ m, roomId, lit }: { m: Message; roomId: string | null; lit
   };
 
   const text = m.media ? m.media.caption : m.body;
+  const mentions = { resolve: mentionResolver(roomId), me: me(), open: openProfile };
 
   return (
-    <div className={`msg ${lit ? "lit" : ""} ${m.state}`} ref={box} id={`msg-${m.id}`}>
+    <div
+      className={`msg ${lit ? "lit" : ""} ${m.state} ${m.deleted ? "deleted" : ""} ${m.mentionsMe ? "pinged" : ""} ${m.own ? "own" : ""}`}
+      ref={box}
+      id={`msg-${m.id}`}
+    >
       <Avatar
         mxc={m.avatar}
         name={m.senderName}
@@ -843,19 +1174,45 @@ function MessageRow({ m, roomId, lit }: { m: Message; roomId: string | null; lit
         onContextMenu={menuHandler(m.sender, roomId)}
       />
       <div className="msg-body">
-        {m.reply && (
-          <div className="quote">
-            <IconReply />
-            <b>{m.reply.senderName}</b>
-            <span className="ellipsis">{m.reply.body}</span>
-          </div>
-        )}
+        {m.reply &&
+          (m.reply.quote ? (
+            <button type="button" className="quote fragment" title={t("chat.jumpToReply")} onClick={() => m.reply && void jumpTo(m.reply.eventId)}>
+              <span className="quote-bar" />
+              <span className="quote-text">
+                <InlineMarkdown text={m.reply.body} mentions={mentions} />
+                {m.reply.senderName && <b> · {m.reply.senderName}</b>}
+              </span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="quote"
+              title={t("chat.jumpToReply")}
+              onClick={() => m.reply && void jumpTo(m.reply.eventId)}
+            >
+              <IconReply />
+              {m.reply.senderName && <b>{m.reply.senderName}</b>}
+              <span className="ellipsis">
+                <InlineMarkdown text={m.reply.body} mentions={mentions} />
+              </span>
+            </button>
+          ))}
         <div>
-          <span className="who clickable" onClick={() => openProfile(m.sender)} onContextMenu={menuHandler(m.sender, roomId)}>
+          <span
+            className="who clickable"
+            style={m.color ? { color: m.color } : undefined}
+            onClick={() => openProfile(m.sender)}
+            onContextMenu={menuHandler(m.sender, roomId)}
+          >
             {m.senderName}
           </span>
           <span className="when">{fmtTime(m.ts)}</span>
           {m.edited && <span className="when">{t("chat.edited")}</span>}
+          {m.pinned && (
+            <span className="when pin-mark" title={t("pins.pinned")}>
+              <IconPin size={11} />
+            </span>
+          )}
         </div>
         {text && (
           <div className={`body ${m.locked ? "locked" : ""} ${isJumbo(text) ? "jumbo" : ""}`}>
@@ -867,11 +1224,15 @@ function MessageRow({ m, roomId, lit }: { m: Message; roomId: string | null; lit
                 checks={m.checks}
                 onToggle={m.state === "sent" ? (key, done) => void toggleCheck(m.id, key, done) : undefined}
                 whoName={(u) => displayName(u, roomId)}
+                mentions={mentions}
               />
             )}
           </div>
         )}
         {m.media && <MessageMedia media={m.media} />}
+        {m.previews.map((p) => (
+          <LinkCard key={p.url} preview={p} onRemove={m.own && m.state === "sent" ? () => void removePreview(m.id, p.url) : undefined} />
+        ))}
 
         {m.state === "failed" && (
           <div className="send-failed" title={m.failReason}>
@@ -938,6 +1299,27 @@ function MessageRow({ m, roomId, lit }: { m: Message; roomId: string | null; lit
             <button className="ghost icon small" title={t("chat.reply")} onClick={() => startReply(m)}>
               <IconReply />
             </button>
+            {text && !m.locked && (
+              <button
+                className="ghost icon small"
+                title={t("chat.quote")}
+                // the selection inside the message must survive the click
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  const sel = window.getSelection();
+                  const inside = !!sel && !sel.isCollapsed && !!box.current?.contains(sel.anchorNode) && !!box.current?.contains(sel.focusNode);
+                  startQuote(m, inside ? (sel?.toString() ?? "") : text);
+                  sel?.removeAllRanges();
+                }}
+              >
+                <IconQuote />
+              </button>
+            )}
+            {m.state === "sent" && canPinHere() && (
+              <button className={`ghost icon small ${m.pinned ? "on-soft" : ""}`} title={m.pinned ? t("pins.unpin") : t("pins.pin")} onClick={() => void togglePin(m.id)}>
+                <IconPin />
+              </button>
+            )}
             {m.canEdit && (
               <button className="ghost icon small" title={t("chat.edit")} onClick={() => startEdit(m)}>
                 <IconEdit />
@@ -977,6 +1359,11 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
   const highlight = useStore(app, (s) => s.highlight);
   const searchOpen = useStore(app, (s) => s.searchOpen);
   const membersHidden = useStore(app, (s) => s.membersHidden);
+  const history = useStore(app, (s) => s.history);
+  const unreadFrom = useStore(app, (s) => s.unreadFrom);
+  const pinsOpen = useStore(app, (s) => s.pinsOpen);
+  const pins = useStore(app, (s) => s.pins);
+  const [atBottom, setAtBottom] = useState(true);
 
   const [dragging, setDragging] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
@@ -989,13 +1376,42 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
   const title = direct?.name ?? channel?.name ?? activeChannel ?? "";
   const voiceHere = channel?.kind === "voice";
 
+  // another chat: start at the bottom again, whatever was scrolled in the previous one
+  useLayoutEffect(() => {
+    stick.current = true;
+    setAtBottom(true);
+    setChatAtBottom(true);
+    bottom.current?.scrollIntoView({ block: "end" });
+  }, [activeChannel]);
+
+  const toBottom = () => {
+    stick.current = true;
+    bottom.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+  };
+  const unreadAt = unreadFrom ? messages.findIndex((x) => x.id === unreadFrom) : -1;
+  const unseen = !atBottom && unreadAt !== -1 ? messages.length - unreadAt : 0;
+
   useEffect(() => {
     if (stick.current) bottom.current?.scrollIntoView({ block: "end" });
   }, [messages.length, activeChannel]);
 
+  // Older history loads on scrolling up, but a short chat has nothing to
+  // scroll: a fresh join (over federation too) shows only the last few
+  // events. Keep loading until the view is full or the start is reached.
+  const firstId = messages[0]?.id ?? "";
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || history !== "more") return;
+    if (el.scrollHeight - el.clientHeight < 80) void loadMore();
+  }, [firstId, messages.length, activeChannel, history]);
+
   const onScroll = (e: UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
     stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (stick.current !== atBottom) {
+      setAtBottom(stick.current);
+      setChatAtBottom(stick.current);
+    }
     if (el.scrollTop < 80) {
       const before = el.scrollHeight;
       void loadMore().then((got) => {
@@ -1064,16 +1480,26 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
         ) : (
           <MuteBell roomId={activeChannel} userId={direct?.userId ?? ""} tight={voiceHere && activeChannel === voiceChannel} />
         )}
+        {!embedded && pins.length > 0 && (
+          <button
+            className={`ghost icon head-tool tight pin-tool ${pinsOpen ? "on-soft" : ""}`}
+            title={t("pins.title")}
+            onClick={() => app.set({ pinsOpen: !pinsOpen, searchOpen: false })}
+          >
+            <IconPin />
+            <small>{pins.length}</small>
+          </button>
+        )}
         {!embedded && (
         <button
           className={`ghost icon head-tool tight ${searchOpen ? "on-soft" : ""}`}
           title={t("chat.search")}
-          onClick={() => app.set({ searchOpen: !searchOpen, searchHits: [] })}
+          onClick={() => app.set({ searchOpen: !searchOpen, searchHits: [], pinsOpen: false })}
         >
           <IconSearch />
         </button>
         )}
-        {!searchOpen && !embedded && (
+        {!searchOpen && !pinsOpen && !embedded && (
           <button
             className={`ghost icon head-tool tight ${membersHidden ? "" : "on-soft"}`}
             title={membersHidden ? t("chat.showMembers") : t("chat.hideMembers")}
@@ -1085,17 +1511,43 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
       </div>
 
       <div className="timeline" key={`timeline-${activeChannel}`} ref={scroller} onScroll={onScroll}>
+        {history !== "more" && (
+          <div className="chat-start">
+            <b>{direct ? t("chat.start.direct", { name: title }) : t("chat.start.channel", { name: title })}</b>
+            <span>{history === "hidden" ? t("chat.start.hidden") : t("chat.start.text")}</span>
+          </div>
+        )}
         {messages.map((m) => (
-          <MessageRow key={m.id} m={m} roomId={activeChannel} lit={highlight === m.id} />
+          <Fragment key={m.id}>
+            {m.id === unreadFrom && (
+              <div className="new-line">
+                <span>{t("chat.newLine")}</span>
+              </div>
+            )}
+            <MessageRow m={m} roomId={activeChannel} lit={highlight === m.id} />
+          </Fragment>
         ))}
         <div ref={bottom} />
       </div>
+
+      {!atBottom && (
+        <button className="jump-bar" onClick={toBottom}>
+          <span>{unseen > 0 ? tn("chat.unseen", unseen) : t("chat.olderShown")}</span>
+          <b>{t("chat.toBottom")} ↓</b>
+        </button>
+      )}
 
       {dragging && <div className="drop-hint">{t("chat.dropHint")}</div>}
 
       <div className="typing">{typingLine(typing)}</div>
 
-      <Composer key={`composer-${activeChannel}`} roomId={activeChannel} title={title} />
+      {direct?.deleted ? (
+        <div className="composer-closed">{t("chat.deletedPeer")}</div>
+      ) : channel?.readonly ? (
+        <div className="composer-closed">{t("chat.readonly")}</div>
+      ) : (
+        <Composer key={`composer-${activeChannel}`} roomId={activeChannel} title={title} />
+      )}
     </main>
   );
 }
@@ -1177,6 +1629,18 @@ function PlaceMenu() {
             <span>{t("server.settings")}</span>
           </button>
         )}
+        {menu.kind === "server" && hasOwnOrder(menu.id) && (
+          <button className="menu-item" onClick={run(() => setChannelOrder(menu.id, null))}>
+            <IconRefresh />
+            <span>{t("order.reset")}</span>
+          </button>
+        )}
+        {menu.kind === "server" && (
+          <button className="menu-item danger" onClick={run(() => app.set({ leaveServerAsk: menu.id }))}>
+            <IconDoorOut />
+            <span>{t("server.leave")}</span>
+          </button>
+        )}
       </div>
     </div>
   );
@@ -1216,6 +1680,51 @@ function SearchPanel() {
   );
 }
 
+/* ------------------------------------------------------------------- pins */
+
+function PinsPanel() {
+  const pins = useStore(app, (s) => s.pins);
+  const activeChannel = useStore(app, (s) => s.activeChannel);
+  const [items, setItems] = useState<PinnedItem[] | null>(null);
+  const can = canPinHere();
+
+  useEffect(() => {
+    let alive = true;
+    void pinnedMessages().then((list) => alive && setItems(list));
+    return () => {
+      alive = false;
+    };
+  }, [pins.join(","), activeChannel]);
+
+  return (
+    <aside className="members search-panel pins-panel">
+      <div className="group-title">
+        <IconPin /> {t("pins.title")}
+      </div>
+      {!items && <div className="state">{t("pins.loading")}</div>}
+      {items?.length === 0 && <div className="state">{t("pins.none")}</div>}
+      {items?.map((p) => (
+        <div key={p.id} className="hit pin-item">
+          <button className="pin-open" onClick={() => void jumpTo(p.id)}>
+            <div>
+              <b>{p.name}</b>
+              {p.ts > 0 && <span className="when">{fmtDateTime(p.ts)}</span>}
+            </div>
+            <div className="hit-body">
+              <InlineMarkdown text={p.body} />
+            </div>
+          </button>
+          {can && (
+            <button className="ghost icon tiny" title={t("pins.unpin")} onClick={() => void togglePin(p.id)}>
+              <IconClose />
+            </button>
+          )}
+        </div>
+      ))}
+    </aside>
+  );
+}
+
 /* ------------------------------------------------------------------ members */
 
 function Members() {
@@ -1243,10 +1752,15 @@ function Members() {
       onContextMenu={menuHandler(m.userId, activeChannel)}
     >
       <Avatar mxc={m.avatar} name={m.name} size={30} status={split ? m.presence : null} />
-      <span className="ellipsis">{m.name}</span>
-      {(m.owner || m.power >= 50) && (
-        <span className={`badge ${m.owner ? "owner" : m.power >= 100 ? "admin" : ""}`}>
-          {m.owner ? t("role.owner") : m.power >= 100 ? t("role.admin") : t("role.mod")}
+      <span className="ellipsis" style={m.color ? { color: m.color } : undefined}>
+        {m.name}
+      </span>
+      {m.role && (
+        <span
+          className={`badge ${m.owner ? "owner" : m.power >= 75 ? "admin" : ""}`}
+          style={m.color ? { color: m.color, borderColor: m.color } : undefined}
+        >
+          {m.role}
         </span>
       )}
     </div>
@@ -1287,54 +1801,175 @@ function AddServerModal() {
   const card = useStore(app, (s) => s.serverCard);
   const busy = useStore(app, (s) => s.busy);
   const error = useStore(app, (s) => s.error);
+  const [mode, setMode] = useState<"join" | "create">("join");
   const [domain, setDomain] = useState("");
+  const [name, setName] = useState("");
+  const [address, setAddress] = useState("");
+  const [openJoin, setOpenJoin] = useState(true);
   const { shown, closing } = useLinger(open);
   const close = () => app.set({ addServerOpen: false, serverCard: null, error: "" });
   useEscape(open, close);
 
+  // a fresh host announces an address nobody took yet: offer it for the first server
+  useEffect(() => {
+    if (!open || mode !== "create") return;
+    let alive = true;
+    void suggestServerAddress().then((a) => alive && a && setAddress((cur) => cur || a));
+    return () => {
+      alive = false;
+    };
+  }, [open, mode]);
+
   if (!shown) return null;
+
+  const switchTo = (m: "join" | "create") => {
+    setMode(m);
+    app.set({ serverCard: null, error: "" });
+  };
+  const domainPart = me().split(":").slice(1).join(":");
+  const create = () => void newServer(name, address, openJoin);
+
+  return (
+    <div className={`modal-back ${closing ? "closing" : ""}`} onClick={close}>
+      <div className="modal add-server" onClick={(e) => e.stopPropagation()}>
+        <h2>{mode === "join" ? t("server.add.title") : t("server.create.title")}</h2>
+
+        <div className="seg login-tabs">
+          <button type="button" className={mode === "join" ? "on" : ""} onClick={() => switchTo("join")}>
+            {t("server.add.tab.join")}
+          </button>
+          <button type="button" className={mode === "create" ? "on" : ""} onClick={() => switchTo("create")}>
+            {t("server.add.tab.create")}
+          </button>
+        </div>
+
+        {mode === "join" ? (
+          <>
+            <p className="sub">{t("server.add.hint")}</p>
+
+            {error && <div className="error">{error}</div>}
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void previewServer(domain);
+              }}
+            >
+              <input autoFocus value={domain} onChange={(e) => setDomain(e.target.value)} placeholder={t("server.add.placeholder")} />
+            </form>
+
+            {card && (
+              <div className="card-preview">
+                <div className="avatar">{initials(card.name)}</div>
+                <div>
+                  <b>{card.name}</b>
+                  <div className="state">{card.description || card.alias}</div>
+                  {card.guessed && <div className="state">{t("server.add.guessed")}</div>}
+                </div>
+              </div>
+            )}
+
+            <div className="row">
+              <button className="ghost" onClick={close}>
+                {t("common.cancel")}
+              </button>
+              {card ? (
+                <button className="primary" disabled={!!busy} onClick={() => void addServer()}>
+                  {busy || t("server.add.join")}
+                </button>
+              ) : (
+                <button className="primary" disabled={!domain || !!busy} onClick={() => void previewServer(domain)}>
+                  {busy || t("server.add.find")}
+                </button>
+              )}
+            </div>
+          </>
+        ) : (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (name.trim() && !busy) create();
+            }}
+          >
+            <p className="sub">{t("server.create.hint")}</p>
+
+            {error && <div className="error">{error}</div>}
+
+            <div className="field">
+              <label>{t("server.create.name")}</label>
+              <input autoFocus value={name} maxLength={80} onChange={(e) => setName(e.target.value)} placeholder={t("server.create.name.placeholder")} />
+            </div>
+
+            <div className="field">
+              <label>{t("server.create.address")}</label>
+              <div className="address-input">
+                <span>#</span>
+                <input
+                  value={address}
+                  onChange={(e) => setAddress(e.target.value.toLowerCase().replace(/\s+/g, ""))}
+                  placeholder="main"
+                />
+                <span>:{domainPart}</span>
+              </div>
+              <span className="state">{t("server.create.address.hint")}</span>
+            </div>
+
+            <div className="seg join-pick">
+              <button type="button" className={openJoin ? "on" : ""} onClick={() => setOpenJoin(true)}>
+                {t("server.create.open")}
+              </button>
+              <button type="button" className={openJoin ? "" : "on"} onClick={() => setOpenJoin(false)}>
+                {t("server.create.closed")}
+              </button>
+            </div>
+            <span className="state">{openJoin ? t("server.create.open.hint") : t("server.create.closed.hint")}</span>
+
+            <div className="row">
+              <button type="button" className="ghost" onClick={close}>
+                {t("common.cancel")}
+              </button>
+              <button type="submit" className="primary" disabled={!name.trim() || !!busy}>
+                {busy || t("server.create.submit")}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------- leave server */
+
+function LeaveServerModal() {
+  const spaceId = useStore(app, (s) => s.leaveServerAsk);
+  const servers = useStore(app, (s) => s.servers);
+  const busy = useStore(app, (s) => s.busy);
+  const { shown, closing } = useLinger(!!spaceId);
+  const close = () => app.set({ leaveServerAsk: null });
+  useEscape(!!spaceId, close);
+  if (!shown || !spaceId) return null;
+
+  const server = servers.find((g) => g.spaceId === spaceId);
+  const info = leaveInfo(spaceId);
 
   return (
     <div className={`modal-back ${closing ? "closing" : ""}`} onClick={close}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{t("server.add.title")}</h2>
-        <p className="sub">{t("server.add.hint")}</p>
-
-        {error && <div className="error">{error}</div>}
-
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            void previewServer(domain);
-          }}
-        >
-          <input autoFocus value={domain} onChange={(e) => setDomain(e.target.value)} placeholder={t("server.add.placeholder")} />
-        </form>
-
-        {card && (
-          <div className="card-preview">
-            <div className="avatar">{initials(card.name)}</div>
-            <div>
-              <b>{card.name}</b>
-              <div className="state">{card.description || card.alias}</div>
-              {card.guessed && <div className="state">{t("server.add.guessed")}</div>}
-            </div>
-          </div>
+        <h2>{t("server.leave.title", { name: server?.name ?? "" })}</h2>
+        <p className="sub">{t("server.leave.text")}</p>
+        {info.alone ? (
+          <div className="note warn">{t("server.leave.alone")}</div>
+        ) : (
+          info.lastAdmin && <div className="note warn">{t("server.leave.lastAdmin")}</div>
         )}
-
         <div className="row">
           <button className="ghost" onClick={close}>
             {t("common.cancel")}
           </button>
-          {card ? (
-            <button className="primary" disabled={!!busy} onClick={() => void addServer()}>
-              {busy || t("server.add.join")}
-            </button>
-          ) : (
-            <button className="primary" disabled={!domain || !!busy} onClick={() => void previewServer(domain)}>
-              {busy || t("server.add.find")}
-            </button>
-          )}
+          <button className="danger" disabled={!!busy} onClick={() => void leaveServer(spaceId)}>
+            {busy || t("server.leave.yes")}
+          </button>
         </div>
       </div>
     </div>
@@ -1386,6 +2021,7 @@ function OfflineBar() {
 
 export function Main() {
   const searchOpen = useStore(app, (s) => s.searchOpen);
+  const pinsOpen = useStore(app, (s) => s.pinsOpen);
   const activeChannel = useStore(app, (s) => s.activeChannel);
   const callView = useStore(app, (s) => s.callView);
   const voiceChannel = useStore(app, (s) => s.voiceChannel);
@@ -1415,7 +2051,7 @@ export function Main() {
         ) : (
           <>
             <Chat />
-            {searchOpen && activeChannel ? <SearchPanel /> : !membersHidden && <Members />}
+            {searchOpen && activeChannel ? <SearchPanel /> : pinsOpen && activeChannel ? <PinsPanel /> : !membersHidden && <Members />}
           </>
         )}
       </div>
@@ -1424,6 +2060,7 @@ export function Main() {
       <Toast />
       <OfflineBar />
       <AddServerModal />
+      <LeaveServerModal />
       <Settings />
       <ServerSettings />
       <ScreenPicker />

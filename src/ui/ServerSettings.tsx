@@ -16,14 +16,14 @@ import {
   type ServerTab,
 } from "../app.ts";
 import { t, tn, type Key } from "../i18n/index.ts";
-import { PERM_NAMES, ROLES, type Perms } from "../matrix/admin.ts";
+import { ADMIN_LEVEL, PERM_NAMES, levelAbove, maxGrant, permLevels, type ChannelAccess, type Perms, type RoleDef } from "../matrix/admin.ts";
 import { GUESSES } from "../matrix/discovery.ts";
 import { compareChannels, type BrowseChannel, type Channel, type Server } from "../matrix/servers.ts";
 import { useStore } from "../store.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Cropper } from "./Cropper.tsx";
 import { useEscape, useLinger } from "./controls.tsx";
-import { IconCheck, IconChevron, IconCopy, IconHash, IconRefresh, IconSpeaker, IconTrash } from "./icons.tsx";
+import { IconCheck, IconChevron, IconCopy, IconDoorOut, IconHash, IconRefresh, IconSpeaker, IconTrash } from "./icons.tsx";
 
 /** A copy button that says it worked. */
 function CopyButton({ text, label, className = "ghost small" }: { text: string; label?: string; className?: string }) {
@@ -99,14 +99,13 @@ function AddressBox({ server }: { server: Server }) {
             {guessable ? t("address.byDomain", { domain, alias }) : t("address.byAlias", { alias })}{" "}
             {open ? t("address.open") : t("address.closed")}
           </div>
-          <div className="row left">
-            <CopyButton text={guessable ? domain : alias} label={guessable ? t("address.copyDomain") : t("address.copyAlias")} />
-            {!open && can.server && (
+          {!open && can.server && (
+            <div className="row left">
               <button className="ghost small" onClick={() => void openServerJoin(server.spaceId)}>
                 {t("address.openJoin")}
               </button>
-            )}
-          </div>
+            </div>
+          )}
         </>
       ) : can.server ? (
         <>
@@ -164,18 +163,44 @@ function DriftNote({ server }: { server: Server }) {
   return null;
 }
 
-function RoleSelect({ value, max, onPick, disabled }: { value: number; max: number; onPick: (level: number) => void; disabled?: boolean }) {
-  // Matrix does not allow granting a role above your own, so such options are disabled
+function RoleSelect({
+  value,
+  max,
+  onPick,
+  disabled,
+  list,
+  title,
+}: {
+  value: number;
+  max: number;
+  onPick: (level: number) => void;
+  disabled?: boolean;
+  list: { level: number; label: string }[];
+  title?: string;
+}) {
+  // roles above what this user may hand out are shown but disabled
+  const known = list.find((r) => r.level === value);
   return (
-    <select value={value} disabled={disabled} onChange={(e) => onPick(Number(e.target.value))}>
-      {!ROLES.some((r) => r.level === value) && <option value={value}>{t("role.custom", { level: value })}</option>}
-      {ROLES.map((r) => (
-        <option key={r.level} value={r.level} disabled={r.level > max}>
-          {t(r.key)}
+    <select value={value} disabled={disabled} title={title} onChange={(e) => onPick(Number(e.target.value))}>
+      {!known && <option value={value}>{legacyName(value)}</option>}
+      {list.map((r) => (
+        <option key={r.level} value={r.level} disabled={r.level > max && r.level !== value}>
+          {r.label}
         </option>
       ))}
     </select>
   );
+}
+
+/** Roles of a server as select options. */
+function roleOptions(roles: RoleDef[]): { level: number; label: string }[] {
+  return roles.map((r) => ({ level: r.level, label: r.name }));
+}
+
+/** A level outside the list: an admin at 100 from older servers, or a custom one. */
+function legacyName(level: number): string {
+  if (level >= 100) return t("role.adminLegacy");
+  return t("role.custom", { level });
 }
 
 /* ----------------------------------------------------------------- overview */
@@ -275,17 +300,81 @@ function Overview({ server }: { server: Server }) {
 
       <AddressBox server={server} />
       <InviteBox server={server} />
+
+      <div className="section-title">{t("server.leave.section")}</div>
+      <div className="row left">
+        <button className="danger" onClick={() => app.set({ leaveServerAsk: server.spaceId })}>
+          <IconDoorOut /> {t("server.leave")}
+        </button>
+      </div>
     </>
   );
 }
 
 /* ----------------------------------------------------------------- channels */
 
+/** Who sees the channel, who posts in it, who joins its call. */
+function AccessBox({ server, channel }: { server: Server; channel: Channel }) {
+  const can = access(server.spaceId);
+  const saved = serverAdmin.channelAccess(channel.roomId);
+  const [acc, setAcc] = useState<ChannelAccess>(saved);
+  useEffect(() => setAcc(serverAdmin.channelAccess(channel.roomId)), [channel.roomId]);
+  const roles = serverAdmin.roles(server.spaceId);
+  const changed = JSON.stringify(acc) !== JSON.stringify(saved);
+  const pick = (value: number, set: (v: number) => void, everyone: string) => (
+    <select value={value} disabled={!can.roles} onChange={(e) => set(Number(e.target.value))}>
+      {roles
+        .slice()
+        .reverse()
+        .map((r) => (
+          <option key={r.level} value={r.level}>
+            {r.level === 0 ? everyone : t("channel.andAbove", { role: r.name })}
+          </option>
+        ))}
+      {!roles.some((r) => r.level === value) && <option value={value}>{legacyName(value)}</option>}
+    </select>
+  );
+
+  return (
+    <div className="access-box">
+      <div className="field">
+        <label>{t("access.view")}</label>
+        {pick(acc.view, (view) => setAcc({ ...acc, view }), t("access.everyone"))}
+        <span className="state">{acc.view > 0 ? t("access.view.hidden") : t("access.view.hint")}</span>
+      </div>
+      {channel.kind === "text" ? (
+        <div className="field">
+          <label>{t("channel.whoPosts")}</label>
+          {pick(acc.send, (send) => setAcc({ ...acc, send }), t("channel.everyone"))}
+          <span className="state">{t("channel.whoPosts.hint")}</span>
+        </div>
+      ) : (
+        <div className="field">
+          <label>{t("access.voice")}</label>
+          {pick(acc.voice, (voice) => setAcc({ ...acc, voice }), t("channel.everyone"))}
+          <span className="state">{t("access.voice.hint")}</span>
+        </div>
+      )}
+      {can.roles && (
+        <div className="row left">
+          <button className="primary" disabled={!changed} onClick={() => void serverAdmin.setChannelAccess(server.spaceId, channel.roomId, acc)}>
+            {t("access.save")}
+          </button>
+          {changed && (
+            <button className="ghost" onClick={() => setAcc(saved)}>
+              {t("common.cancel")}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ChannelEditor({ server, channel }: { server: Server; channel: Channel }) {
   const [name, setName] = useState(channel.name);
   const [topic, setTopic] = useState(channel.topic);
   const [confirm, setConfirm] = useState(false);
-  const sendLevel = serverAdmin.sendLevel(channel.roomId);
 
   return (
     <div className="channel-editor">
@@ -309,19 +398,7 @@ function ChannelEditor({ server, channel }: { server: Server; channel: Channel }
         </div>
       </div>
 
-      {channel.kind === "text" && (
-        <div className="field">
-          <label>{t("channel.whoPosts")}</label>
-          <select value={sendLevel} onChange={(e) => void serverAdmin.setSendLevel(channel.roomId, Number(e.target.value))}>
-            {ROLES.map((r) => (
-              <option key={r.level} value={r.level}>
-                {r.level === 0 ? t("channel.everyone") : t("channel.andAbove", { role: t(r.key) })}
-              </option>
-            ))}
-          </select>
-          <span className="state">{t("channel.whoPosts.hint")}</span>
-        </div>
-      )}
+      <AccessBox server={server} channel={channel} />
 
       <div className="row left">
         {confirm ? (
@@ -387,6 +464,8 @@ function Channels({ server }: { server: Server }) {
 
   // the order comes from the live space state: a move shows at once, without reloading the list
   const shown = (list ?? [])
+    // a hidden channel of another role is not even offered
+    .filter((c) => c.joinable || can.channels)
     .map((c) => ({ ...c, order: serverAdmin.childOrder(server.spaceId, c.roomId) || c.order }))
     .sort(compareChannels)
     .filter((c) => !filter || `${c.name} ${c.topic}`.toLowerCase().includes(filter.toLowerCase()));
@@ -486,6 +565,8 @@ function Members({ server }: { server: Server }) {
   };
 
   const owner = serverAdmin.owner(server.spaceId);
+  const grant = maxGrant(can.level, owner === self);
+  const roles = serverAdmin.roles(server.spaceId);
 
   return (
     <>
@@ -496,6 +577,8 @@ function Members({ server }: { server: Server }) {
         {members.map((m) => {
           // Matrix allows acting only on those below you
           const below = m.level < can.level && m.userId !== self;
+          // an equal level can be changed only by its holder, not even by the owner
+          const equal = m.userId !== self && m.level >= can.level && can.roles;
           return (
             <div key={m.userId} className="admin-item">
               <div className="admin-row">
@@ -508,9 +591,11 @@ function Members({ server }: { server: Server }) {
                   <div className="state ellipsis">{m.userId}</div>
                 </div>
                 <RoleSelect
+                  list={roleOptions(roles)}
                   value={m.level}
-                  max={can.level}
-                  disabled={!can.roles || (!below && m.userId !== self)}
+                  max={m.userId === self ? m.level : grant}
+                  title={equal ? t("members.equalLevel") : undefined}
+                  disabled={!can.roles || (m.userId !== self && (!below || m.level > grant))}
                   onPick={(level) => {
                     // lowering yourself cannot be undone by yourself: confirm first
                     if (m.userId === self && level < m.level) setDemoting(level);
@@ -624,7 +709,7 @@ function PermsTab({ server }: { server: Server }) {
                 <b>{t(p.name)}</b>
                 <div className="state">{t(p.hint)}</div>
               </div>
-              <RoleSelect value={perms[p.id]} max={can.level} disabled={!can.roles} onPick={(level) => setPerms({ ...perms, [p.id]: level })} />
+              <RoleSelect list={permLevels(serverAdmin.roles(server.spaceId))} value={perms[p.id]} max={can.level} disabled={!can.roles} onPick={(level) => setPerms({ ...perms, [p.id]: level })} />
             </div>
           </div>
         ))}
@@ -643,12 +728,96 @@ function PermsTab({ server }: { server: Server }) {
   );
 }
 
+/* -------------------------------------------------------------------- roles */
+
+/**
+ * Roles of the server: names and colors of the built-in ones, and own roles
+ * between them. A new role goes right above the one picked; the owner alone
+ * can add roles at the admin level and above.
+ */
+function RolesTab({ server }: { server: Server }) {
+  const can = access(server.spaceId);
+  const saved = serverAdmin.roles(server.spaceId);
+  const [roles, setRoles] = useState<RoleDef[]>(saved);
+  const [newName, setNewName] = useState("");
+  const [newColor, setNewColor] = useState("#5b8cff");
+  const [above, setAbove] = useState(0);
+  useEffect(() => setRoles(serverAdmin.roles(server.spaceId)), [server.spaceId]);
+  const members = serverAdmin.members(server.spaceId);
+  const changed = JSON.stringify(roles) !== JSON.stringify(saved);
+  const edit = can.roles;
+
+  const set = (level: number, patch: Partial<RoleDef>) => setRoles(roles.map((r) => (r.level === level ? { ...r, ...patch } : r)));
+  const add = () => {
+    const level = levelAbove(roles, above);
+    if (level === null || !newName.trim()) return;
+    setRoles([...roles, { level, name: newName.trim(), color: newColor, custom: true }].sort((a, b) => b.level - a.level));
+    setNewName("");
+  };
+  const freeAbove = levelAbove(roles, above);
+  const count = (r: RoleDef) => members.filter((m) => serverAdmin.roleAt(roles, m.level)?.level === r.level).length;
+
+  return (
+    <>
+      <p className="sub">{t("roles.intro")}</p>
+      <div className="admin-list">
+        {roles.map((r) => (
+          <div key={r.level} className="admin-item">
+            <div className="admin-row role-row">
+              <input type="color" value={r.color || "#8d93a1"} disabled={!edit} onChange={(e) => set(r.level, { color: e.target.value })} />
+              <input className="grow" value={r.name} maxLength={32} disabled={!edit} onChange={(e) => set(r.level, { name: e.target.value })} />
+              <span className="state role-meta">{tn("roles.people", count(r))}</span>
+              {r.custom && edit && (
+                <button className="ghost icon small" title={t("common.delete")} onClick={() => setRoles(roles.filter((x) => x.level !== r.level))}>
+                  <IconTrash />
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {edit && (
+        <>
+          <div className="section-title">{t("roles.add")}</div>
+          <div className="role-add">
+            <input type="color" value={newColor} onChange={(e) => setNewColor(e.target.value)} />
+            <input value={newName} maxLength={32} placeholder={t("roles.name")} onChange={(e) => setNewName(e.target.value)} />
+            <select value={above} onChange={(e) => setAbove(Number(e.target.value))}>
+              {roles
+                .filter((r) => r.level < ADMIN_LEVEL)
+                .map((r) => (
+                  <option key={r.level} value={r.level}>
+                    {t("roles.above", { role: r.name })}
+                  </option>
+                ))}
+            </select>
+            <button className="primary" disabled={!newName.trim() || freeAbove === null} onClick={add}>
+              {t("roles.addButton")}
+            </button>
+          </div>
+          {freeAbove === null && <div className="state">{t("roles.noRoom")}</div>}
+          <div className="row">
+            <button className="ghost" disabled={!changed} onClick={() => setRoles(saved)}>
+              {t("perms.reset")}
+            </button>
+            <button className="primary" disabled={!changed} onClick={() => void serverAdmin.saveRoles(server.spaceId, roles)}>
+              {t("roles.save")}
+            </button>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
 /* ------------------------------------------------------------------- window */
 
 const TABS: { id: ServerTab; name: Key }[] = [
   { id: "overview", name: "server.tab.overview" },
   { id: "channels", name: "server.tab.channels" },
   { id: "members", name: "server.tab.members" },
+  { id: "roles", name: "server.tab.roles" },
   { id: "bans", name: "server.tab.bans" },
   { id: "perms", name: "server.tab.perms" },
 ];
@@ -689,6 +858,7 @@ export function ServerSettings() {
             {tab === "members" && <Members server={server} />}
             {tab === "bans" && <Bans server={server} />}
             {tab === "perms" && <PermsTab server={server} />}
+            {tab === "roles" && <RolesTab server={server} />}
             {error && <div className="error gap-top">{error}</div>}
           </div>
         </div>

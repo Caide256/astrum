@@ -364,6 +364,25 @@ export const IconCheck = (p: Props) => (
   </Svg>
 );
 
+export const IconSignal = (p: Props) => (
+  <Svg {...p}>
+    <path d="M3 13v-2M6.3 13V9M9.7 13V6.5M13 13V3.5" />
+  </Svg>
+);
+
+export const IconPin = (p: Props) => (
+  <Svg {...p}>
+    <path d="M9.6 2.4 13.6 6.4 11.9 7 9.6 9.3 10 12.2 8.9 13.3 6.3 10.7 3.2 13.8M6.3 10.7 2.7 7.1 3.8 6 6.7 6.4 9 4.1Z" />
+  </Svg>
+);
+
+export const IconLock = (p: Props) => (
+  <Svg {...p}>
+    <rect x="3.4" y="7.2" width="9.2" height="6.4" rx="1.4" />
+    <path d="M5.4 7.2V5.4a2.6 2.6 0 0 1 5.2 0v1.8" />
+  </Svg>
+);
+
 export const IconDoorOut = (p: Props) => (
   <Svg {...p}>
     <path d="M9 2.6H3.6v10.8H9" />

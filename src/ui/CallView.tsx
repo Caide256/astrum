@@ -12,11 +12,13 @@ import {
   toggleCallChat,
   toggleCamera,
 } from "../app.ts";
+import { useAvatarColor } from "../avatarColor.ts";
 import { t, tn } from "../i18n/index.ts";
 import { useStore } from "../store.ts";
 import { voice, type VoiceMember, type VoiceStream, type VoiceVideo } from "../voice/voice.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Chat } from "./Main.tsx";
+import { useLinger } from "./controls.tsx";
 import { popOut } from "./popout.ts";
 import { VideoView } from "./Stage.tsx";
 import {
@@ -167,6 +169,13 @@ function TileView({
 }) {
   const roomId = useStore(app, (s) => s.voiceChannel);
   const box = useRef<HTMLDivElement>(null);
+  // the tile background the person chose: a color from the avatar, or their own
+  const person = tile.kind === "member" ? tile.member : null;
+  const look = person?.tile ?? null;
+  const fromAvatar = useAvatarColor(
+    person && look && look.mode !== "color" ? avatarMxc(person.userId, roomId) : "",
+    look && look.mode !== "color" ? look.mode : null,
+  );
 
   if (tile.kind === "stream") {
     const { stream, video } = tile;
@@ -183,20 +192,16 @@ function TileView({
       body = (
         <div className="ctile-offer">
           <Avatar mxc={avatarMxc(stream.userId, roomId)} name={who} size={56} />
-          {stream.local ? (
-            <div className="ctile-actions">
-              <button onClick={(e) => (e.stopPropagation(), voice.watch(stream.identity))}>
-                <IconEye /> {t("share.watch")}
-              </button>
-              <button className="ghost" onClick={(e) => (e.stopPropagation(), openShareSettings())}>
-                <IconGear /> {t("share.settings")}
-              </button>
-            </div>
-          ) : (
-            <button className="primary" onClick={(e) => (e.stopPropagation(), voice.watch(stream.identity))}>
-              <IconEye /> {t("share.watch")}
+          <div className="ctile-actions">
+            <button className="round-btn primary" title={t("share.watch")} onClick={(e) => (e.stopPropagation(), voice.watch(stream.identity))}>
+              <IconEye size={20} />
             </button>
-          )}
+            {stream.local && (
+              <button className="round-btn" title={t("share.settings")} onClick={(e) => (e.stopPropagation(), openShareSettings())}>
+                <IconGear size={18} />
+              </button>
+            )}
+          </div>
         </div>
       );
     }
@@ -230,13 +235,13 @@ function TileView({
     <div
       ref={box}
       className={`ctile member ${member.speaking ? "speaking" : ""} ${focused ? "focused" : ""}`}
-      style={{ ...style, background: video ? "#000" : tint(member.userId || member.id) }}
+      style={{ ...style, background: video ? "#000" : (look?.mode === "color" ? look.color : fromAvatar) || tint(member.userId || member.id) }}
       onClick={onFocus}
       onDoubleClick={() => video && toggleFullscreen(box.current)}
       onContextMenu={(e) => {
         if (!member.userId) return;
         e.preventDefault();
-        openUserMenu(member.userId, e.clientX, e.clientY, roomId);
+        openUserMenu(member.userId, e.clientX, e.clientY, roomId, true);
       }}
     >
       {video ? (
@@ -267,8 +272,8 @@ function Controls() {
     <div className="call-controls">
       <div className="ctl-group">
         <button
-          className={`ctl ${state.muted ? "off" : ""}`}
-          title={state.muted ? t("call.unmute") : t("call.mute")}
+          className={`ctl ${state.muted ? "off" : ""} ${state.hint === "muted-talk" ? "attention" : ""}`}
+          title={state.hint === "muted-talk" ? t("hint.mutedTalk") : state.muted ? t("call.unmute") : t("call.mute")}
           onClick={() => void voice.setMuted(!state.muted)}
         >
           {state.muted ? <IconMicOff /> : <IconMic />}
@@ -320,6 +325,7 @@ export function CallView() {
   const servers = useStore(app, (s) => s.servers);
   const requested = useStore(app, (s) => s.callFocus);
   const chatOpen = useStore(app, (s) => s.callChat);
+  const chatPanel = useLinger(chatOpen, 180);
   const [focus, setFocus] = useState<string | null>(null);
   const [stageRef, size] = useSize<HTMLDivElement>();
 
@@ -407,8 +413,8 @@ export function CallView() {
         </div>
         <Controls />
       </section>
-      {chatOpen && (
-        <div className="call-chat">
+      {chatPanel.shown && (
+        <div className={`call-chat ${chatPanel.closing ? "closing" : ""}`}>
           <Chat embedded onClose={() => toggleCallChat(false)} />
         </div>
       )}

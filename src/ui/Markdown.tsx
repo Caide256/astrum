@@ -2,7 +2,7 @@ import { useMemo, useState, type ReactNode } from "react";
 
 import { copyToClipboard } from "../desktop.ts";
 import { t } from "../i18n/index.ts";
-import { parse, type Block, type Inline, type Item } from "../markdown.ts";
+import { parse, parseInline, type Block, type Inline, type Item, type MentionResolver } from "../markdown.ts";
 import { IconCheck, IconCopy } from "./icons.tsx";
 
 /**
@@ -17,7 +17,11 @@ type Ctx = {
   checks: Record<string, CheckState>;
   onToggle?: (key: string, done: boolean) => void;
   whoName?: (userId: string) => string;
+  mentions?: MentionView;
 };
+
+/** How mentions look: who a name means, the own id for the highlight, a click on a person. */
+export type MentionView = { resolve: MentionResolver; me: string; open: (userId: string) => void };
 
 function Spoiler({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -62,10 +66,27 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
   );
 }
 
-function inline(nodes: Inline[], key = ""): ReactNode[] {
+function inline(nodes: Inline[], key = "", mv?: MentionView): ReactNode[] {
   return nodes.map((n, i) => {
     const k = `${key}${i}`;
     switch (n.t) {
+      case "mention": {
+        const who = mv?.resolve(n.id);
+        if (!who) return n.id;
+        return (
+          <span
+            key={k}
+            className={`mention ${who.userId === mv?.me ? "me" : ""}`}
+            title={who.userId}
+            onClick={(e) => {
+              e.stopPropagation();
+              mv?.open(who.userId);
+            }}
+          >
+            @{who.name}
+          </span>
+        );
+      }
       case "text":
         return n.v;
       case "br":
@@ -77,19 +98,19 @@ function inline(nodes: Inline[], key = ""): ReactNode[] {
           </code>
         );
       case "b":
-        return <strong key={k}>{inline(n.c, `${k}-`)}</strong>;
+        return <strong key={k}>{inline(n.c, `${k}-`, mv)}</strong>;
       case "i":
-        return <em key={k}>{inline(n.c, `${k}-`)}</em>;
+        return <em key={k}>{inline(n.c, `${k}-`, mv)}</em>;
       case "u":
-        return <u key={k}>{inline(n.c, `${k}-`)}</u>;
+        return <u key={k}>{inline(n.c, `${k}-`, mv)}</u>;
       case "s":
-        return <del key={k}>{inline(n.c, `${k}-`)}</del>;
+        return <del key={k}>{inline(n.c, `${k}-`, mv)}</del>;
       case "spoiler":
-        return <Spoiler key={k}>{inline(n.c, `${k}-`)}</Spoiler>;
+        return <Spoiler key={k}>{inline(n.c, `${k}-`, mv)}</Spoiler>;
       case "link":
         return (
           <a key={k} href={n.href} target="_blank" rel="noreferrer" title={n.href}>
-            {inline(n.c, `${k}-`)}
+            {inline(n.c, `${k}-`, mv)}
           </a>
         );
     }
@@ -114,7 +135,7 @@ function TaskItem({ item, ctx, k }: { item: Item; ctx: Ctx; k: string }) {
         {done && <IconCheck size={12} />}
       </button>
       <span className="md-task-text">
-        {inline(item.c, `${k}t`)}
+        {inline(item.c, `${k}t`, ctx.mentions)}
         {item.sub.map((b, i) => block(b, ctx, `${k}s${i}`))}
       </span>
     </li>
@@ -126,14 +147,14 @@ function block(b: Block, ctx: Ctx, k: string): ReactNode {
     case "p":
       return (
         <p key={k} className="md-p">
-          {inline(b.c, k)}
+          {inline(b.c, k, ctx.mentions)}
         </p>
       );
     case "h": {
       const Tag = `h${b.level}` as "h1" | "h2" | "h3";
       return (
         <Tag key={k} className="md-h">
-          {inline(b.c, k)}
+          {inline(b.c, k, ctx.mentions)}
         </Tag>
       );
     }
@@ -151,7 +172,7 @@ function block(b: Block, ctx: Ctx, k: string): ReactNode {
       const items = b.items.map((it, i) =>
         it.task === null ? (
           <li key={`${k}i${i}`}>
-            {inline(it.c, `${k}i${i}`)}
+            {inline(it.c, `${k}i${i}`, ctx.mentions)}
             {it.sub.map((x, j) => block(x, ctx, `${k}i${i}s${j}`))}
           </li>
         ) : (
@@ -177,7 +198,7 @@ function block(b: Block, ctx: Ctx, k: string): ReactNode {
               <tr>
                 {b.head.map((c, i) => (
                   <th key={i} style={{ textAlign: b.align[i] ?? undefined }}>
-                    {inline(c, `${k}h${i}`)}
+                    {inline(c, `${k}h${i}`, ctx.mentions)}
                   </th>
                 ))}
               </tr>
@@ -187,7 +208,7 @@ function block(b: Block, ctx: Ctx, k: string): ReactNode {
                 <tr key={i}>
                   {r.map((c, j) => (
                     <td key={j} style={{ textAlign: b.align[j] ?? undefined }}>
-                      {inline(c, `${k}r${i}c${j}`)}
+                      {inline(c, `${k}r${i}c${j}`, ctx.mentions)}
                     </td>
                   ))}
                 </tr>
@@ -199,18 +220,39 @@ function block(b: Block, ctx: Ctx, k: string): ReactNode {
   }
 }
 
+/**
+ * One line of formatting for previews such as a reply quote: block markers
+ * (headings, quotes, list bullets, code fences) are dropped, line breaks
+ * become spaces, inline formatting stays.
+ */
+export function InlineMarkdown({ text, mentions }: { text: string; mentions?: MentionView }) {
+  const nodes = useMemo(() => {
+    const flat = text
+      .replace(/\r\n?/g, "\n")
+      .split("\n")
+      .filter((l) => !/^\s*(`{3,}|~{3,})/.test(l))
+      .map((l) => l.replace(/^\s*(#{1,3}\s+|>+\s?|[-*+]\s+(\[[ xX]\]\s+)?|\d{1,9}[.)]\s+)/, ""))
+      .filter((l) => l.trim())
+      .join(" ");
+    return parseInline(flat);
+  }, [text]);
+  return <span className="md md-inline">{inline(nodes, "", mentions)}</span>;
+}
+
 export function Markdown({
   text,
   checks = {},
   onToggle,
   whoName,
+  mentions,
 }: {
   text: string;
   checks?: Record<string, CheckState>;
   onToggle?: (key: string, done: boolean) => void;
   whoName?: (userId: string) => string;
+  mentions?: MentionView;
 }) {
   const blocks = useMemo(() => parse(text), [text]);
-  const ctx: Ctx = { checks, onToggle, whoName };
+  const ctx: Ctx = { checks, onToggle, whoName, mentions };
   return <div className="md">{blocks.map((b, i) => block(b, ctx, `b${i}`))}</div>;
 }

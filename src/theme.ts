@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 
+import { BRAND } from "./brand.ts";
 import { setShellSettings } from "./desktop.ts";
 import type { Key } from "./i18n/index.ts";
 
@@ -11,6 +12,10 @@ import type { Key } from "./i18n/index.ts";
  * <html>, so presets and the user's own theme work the same way. With a
  * gradient, panels become translucent (how much is `glass`) and floating
  * surfaces such as dialogs and menus stay solid (the --pop-* colors).
+ *
+ * Own themes are a list: each has an id, a title and the same fields as a
+ * preset. They can be saved to a file and loaded from one, so friends can
+ * share themes.
  */
 
 export type ThemeColors = {
@@ -33,6 +38,8 @@ export type Gradient = { stops: string[]; angle: number };
 export type ThemeDef = {
   id: string;
   name: Key | "";
+  /** Title of an own theme; empty means "Own N" by its place in the list. */
+  title?: string;
   dark: boolean;
   colors: ThemeColors;
   gradient: Gradient | null;
@@ -40,7 +47,11 @@ export type ThemeDef = {
   glass: number;
 };
 
+/** Id of the single own theme of older versions; it becomes the first one in the list. */
 export const CUSTOM = "custom";
+
+/** What a theme file says it is. */
+const FILE_TYPE = `${BRAND.appId}.theme`;
 
 const DARK: ThemeColors = {
   bg0: "#121317",
@@ -206,19 +217,11 @@ export function tokens(def: ThemeDef): Record<string, string> {
 
 const STORE_KEY = "app.theme";
 const CUSTOM_KEY = "app.theme-custom";
+const CUSTOMS_KEY = "app.theme-customs";
+const MAX_CUSTOMS = 30;
 
-function loadCustom(): ThemeDef {
-  try {
-    const raw = JSON.parse(localStorage.getItem(CUSTOM_KEY) ?? "null") as Partial<ThemeDef> | null;
-    if (raw && raw.colors) return sanitize(raw);
-  } catch {
-    // nothing stored
-  }
-  return { ...THEMES[0], id: CUSTOM, name: "" };
-}
-
-/** A custom theme from storage or from the account: only known fields, only colors. */
-export function sanitize(raw: Partial<ThemeDef>): ThemeDef {
+/** An own theme from storage, the account or a file: only known fields, only colors. */
+export function sanitize(raw: Partial<ThemeDef>, id: string = CUSTOM): ThemeDef {
   const base = raw.dark === false ? LIGHT : DARK;
   const colors = { ...base };
   for (const k of Object.keys(base) as (keyof ThemeColors)[]) {
@@ -228,8 +231,9 @@ export function sanitize(raw: Partial<ThemeDef>): ThemeDef {
   const stops = (raw.gradient?.stops ?? []).filter((s) => typeof s === "string" && isHex(s)).slice(0, 3);
   const angle = Number(raw.gradient?.angle);
   return {
-    id: CUSTOM,
+    id,
     name: "",
+    title: typeof raw.title === "string" ? raw.title.trim().slice(0, 40) : "",
     dark: raw.dark !== false,
     colors,
     gradient: stops.length >= 2 ? { stops, angle: Number.isFinite(angle) ? Math.round(angle) % 360 : 135 } : null,
@@ -237,10 +241,42 @@ export function sanitize(raw: Partial<ThemeDef>): ThemeDef {
   };
 }
 
+function isOwnId(id: unknown): id is string {
+  return typeof id === "string" && (id === CUSTOM || /^custom-[a-z0-9]{4,20}$/.test(id));
+}
+
+function cleanList(raw: unknown): ThemeDef[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: ThemeDef[] = [];
+  for (const item of raw.slice(0, MAX_CUSTOMS)) {
+    const def = item as Partial<ThemeDef> | null;
+    if (!def || !def.colors || !isOwnId(def.id) || seen.has(def.id)) continue;
+    seen.add(def.id);
+    out.push(sanitize(def, def.id));
+  }
+  return out;
+}
+
+function loadCustoms(): ThemeDef[] {
+  try {
+    const list = cleanList(JSON.parse(localStorage.getItem(CUSTOMS_KEY) ?? "null"));
+    if (list.length) return list;
+    // the single own theme of older versions
+    const old = JSON.parse(localStorage.getItem(CUSTOM_KEY) ?? "null") as Partial<ThemeDef> | null;
+    if (old && old.colors) return [sanitize(old, CUSTOM)];
+  } catch {
+    // nothing stored
+  }
+  return [];
+}
+
+let customs = loadCustoms();
+
 function load(): string {
   try {
-    const saved = localStorage.getItem(STORE_KEY);
-    if (saved === CUSTOM || THEMES.some((th) => th.id === saved)) return saved as string;
+    const saved = localStorage.getItem(STORE_KEY) ?? "";
+    if (THEMES.some((th) => th.id === saved) || customs.some((c) => c.id === saved)) return saved;
   } catch {
     // storage unavailable
   }
@@ -248,12 +284,14 @@ function load(): string {
 }
 
 let theme = load();
-let custom = loadCustom();
 const listeners = new Set<() => void>();
 
+export function isOwnTheme(id: string = theme): boolean {
+  return customs.some((c) => c.id === id);
+}
+
 export function themeDef(id: string = theme): ThemeDef {
-  if (id === CUSTOM) return custom;
-  return THEMES.find((th) => th.id === id) ?? THEMES[0];
+  return customs.find((c) => c.id === id) ?? THEMES.find((th) => th.id === id) ?? THEMES[0];
 }
 
 /** The color behind everything: the window shows it before the page loads. */
@@ -279,56 +317,124 @@ function changed(): void {
   listeners.forEach((l) => l());
 }
 
-export function getTheme(): string {
-  return theme;
+function saveCustoms(): void {
+  try {
+    localStorage.setItem(CUSTOMS_KEY, JSON.stringify(customs));
+  } catch {
+    // kept until restart
+  }
 }
 
-export function setTheme(next: string): void {
-  if (next === theme || (next !== CUSTOM && !THEMES.some((th) => th.id === next))) return;
-  theme = next;
+function saveCurrent(): void {
   try {
     localStorage.setItem(STORE_KEY, theme);
   } catch {
     // kept until restart
   }
+}
+
+export function getTheme(): string {
+  return theme;
+}
+
+export function setTheme(next: string): void {
+  if (next === theme || (!THEMES.some((th) => th.id === next) && !isOwnTheme(next))) return;
+  theme = next;
+  saveCurrent();
   changed();
 }
 
-export function getCustomTheme(): ThemeDef {
-  return custom;
+/* ------------------------------------------------------------ own themes */
+
+export function listOwnThemes(): ThemeDef[] {
+  return customs;
 }
 
-/** Save the own theme and switch to it. */
-export function setCustomTheme(next: Partial<ThemeDef>): void {
-  custom = sanitize({ ...custom, ...next, colors: { ...custom.colors, ...next.colors } });
-  try {
-    localStorage.setItem(CUSTOM_KEY, JSON.stringify(custom));
-  } catch {
-    // kept until restart
-  }
-  if (theme !== CUSTOM) {
-    theme = CUSTOM;
-    try {
-      localStorage.setItem(STORE_KEY, theme);
-    } catch {
-      // kept until restart
-    }
-  }
+function newId(): string {
+  return `custom-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+/** A new own theme, a copy of `from` (the current theme by default), switched to at once. */
+export function createOwnTheme(title: string, from: ThemeDef = themeDef()): string {
+  const id = newId();
+  const def = sanitize({ ...from, gradient: from.gradient ? { ...from.gradient, stops: [...from.gradient.stops] } : null, title }, id);
+  customs = [...customs, def].slice(-MAX_CUSTOMS);
+  saveCustoms();
+  theme = id;
+  saveCurrent();
   changed();
+  return id;
 }
 
-/** The own theme from the account: stored, and shown if it is the current one. */
-export function importCustomTheme(raw: Partial<ThemeDef>): void {
-  const next = sanitize(raw);
-  if (JSON.stringify(next) === JSON.stringify(custom)) return;
-  custom = next;
-  try {
-    localStorage.setItem(CUSTOM_KEY, JSON.stringify(custom));
-  } catch {
-    // kept until restart
-  }
-  if (theme === CUSTOM) changed();
+/** Change an own theme; shown right away if it is the current one. */
+export function updateOwnTheme(id: string, patch: Partial<ThemeDef>): void {
+  const old = customs.find((c) => c.id === id);
+  if (!old) return;
+  const next = sanitize({ ...old, ...patch, colors: { ...old.colors, ...patch.colors } }, id);
+  customs = customs.map((c) => (c.id === id ? next : c));
+  saveCustoms();
+  if (theme === id) changed();
   else listeners.forEach((l) => l());
+}
+
+export function deleteOwnTheme(id: string): void {
+  if (!isOwnTheme(id)) return;
+  customs = customs.filter((c) => c.id !== id);
+  saveCustoms();
+  if (theme === id) {
+    theme = "dark";
+    saveCurrent();
+    changed();
+  } else listeners.forEach((l) => l());
+}
+
+/** A theme as a file others can load. */
+export function exportOwnTheme(id: string): string {
+  const def = themeDef(id);
+  return JSON.stringify(
+    { type: FILE_TYPE, version: 1, name: def.title ?? "", dark: def.dark, colors: def.colors, gradient: def.gradient, glass: def.glass },
+    null,
+    2,
+  );
+}
+
+/** Load a theme file as a new own theme. Throws on anything that is not a theme. */
+export function importOwnTheme(text: string, fallbackTitle: string): string {
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    throw new Error("not json");
+  }
+  if (!raw || typeof raw !== "object" || !raw.colors || typeof raw.colors !== "object") throw new Error("no colors");
+  const title = typeof raw.name === "string" && raw.name.trim() ? raw.name : fallbackTitle;
+  return createOwnTheme(title, sanitize({ ...(raw as Partial<ThemeDef>), title }, "import"));
+}
+
+/** Own themes from the account: the list replaces the local one. */
+export function importOwnThemes(list: unknown): void {
+  const next = cleanList(list);
+  if (JSON.stringify(next) === JSON.stringify(customs)) return;
+  customs = next;
+  saveCustoms();
+  if (!isOwnTheme(theme) && theme.startsWith("custom")) {
+    theme = "dark";
+    saveCurrent();
+  }
+  changed();
+}
+
+/** The single own theme of older versions from the account: kept as the first one if the list is empty. */
+export function importCustomTheme(raw: Partial<ThemeDef>): void {
+  if (customs.length) return;
+  customs = [sanitize(raw, CUSTOM)];
+  saveCustoms();
+  listeners.forEach((l) => l());
+}
+
+/** For older versions reading the account: the current own theme, or the first one. */
+export function getCustomTheme(): ThemeDef {
+  return customs.find((c) => c.id === theme) ?? customs[0] ?? { ...THEMES[0], id: CUSTOM, name: "" };
 }
 
 export function onThemeChange(cb: () => void): () => void {

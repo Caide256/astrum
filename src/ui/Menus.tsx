@@ -130,7 +130,9 @@ export function CodecLine({ info, sending }: { info: CodecInfo | null; sending: 
       <b>{who}</b> · {info.codec || "?"}
       {size} · {t("codec.fps", { fps: info.fps })}
       {noH264 && <div className="codec-why">{t("codec.noH264", { codec: info.serverCodecs[0] })}</div>}
-      {sending && !info.gpu && !noH264 && <div className="codec-why">{t("codec.gpuRefused")}</div>}
+      {info.limit === "cpu" && <div className="codec-why">{t("codec.limitCpu")}</div>}
+      {info.limit === "bandwidth" && <div className="codec-why">{t("codec.limitNet")}</div>}
+      {sending && !info.gpu && !noH264 && /h264/i.test(info.codec) && <div className="codec-why">{t("codec.gpuRefused")}</div>}
     </div>
   );
 }

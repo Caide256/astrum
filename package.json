@@ -1,6 +1,6 @@
 {
   "name": "matrix-voice-client",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Discord-like desktop client for Matrix: voice, screen sharing and chats",
   "private": true,
   "type": "module",

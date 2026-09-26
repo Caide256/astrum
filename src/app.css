@@ -4826,3 +4826,1201 @@ input.color-hex {
   width: auto;
   min-width: 260px;
 }
+
+/* ------------------------------------------------ create server, history, keys */
+
+.row.start {
+  justify-content: flex-start;
+}
+
+.status-card .row {
+  margin-top: 8px;
+}
+
+.add-server .field input {
+  width: 100%;
+}
+
+.address-input {
+  display: flex;
+  align-items: center;
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 10px;
+  font: 13px/1.4 Consolas, "Cascadia Mono", monospace;
+  color: var(--muted);
+}
+
+.address-input:focus-within {
+  border-color: var(--accent);
+}
+
+.address-input span {
+  white-space: nowrap;
+}
+
+.address-input span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.add-server .address-input input {
+  flex: 1;
+  min-width: 60px;
+  width: auto;
+  border: none;
+  background: transparent;
+  padding: 8px 2px;
+  font: inherit;
+  color: var(--text);
+  outline: none;
+  box-shadow: none;
+}
+
+.join-pick {
+  margin: 4px 0 6px;
+}
+
+.join-pick button {
+  flex: 1;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.add-server .field .state,
+.add-server form > .state {
+  display: block;
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.chat-start {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 18px 2px 14px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.chat-start b {
+  font-size: 20px;
+}
+
+.chat-start span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.recovery-setup h3 {
+  margin: 0 0 10px;
+}
+
+.recovery-setup .note {
+  margin-bottom: 12px;
+}
+
+.recovery-key {
+  margin: 12px 0 8px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: var(--bg-0);
+  border: 1px dashed var(--line);
+  font: 16px/1.6 Consolas, "Cascadia Mono", monospace;
+  letter-spacing: 0.04em;
+  word-spacing: 0.2em;
+  text-align: center;
+  user-select: all;
+}
+
+.check-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.check-line input {
+  width: auto;
+  margin: 0;
+}
+
+.status-card.recovery {
+  margin-top: 12px;
+}
+
+/* ---------------------------------------------------------- delete account */
+
+button.ghost.danger-text {
+  color: var(--danger);
+}
+
+.delete-account {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+  border-radius: 10px;
+}
+
+.delete-account .check-line {
+  margin-top: 0;
+}
+
+.delete-account .field,
+.delete-account .row {
+  margin: 0;
+}
+
+/* ------------------------------------------------ replies, quotes, deleted */
+
+button.quote {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  max-width: 100%;
+}
+
+button.quote:hover span,
+button.quote:hover b {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.md-inline {
+  display: inline;
+}
+
+.md-inline .md-code {
+  font-size: 11px;
+}
+
+.msg.deleted .who {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.msg.deleted .avatar {
+  opacity: 0.55;
+}
+
+.composer-closed {
+  margin: 0 16px 16px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* ----------------------------------------------------------------- mentions */
+
+.mention {
+  display: inline;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--link);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mention:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.mention.me {
+  background: color-mix(in srgb, var(--gold) 28%, transparent);
+  color: var(--gold);
+}
+
+.msg.pinged {
+  background: color-mix(in srgb, var(--gold) 9%, transparent);
+  box-shadow: inset 2px 0 0 var(--gold);
+}
+
+.msg.pinged:hover {
+  background: color-mix(in srgb, var(--gold) 13%, transparent);
+}
+
+.composer-box {
+  position: relative;
+}
+
+.mention-pop {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 30;
+  padding: 6px;
+  border-radius: 10px;
+  background: var(--pop-2);
+  border: 1px solid var(--line);
+  box-shadow: 0 10px 28px var(--shadow);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.mention-head {
+  padding: 2px 8px 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.mention-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+}
+
+.mention-row.on {
+  background: var(--hover);
+}
+
+.mention-row .state {
+  font-size: 12px;
+}
+
+/* -------------------------------------------------------------- link cards */
+
+.embed {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  max-width: 440px;
+  margin-top: 6px;
+  padding: 10px 12px 12px;
+  border-radius: 8px;
+  border-left: 4px solid var(--accent);
+  background: var(--bg-1);
+}
+
+.embed.video {
+  border-left-color: #ff0000;
+}
+
+.embed.wide {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.embed-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.embed-site {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.embed-title {
+  font-weight: 600;
+  color: var(--link);
+  word-break: break-word;
+}
+
+.embed-desc {
+  font-size: 13px;
+  color: var(--text);
+  opacity: 0.85;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-line;
+}
+
+.embed-thumb,
+.embed-shot {
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.embed-thumb img {
+  width: 80px;
+  height: 80px;
+  object-fit: cover;
+  display: block;
+}
+
+.embed-shot {
+  position: relative;
+  width: 100%;
+}
+
+.embed-shot img {
+  display: block;
+  width: 100%;
+  max-height: 300px;
+  object-fit: cover;
+}
+
+.embed.video .embed-shot img {
+  aspect-ratio: 16 / 9;
+  max-height: none;
+}
+
+.embed-play {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 52px;
+  height: 52px;
+  margin: -26px 0 0 -26px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+}
+
+.embed-shot:hover .embed-play {
+  background: #ff0000;
+}
+
+.embed-player {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #000;
+}
+
+.embed-player iframe {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+}
+
+.embed-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+}
+
+.embed:hover .embed-remove {
+  opacity: 1;
+}
+
+/* ------------------------------------------------- voice hints, connection */
+
+.dock {
+  position: relative;
+}
+
+.me-bar {
+  position: relative;
+}
+
+.dock-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  border: none;
+  background: none;
+  text-align: left;
+  color: var(--ok);
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.dock-status:hover {
+  background: var(--hover);
+}
+
+.dock-status:hover b {
+  text-decoration: underline;
+}
+
+button.attention {
+  animation: attention 1.2s ease-in-out infinite;
+  box-shadow: 0 0 0 2px var(--warn);
+}
+
+@keyframes attention {
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 35%, transparent);
+  }
+}
+
+.me-bar button.dock-hint,
+.me-bar button.dock-hint:hover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  z-index: 20;
+  max-width: 210px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 8px;
+  background: var(--warn);
+  color: #1b1300;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-align: left;
+  box-shadow: 0 6px 18px var(--shadow);
+  cursor: pointer;
+  width: auto;
+  height: auto;
+  white-space: normal;
+}
+
+.me-bar button.dock-hint:hover {
+  filter: brightness(1.08);
+}
+
+.dock-hint::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  border: 6px solid transparent;
+  border-top-color: var(--warn);
+}
+
+.dock-hint.mic {
+  right: 58px;
+}
+
+.dock-hint.mic::after {
+  right: 12px;
+}
+
+.dock-hint.gear {
+  right: 0;
+}
+
+.dock-hint.gear::after {
+  right: 10px;
+}
+
+.net-back {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+
+.net-panel {
+  position: absolute;
+  left: 8px;
+  bottom: calc(100% + 6px);
+  z-index: 41;
+  width: 300px;
+  padding: 12px;
+  border-radius: 12px;
+  background: var(--pop-1);
+  border: 1px solid var(--line);
+  box-shadow: 0 14px 36px var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.net-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.net-head .state {
+  flex: 1;
+  font-size: 12px;
+}
+
+.net-head .tiny {
+  opacity: 1;
+}
+
+.net-caption {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.net-chart {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+  height: 76px;
+}
+
+.net-chart svg {
+  width: 100%;
+  height: 100%;
+  border-radius: 6px;
+  background: var(--bg-0);
+}
+
+.net-grid {
+  stroke: var(--line);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.net-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.net-area {
+  fill: color-mix(in srgb, var(--accent) 16%, transparent);
+  stroke: none;
+}
+
+.net-line.warn {
+  stroke: var(--danger);
+}
+
+.net-area.warn {
+  fill: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+
+.net-scale {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--muted);
+  text-align: right;
+}
+
+.net-facts {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.net-facts div {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.net-facts dt {
+  color: var(--muted);
+  flex: none;
+}
+
+.net-facts dd {
+  margin: 0;
+  text-align: right;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.net-facts dd.bad {
+  color: var(--danger);
+}
+
+.net-note {
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.cam-quality {
+  display: flex;
+  gap: 8px;
+}
+
+.cam-quality select {
+  flex: 1;
+}
+
+.tile-pref {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.tile-preview {
+  width: 160px;
+  height: 90px;
+  flex: none;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  transition: background 0.3s ease;
+}
+
+.tile-pref-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+/* -------------------------------------------------------------- own themes */
+
+.theme-card.add {
+  align-items: stretch;
+}
+
+.theme-plus {
+  height: 74px;
+  border-radius: 8px;
+  border: 2px dashed color-mix(in srgb, var(--accent) 45%, var(--line));
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  transition: background 0.15s ease;
+}
+
+.theme-card.add:hover .theme-plus {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.theme-add-box {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+}
+
+.theme-add-box .error {
+  grid-column: 1 / -1;
+}
+
+.theme-add-way {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.theme-add-way .state {
+  font-size: 12px;
+}
+
+.theme-file-row {
+  margin-top: 14px;
+  align-items: center;
+}
+
+.toggle-row .switch {
+  cursor: pointer;
+}
+
+.toggle-row {
+  cursor: default;
+}
+
+/* ------------------------------------------------ aligned header lines */
+
+/* the server name and the chat title share one bottom line */
+.server-head,
+.chat-head,
+.call-head {
+  box-sizing: border-box;
+  height: 52px;
+  min-height: 52px;
+  flex: none;
+}
+
+.server-head {
+  padding: 0 14px;
+}
+
+.chat-head,
+.call-head {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+/* ------------------------------------------------ small fixes of 0.6.4 */
+
+.round-btn {
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+
+.ctile-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.invite-accept {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 9px;
+  border: none;
+  border-radius: 6px;
+  background: var(--ok);
+  color: var(--on-ok);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.invite-accept:hover:not(:disabled) {
+  background: var(--ok-hover);
+  color: var(--on-ok);
+}
+
+.direct-row .tiny {
+  margin-right: 2px;
+}
+
+.direct-drop {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  margin-bottom: 2px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  font-size: 12px;
+}
+
+.direct-drop .ellipsis {
+  flex: 1;
+}
+
+.create-channel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  animation: pop-in 0.16s ease-out;
+}
+
+.create-channel .sigil {
+  color: var(--muted);
+  display: inline-flex;
+}
+
+.create-channel input {
+  flex: 1;
+  padding: 6px 8px;
+}
+
+/* ------------------------------------------------ quotes, pins, unread line */
+
+button.quote.fragment {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  margin: 2px 0 4px;
+  max-width: 560px;
+}
+
+.quote-bar {
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  flex: none;
+}
+
+.quote-text {
+  font-size: 13px;
+  color: var(--muted);
+  font-style: italic;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.quote-text b {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pin-mark {
+  display: inline-flex;
+  vertical-align: -1px;
+  color: var(--gold);
+}
+
+.pin-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.pin-tool small {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.pins-panel .group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pin-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.pin-open {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: left;
+}
+
+.pin-item .tiny {
+  opacity: 1;
+}
+
+.new-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.new-line::before,
+.new-line::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--danger);
+  opacity: 0.7;
+}
+
+.new-line::after {
+  flex: 0 0 18px;
+}
+
+.jump-bar {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 86px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 13px;
+  box-shadow: 0 8px 22px var(--shadow);
+  animation: slide-up 0.18s ease-out;
+}
+
+.jump-bar:hover:not(:disabled) {
+  background: var(--accent-hover);
+  color: var(--on-accent);
+}
+
+/* ------------------------------------------------------------ message look */
+
+.msg .body {
+  font-size: var(--msg-size, 14px);
+}
+
+:root[data-msg-density="compact"] .timeline {
+  gap: 2px;
+}
+
+:root[data-msg-density="compact"] .msg {
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+
+:root[data-msg-density="compact"] .msg > .avatar,
+:root[data-msg-density="compact"] .msg > .avatar-wrap {
+  width: 26px !important;
+  height: 26px !important;
+  font-size: 10px !important;
+}
+
+/* messages on the right: the grid runs right to left, the content stays readable */
+:root[data-msg-align="own-right"] .msg.own,
+:root[data-msg-align="right"] .msg {
+  direction: rtl;
+}
+
+:root[data-msg-align="own-right"] .msg.own > *,
+:root[data-msg-align="right"] .msg > * {
+  direction: ltr;
+}
+
+:root[data-msg-align="own-right"] .msg.own .msg-body,
+:root[data-msg-align="right"] .msg .msg-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+}
+
+:root[data-msg-align="own-right"] .msg.own .reactions,
+:root[data-msg-align="right"] .msg .reactions {
+  justify-content: flex-end;
+}
+
+:root[data-msg-align="own-right"] .msg.own .md-pre,
+:root[data-msg-align="own-right"] .msg.own .md-table-wrap,
+:root[data-msg-align="own-right"] .msg.own .embed,
+:root[data-msg-align="right"] .msg .md-pre,
+:root[data-msg-align="right"] .msg .md-table-wrap,
+:root[data-msg-align="right"] .msg .embed {
+  text-align: left;
+}
+
+/* own messages on the right get a bubble, like in messengers */
+:root[data-msg-align="own-right"] .msg.own .body {
+  display: inline-block;
+  max-width: 100%;
+  padding: 6px 11px;
+  border-radius: 14px 14px 4px 14px;
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-2));
+  text-align: left;
+}
+
+/* ----------------------------------------------------- roles and access */
+
+.role-row input[type="color"],
+.role-add input[type="color"] {
+  width: 34px;
+  height: 30px;
+  padding: 2px;
+  flex: none;
+}
+
+.role-row .grow {
+  min-width: 0;
+}
+
+.role-meta {
+  flex: none;
+  font-size: 12px;
+}
+
+.role-add {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.role-add input:not([type="color"]) {
+  flex: 1;
+  min-width: 140px;
+}
+
+.role-add select {
+  width: auto;
+}
+
+.access-box {
+  margin: 6px 0 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+}
+
+.access-box .field .state {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.lock-mark {
+  display: inline-flex;
+  color: var(--muted);
+  flex: none;
+}
+
+.badge[style] {
+  border: 1px solid;
+  background: transparent;
+}
+
+/* ------------------------------------------------------- dragging channels */
+
+.channel-item {
+  position: relative;
+}
+
+.channel-item.dragging {
+  opacity: 0.45;
+}
+
+.channel-item.drop-before::before,
+.channel-item.drop-after::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  z-index: 2;
+}
+
+.channel-item.drop-before::before {
+  top: -1px;
+}
+
+.channel-item.drop-after::after {
+  bottom: -1px;
+}
+
+/* ------------------------------------------------------- more motion */
+
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes slide-out-right {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+@keyframes grow-in {
+  from {
+    opacity: 0;
+    transform: scaleY(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.call-chat.closing {
+  animation: slide-out-right 0.18s ease-in forwards;
+  pointer-events: none;
+}
+
+/* side panels: members, search, pins */
+.members {
+  animation: slide-in-right 0.18s ease-out;
+}
+
+/* popups near the bottom rise from it */
+.net-panel,
+.mention-pop {
+  animation: slide-up 0.16s ease-out;
+  transform-origin: bottom left;
+}
+
+.me-bar button.dock-hint {
+  animation: slide-up 0.18s ease-out;
+}
+
+.compose-bar,
+.format-bar,
+.uploads {
+  animation: slide-up 0.14s ease-out;
+}
+
+/* things that unfold in place */
+.theme-add-box,
+.access-box,
+.delete-account,
+.recovery-setup,
+.channel-editor,
+.direct-drop,
+.menu-reason,
+.card-preview {
+  animation: grow-in 0.16s ease-out;
+  transform-origin: top center;
+}
+
+.embed,
+.embed-player,
+.chat-start,
+.new-line {
+  animation: fade-in 0.2s ease-out;
+}
+
+.dock > .state,
+.dock-status,
+.dock-members,
+.dock-buttons {
+  animation: rise-in 0.2s ease-out;
+}
+
+.count,
+.pip {
+  animation: pop-in 0.16s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

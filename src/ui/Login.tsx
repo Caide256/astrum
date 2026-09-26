@@ -30,6 +30,7 @@ export function Login() {
   const [shownName, setShownName] = useState("");
   const [password, setPassword] = useState("");
   const [repeat, setRepeat] = useState("");
+  const [invite, setInvite] = useState("");
 
   const username = cleanUsername(user);
   const badName = mode === "register" && !!user && !USERNAME_RULE.test(username);
@@ -43,7 +44,7 @@ export function Login() {
     e.preventDefault();
     if (!canSubmit) return;
     if (mode === "login") void doLogin(server || user, user, password);
-    else void doRegister(server, username, password, shownName);
+    else void doRegister(server, username, password, shownName, invite);
   };
 
   const switchTo = (next: Mode) => {
@@ -80,6 +81,18 @@ export function Login() {
         <Field label={t("login.server")}>
           <input value={server} onChange={(e) => setServer(e.target.value)} placeholder="example.org" autoComplete="url" />
         </Field>
+
+        {mode === "register" && (
+          <Field label={t("login.invite")}>
+            <input
+              value={invite}
+              onChange={(e) => setInvite(e.target.value.trim())}
+              placeholder={t("login.invite.placeholder")}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </Field>
+        )}
 
         <Field label={mode === "login" ? t("login.user") : t("login.username")}>
           <input

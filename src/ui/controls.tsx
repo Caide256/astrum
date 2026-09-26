@@ -17,17 +17,18 @@ export function Toggle({
   hint?: ReactNode;
   disabled?: boolean;
 }) {
+  // only the switch itself toggles: a stray click on the text changes nothing
   return (
-    <label className={`toggle-row ${disabled ? "disabled" : ""}`}>
+    <div className={`toggle-row ${disabled ? "disabled" : ""}`}>
       <span className="toggle-text">
         <b>{title}</b>
         {hint && <span className="state">{hint}</span>}
       </span>
-      <span className={`switch ${checked ? "on" : ""}`}>
+      <label className={`switch ${checked ? "on" : ""}`}>
         <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
         <i />
-      </span>
-    </label>
+      </label>
+    </div>
   );
 }
 

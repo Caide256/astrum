@@ -1,13 +1,18 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import type { GeneratedSecretStorageKey } from "matrix-js-sdk/lib/crypto-api/index.js";
 
 import {
   NeedPassword,
   app,
+  applyRecoveryKey,
   changePassword,
+  copyText,
+  deleteAccount,
   muteLabel,
   doLogout,
   encryptionStatus,
   endSession,
+  newRecoveryKey,
   renameSession,
   saveMyAvatar,
   saveMyName,
@@ -16,6 +21,7 @@ import {
   verifyWithRecoveryKey,
   type SettingsTab,
 } from "../app.ts";
+import { BRAND } from "../brand.ts";
 import { getShellSettings, hasShell, setShellSettings, type ShellSettings } from "../desktop.ts";
 import {
   ACTIONS,
@@ -40,6 +46,11 @@ import {
   setMuted,
   setNotifyMode,
   setSoundPrefs,
+  setChatLook,
+  setTileLook,
+  useChatLook,
+  useTileLook,
+  type ChatLook,
   useMutes,
   useNotifyMode,
   useSoundPrefs,
@@ -48,13 +59,18 @@ import {
 } from "../prefs.ts";
 import { useStore } from "../store.ts";
 import {
-  CUSTOM,
   THEMES,
-  getCustomTheme,
+  createOwnTheme,
+  deleteOwnTheme,
+  exportOwnTheme,
+  importOwnTheme,
   isHex,
-  setCustomTheme,
+  isOwnTheme,
+  listOwnThemes,
   setTheme,
+  themeDef,
   tokens,
+  updateOwnTheme,
   useTheme,
   type ThemeColors,
   type ThemeDef,
@@ -72,11 +88,12 @@ import {
   type MicState,
   type MicTest,
 } from "../voice/audio.ts";
-import { voice, type DeviceInfo, type InputMode, type Limiter } from "../voice/voice.ts";
+import { CAMERA_FPS, CAMERA_HEIGHTS, voice, type DeviceInfo, type InputMode, type Limiter, type TileLook } from "../voice/voice.ts";
+import { useAvatarColor } from "../avatarColor.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Cropper } from "./Cropper.tsx";
 import { PasswordInput, Toggle, useEscape, useLinger } from "./controls.tsx";
-import { IconBellOff, IconLogout, IconPalette, IconRefresh, IconTrash } from "./icons.tsx";
+import { IconBellOff, IconLogout, IconPalette, IconPlus, IconRefresh, IconTrash } from "./icons.tsx";
 
 type MeterSource = { get: () => MicState; on: (cb: (s: MicState) => void) => () => void };
 
@@ -154,6 +171,33 @@ function Picker({ label, value, list, onPick }: { label: string; value: string; 
   );
 }
 
+/** Camera picture size and frame rate; a running camera restarts with them. */
+export function CameraQuality() {
+  const state = useSyncExternalStore(voice.subscribe, voice.getState, voice.getState);
+  const s = state.settings;
+  return (
+    <div className="field">
+      <label>{t("camera.quality")}</label>
+      <div className="cam-quality">
+        <select value={s.camHeight} onChange={(e) => void voice.setCameraQuality(Number(e.target.value), s.camFps)}>
+          {CAMERA_HEIGHTS.map((h) => (
+            <option key={h} value={h}>
+              {h}p
+            </option>
+          ))}
+        </select>
+        <select value={s.camFps} onChange={(e) => void voice.setCameraQuality(s.camHeight, Number(e.target.value))}>
+          {CAMERA_FPS.map((f) => (
+            <option key={f} value={f}>
+              {t("net.fps", { n: f })}
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 function Seg<T extends string>({ value, list, onPick, className = "" }: { value: T; list: { id: T; name: Key }[]; onPick: (id: T) => void; className?: string }) {
   return (
     <div className={`seg ${className}`}>
@@ -163,6 +207,39 @@ function Seg<T extends string>({ value, list, onPick, className = "" }: { value:
         </button>
       ))}
     </div>
+  );
+}
+
+/* ---------------------------------------------------------------- call tile */
+
+const TILE_MODES: { id: TileLook["mode"]; name: Key }[] = [
+  { id: "dominant", name: "tile.dominant" },
+  { id: "edge", name: "tile.edge" },
+  { id: "color", name: "tile.color" },
+];
+
+/** The own tile background in calls: from the avatar, or a color picked by hand, with a live preview. */
+function TileSection({ avatar, name }: { avatar: string; name: string }) {
+  const look = useTileLook();
+  const auto = useAvatarColor(look.mode === "color" ? "" : avatar, look.mode === "color" ? null : look.mode);
+  const bg = look.mode === "color" ? look.color : auto || "var(--tile-bg)";
+  return (
+    <>
+      <div className="section-title">{t("tile.title")}</div>
+      <div className="tile-pref">
+        <div className="tile-preview" style={{ background: bg }}>
+          <Avatar mxc={avatar} name={name || "?"} size={54} />
+        </div>
+        <div className="tile-pref-controls">
+          <Seg value={look.mode} list={TILE_MODES} onPick={(mode) => setTileLook({ mode })} />
+          {look.mode === "color" ? (
+            <ColorInput label={t("tile.pick")} value={look.color} onChange={(color) => setTileLook({ color })} />
+          ) : (
+            <span className="state">{avatar ? t("tile.autoHint") : t("tile.noAvatar")}</span>
+          )}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -183,8 +260,25 @@ function ProfileTab() {
   const [pwMsg, setPwMsg] = useState("");
   const [pwErr, setPwErr] = useState("");
   const [leaving, setLeaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [delPw, setDelPw] = useState("");
+  const [erase, setErase] = useState(false);
+  const [sure, setSure] = useState(false);
+  const [delBusy, setDelBusy] = useState(false);
+  const [delErr, setDelErr] = useState("");
 
   useEffect(() => setName(myName), [myName]);
+
+  const removeAccount = async () => {
+    setDelBusy(true);
+    setDelErr("");
+    try {
+      await deleteAccount(delPw, erase);
+    } catch (e) {
+      setDelErr((e as Error)?.message ?? String(e));
+      setDelBusy(false);
+    }
+  };
 
   const mismatch = !!again && newPw !== again;
   const savePassword = async () => {
@@ -256,6 +350,8 @@ function ProfileTab() {
         <span className="state">{t("profile.nameHint")}</span>
       </div>
 
+      <TileSection avatar={myAvatar} name={myName} />
+
       <div className="section-title">{t("profile.password")}</div>
       <div className="field">
         <PasswordInput autoComplete="current-password" placeholder={t("profile.currentPassword")} value={oldPw} onChange={setOldPw} />
@@ -285,9 +381,51 @@ function ProfileTab() {
           </button>
         </div>
       ) : (
-        <button className="danger" onClick={() => setLeaving(true)}>
-          <IconLogout /> {t("profile.logout")}
-        </button>
+        <div className="row left">
+          <button className="danger" onClick={() => setLeaving(true)}>
+            <IconLogout /> {t("profile.logout")}
+          </button>
+          {!deleting && (
+            <button className="ghost danger-text" onClick={() => setDeleting(true)}>
+              <IconTrash /> {t("profile.delete")}
+            </button>
+          )}
+        </div>
+      )}
+
+      {deleting && (
+        <div className="delete-account">
+          <b>{t("profile.delete.title", { id: sess?.userId ?? "" })}</b>
+          <div className="note warn">{t("profile.delete.warn")}</div>
+          <label className="check-line">
+            <input type="checkbox" checked={erase} onChange={(e) => setErase(e.target.checked)} />
+            {t("profile.delete.erase")}
+          </label>
+          <label className="check-line">
+            <input type="checkbox" checked={sure} onChange={(e) => setSure(e.target.checked)} />
+            {t("profile.delete.sure")}
+          </label>
+          <div className="field">
+            <PasswordInput autoComplete="current-password" placeholder={t("profile.currentPassword")} value={delPw} onChange={setDelPw} />
+          </div>
+          {delErr && <div className="error">{delErr}</div>}
+          <div className="row left">
+            <button className="danger" disabled={!sure || !delPw || delBusy} onClick={() => void removeAccount()}>
+              {delBusy ? t("profile.delete.busy") : t("profile.delete.yes")}
+            </button>
+            <button
+              className="ghost"
+              onClick={() => {
+                setDeleting(false);
+                setDelPw("");
+                setSure(false);
+                setDelErr("");
+              }}
+            >
+              {t("common.cancel")}
+            </button>
+          </div>
+        </div>
       )}
     </>
   );
@@ -432,6 +570,12 @@ function AudioTab() {
       <div className="two">
         <Picker label={t("audio.mic")} value={settings.micId} list={devices.mics} onPick={(id) => void voice.applySettings({ micId: id })} />
         <Picker label={t("audio.output")} value={settings.spkId} list={devices.speakers} onPick={(id) => void voice.applySettings({ spkId: id })} />
+      </div>
+
+      <div className="section-title">{t("camera.section")}</div>
+      <div className="two">
+        <Picker label={t("camera.device")} value={settings.camId} list={devices.cams} onPick={(id) => void voice.setCamera(state.camera, id)} />
+        <CameraQuality />
       </div>
 
       <div className="section-title">{t("audio.test")}</div>
@@ -707,20 +851,54 @@ function ColorInput({ label, value, onChange }: { label: string; value: string; 
   );
 }
 
-/** The own theme: base colors, an optional gradient and how translucent the panels are over it. */
-function ThemeEditor() {
-  useTheme();
-  const def = getCustomTheme();
-  const g = def.gradient;
-  const set = (patch: Partial<ThemeDef>) => setCustomTheme(patch);
+/** Title of an own theme: its own, or "Own N" by its place in the list. */
+function ownTitle(def: ThemeDef): string {
+  const n = listOwnThemes().findIndex((c) => c.id === def.id) + 1;
+  return def.title || t("theme.ownN", { n: Math.max(1, n) });
+}
 
-  const fromPreset = (id: string) => {
-    const base = THEMES.find((th) => th.id === id);
+/** Offer a text as a file to save; Electron asks where. */
+function saveTextFile(name: string, text: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/** An own theme: title, base colors, an optional gradient and how translucent the panels are over it. */
+function ThemeEditor({ id }: { id: string }) {
+  useTheme();
+  const def = themeDef(id);
+  const g = def.gradient;
+  const set = (patch: Partial<ThemeDef>) => updateOwnTheme(id, patch);
+  const [title, setTitle] = useState(def.title ?? "");
+  const [deleting, setDeleting] = useState(false);
+  useEffect(() => {
+    setTitle(def.title ?? "");
+    setDeleting(false);
+  }, [id]);
+
+  const fromPreset = (presetId: string) => {
+    const base = THEMES.find((th) => th.id === presetId);
     if (base) set({ dark: base.dark, colors: { ...base.colors }, gradient: base.gradient ? { ...base.gradient, stops: [...base.gradient.stops] } : null, glass: base.glass || 0.75 });
   };
 
+  const fileName = `${(def.title || ownTitle(def)).replace(/[\\/:*?"<>|]+/g, " ").trim() || "theme"}.theme.json`;
+
   return (
     <div className="theme-editor">
+      <div className="field">
+        <label>{t("theme.title")}</label>
+        <div className="with-button">
+          <input value={title} maxLength={40} placeholder={ownTitle({ ...def, title: "" })} onChange={(e) => setTitle(e.target.value)} />
+          <button className="primary" disabled={title === (def.title ?? "")} onClick={() => set({ title })}>
+            {t("common.save")}
+          </button>
+        </div>
+      </div>
+
       <div className="row left">
         <Seg
           value={def.dark ? "dark" : "light"}
@@ -728,7 +906,7 @@ function ThemeEditor() {
             { id: "dark", name: "theme.base.dark" },
             { id: "light", name: "theme.base.light" },
           ]}
-          onPick={(id) => fromPreset(id)}
+          onPick={(presetId) => fromPreset(presetId)}
         />
         <select className="push-right theme-from" value="" onChange={(e) => e.target.value && fromPreset(e.target.value)}>
           <option value="">{t("theme.startFrom")}</option>
@@ -787,14 +965,125 @@ function ThemeEditor() {
           </div>
         </>
       )}
+
+      <div className="row left theme-file-row">
+        <button className="ghost" onClick={() => saveTextFile(fileName, exportOwnTheme(id))}>
+          {t("theme.export")}
+        </button>
+        {deleting ? (
+          <>
+            <span className="state">{t("theme.deleteConfirm")}</span>
+            <button className="danger" onClick={() => deleteOwnTheme(id)}>
+              {t("common.delete")}
+            </button>
+            <button className="ghost" onClick={() => setDeleting(false)}>
+              {t("common.cancel")}
+            </button>
+          </>
+        ) : (
+          <button className="ghost danger-text" onClick={() => setDeleting(true)}>
+            {t("theme.delete")}
+          </button>
+        )}
+      </div>
     </div>
+  );
+}
+
+/** The "+" card: a new own theme from the current one, or a theme file from someone. */
+function AddTheme({ onClose }: { onClose: () => void }) {
+  const [name, setName] = useState(t("theme.ownN", { n: listOwnThemes().length + 1 }));
+  const [err, setErr] = useState("");
+  const file = useRef<HTMLInputElement>(null);
+
+  const load = async (f: File) => {
+    try {
+      if (f.size > 64 * 1024) throw new Error("too big");
+      importOwnTheme(await f.text(), f.name.replace(/\.theme\.json$|\.json$/i, ""));
+      onClose();
+    } catch {
+      setErr(t("theme.importFailed"));
+    }
+  };
+
+  return (
+    <div className="theme-add-box">
+      <div className="theme-add-way">
+        <b>{t("theme.new")}</b>
+        <span className="state">{t("theme.new.hint")}</span>
+        <div className="with-button">
+          <input autoFocus value={name} maxLength={40} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (createOwnTheme(name), onClose())} />
+          <button className="primary" onClick={() => (createOwnTheme(name), onClose())}>
+            {t("theme.create")}
+          </button>
+        </div>
+      </div>
+      <div className="theme-add-way">
+        <b>{t("theme.import")}</b>
+        <span className="state">{t("theme.import.hint")}</span>
+        <div className="row left">
+          <button className="ghost" onClick={() => file.current?.click()}>
+            {t("theme.pickFile")}
+          </button>
+          <button className="ghost" onClick={onClose}>
+            {t("common.cancel")}
+          </button>
+        </div>
+        <input
+          ref={file}
+          type="file"
+          accept=".json,application/json"
+          hidden
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            e.target.value = "";
+            if (f) void load(f);
+          }}
+        />
+      </div>
+      {err && <div className="error">{err}</div>}
+    </div>
+  );
+}
+
+const ALIGNS: { id: ChatLook["align"]; name: Key }[] = [
+  { id: "left", name: "look.align.left" },
+  { id: "own-right", name: "look.align.own" },
+  { id: "right", name: "look.align.right" },
+];
+
+const DENSITIES: { id: ChatLook["density"]; name: Key }[] = [
+  { id: "cozy", name: "look.density.cozy" },
+  { id: "compact", name: "look.density.compact" },
+];
+
+/** Message layout: kept apart from themes, a theme file never changes it. */
+function MessagesLook() {
+  const look = useChatLook();
+  return (
+    <>
+      <div className="section-title">{t("look.title")}</div>
+      <div className="field">
+        <label>{t("look.align")}</label>
+        <Seg value={look.align} list={ALIGNS} onPick={(align) => setChatLook({ align })} />
+      </div>
+      <div className="field">
+        <label>{t("look.density")}</label>
+        <Seg value={look.density} list={DENSITIES} onPick={(density) => setChatLook({ density })} />
+      </div>
+      <div className="field">
+        <label>{t("look.size", { n: look.size })}</label>
+        <input type="range" min={12} max={20} step={1} value={look.size} onChange={(e) => setChatLook({ size: Number(e.target.value) })} />
+      </div>
+    </>
   );
 }
 
 function AppearanceTab() {
   const theme = useTheme();
   const lang = useLang();
-  const custom = getCustomTheme();
+  const own = listOwnThemes();
+  const [adding, setAdding] = useState(false);
 
   return (
     <>
@@ -806,20 +1095,32 @@ function AppearanceTab() {
             <span className="theme-name">{th.name ? t(th.name) : th.id}</span>
           </button>
         ))}
-        <button className={`theme-card ${theme === CUSTOM ? "on" : ""}`} onClick={() => setTheme(CUSTOM)}>
-          <ThemePreview def={custom} />
-          <span className="theme-name">
-            <IconPalette /> {t("theme.custom")}
+        {own.map((def) => (
+          <button key={def.id} className={`theme-card ${theme === def.id ? "on" : ""}`} onClick={() => setTheme(def.id)}>
+            <ThemePreview def={def} />
+            <span className="theme-name ellipsis">
+              <IconPalette /> {ownTitle(def)}
+            </span>
+          </button>
+        ))}
+        <button className={`theme-card add ${adding ? "on" : ""}`} title={t("theme.add")} onClick={() => setAdding(!adding)}>
+          <span className="theme-plus">
+            <IconPlus size={34} />
           </span>
+          <span className="theme-name">{t("theme.add")}</span>
         </button>
       </div>
 
-      {theme === CUSTOM && (
+      {adding && <AddTheme onClose={() => setAdding(false)} />}
+
+      {isOwnTheme(theme) && (
         <>
           <div className="section-title">{t("theme.editor")}</div>
-          <ThemeEditor />
+          <ThemeEditor id={theme} />
         </>
       )}
+
+      <MessagesLook />
 
       <div className="section-title">{t("settings.language")}</div>
       <div className="field narrow">
@@ -1002,6 +1303,7 @@ function CryptoTab() {
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState("");
   const [err, setErr] = useState("");
+  const [setup, setSetup] = useState<"create" | "reset" | null>(null);
 
   const load = () => void encryptionStatus().then(setSt);
   useEffect(load, []);
@@ -1029,6 +1331,19 @@ function CryptoTab() {
 
   if (!st.enabled) return <div className="error">{t("crypto.disabled")}</div>;
 
+  if (setup) {
+    return (
+      <RecoverySetup
+        reset={setup === "reset"}
+        onClose={(ok) => {
+          setSetup(null);
+          setDone(ok ? t("crypto.setup.done") : "");
+          load();
+        }}
+      />
+    );
+  }
+
   if (st.verified) {
     return (
       <>
@@ -1037,6 +1352,34 @@ function CryptoTab() {
           <span>{t("crypto.ok.text")}</span>
         </div>
         <div className="note">{st.backup ? t("crypto.backup.on") : t("crypto.backup.off")}</div>
+
+        <div className={`status-card recovery ${st.secretStorage ? "" : "warn"}`}>
+          <b>{st.secretStorage ? t("crypto.recovery.has") : t("crypto.recovery.none")}</b>
+          <span>{st.secretStorage ? t("crypto.recovery.has.hint") : t("crypto.recovery.none.hint")}</span>
+          <div className="row start">
+            <button className={st.secretStorage ? "ghost" : "primary"} onClick={() => setSetup(st.canMakeKey ? "create" : "reset")}>
+              {st.secretStorage ? t("crypto.recovery.change") : t("crypto.recovery.create")}
+            </button>
+          </div>
+        </div>
+        {done && <div className="note good">{done}</div>}
+      </>
+    );
+  }
+
+  // the account never had encryption keys: nothing to verify against, just set it up
+  if (!st.crossSigning) {
+    return (
+      <>
+        <div className="status-card warn">
+          <b>{t("crypto.fresh.title")}</b>
+          <span>{t("crypto.fresh.text")}</span>
+          <div className="row start">
+            <button className="primary" onClick={() => setSetup("create")}>
+              {t("crypto.fresh.button")}
+            </button>
+          </div>
+        </div>
         {done && <div className="note good">{done}</div>}
       </>
     );
@@ -1080,7 +1423,159 @@ function CryptoTab() {
 
       {done && <div className="note good">{done}</div>}
       {err && <div className="error">{err}</div>}
+
+      <div className="note">
+        {t("crypto.lost")}{" "}
+        <button className="link" onClick={() => setSetup("reset")}>
+          {t("crypto.lost.reset")}
+        </button>
+      </div>
     </>
+  );
+}
+
+/**
+ * A new recovery key, made and kept by this app. The key is shown first and
+ * put in place only after the user saved it. A reset (all keys from scratch)
+ * warns first and always needs the password: the server asks for it when
+ * cross-signing keys are replaced, and asking later would leave the account
+ * half reset.
+ */
+function RecoverySetup({ reset, onClose }: { reset: boolean; onClose: (ok: boolean) => void }) {
+  const [step, setStep] = useState<"warn" | "key" | "password" | "working">(reset ? "warn" : "key");
+  const [key, setKey] = useState<GeneratedSecretStorageKey | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    void newRecoveryKey()
+      .then(setKey)
+      .catch((e) => setErr((e as Error)?.message ?? String(e)));
+  }, []);
+
+  const text = key?.encodedPrivateKey ?? "";
+
+  const saveFile = () => {
+    const url = URL.createObjectURL(new Blob([`${text}\n`], { type: "text/plain" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${BRAND.name.replace(/[^\w.-]+/g, "-")}-recovery-key.txt`;
+    a.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    setSaved(true);
+  };
+
+  const copy = async () => {
+    if (await copyText(text)) {
+      setCopied(true);
+      setSaved(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    }
+  };
+
+  const apply = async (pw: string) => {
+    if (!key) return;
+    const back = step;
+    setStep("working");
+    setErr("");
+    try {
+      await applyRecoveryKey(key, pw, reset);
+      onClose(true);
+    } catch (e) {
+      if (e instanceof NeedPassword) {
+        setStep("password");
+        return;
+      }
+      setErr((e as Error)?.message ?? String(e));
+      setStep(back);
+    }
+  };
+
+  return (
+    <div className="recovery-setup">
+      <h3>{reset ? t("crypto.reset.title") : t("crypto.setup.title")}</h3>
+
+      {step === "warn" && (
+        <>
+          <div className="note warn">{t("crypto.reset.warn")}</div>
+          <div className="field">
+            <label>{t("crypto.password.label")}</label>
+            <PasswordInput autoFocus value={password} onChange={setPassword} autoComplete="current-password" />
+          </div>
+          {err && <div className="error">{err}</div>}
+          <div className="row">
+            <button className="ghost" onClick={() => onClose(false)}>
+              {t("common.cancel")}
+            </button>
+            <button className="danger" disabled={!password} onClick={() => setStep("key")}>
+              {t("crypto.reset.next")}
+            </button>
+          </div>
+        </>
+      )}
+
+      {step === "key" && (
+        <>
+          <p className="sub">{t("crypto.setup.intro")}</p>
+          <div className="recovery-key">{text || t("crypto.checking")}</div>
+          <div className="row start">
+            <button className="ghost" disabled={!text} onClick={() => void copy()}>
+              {copied ? t("common.copied") : t("common.copy")}
+            </button>
+            <button className="ghost" disabled={!text} onClick={saveFile}>
+              {t("crypto.setup.save")}
+            </button>
+          </div>
+          <label className="check-line">
+            <input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
+            {t("crypto.setup.saved")}
+          </label>
+          {err && <div className="error">{err}</div>}
+          <div className="row">
+            <button className="ghost" onClick={() => onClose(false)}>
+              {t("common.cancel")}
+            </button>
+            <button className={reset ? "danger" : "primary"} disabled={!saved || !key} onClick={() => void apply(password)}>
+              {reset ? t("crypto.reset.apply") : t("crypto.setup.apply")}
+            </button>
+          </div>
+        </>
+      )}
+
+      {step === "password" && (
+        <>
+          <p className="sub">{t("crypto.password.why")}</p>
+          <div className="field">
+            <label>{t("crypto.password.label")}</label>
+            <PasswordInput
+              autoFocus
+              value={password}
+              onChange={setPassword}
+              autoComplete="current-password"
+              onKeyDown={(e) => e.key === "Enter" && password && void apply(password)}
+            />
+          </div>
+          {err && <div className="error">{err}</div>}
+          <div className="row">
+            <button className="ghost" onClick={() => onClose(false)}>
+              {t("common.cancel")}
+            </button>
+            <button className="primary" disabled={!password} onClick={() => void apply(password)}>
+              {t("crypto.setup.apply")}
+            </button>
+          </div>
+        </>
+      )}
+
+      {step === "working" && (
+        <>
+          <div className="spinner" />
+          <p className="sub">{t("crypto.setup.working")}</p>
+        </>
+      )}
+    </div>
   );
 }
 

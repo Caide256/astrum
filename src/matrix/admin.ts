@@ -1,5 +1,6 @@
 import type { MatrixClient, Room } from "matrix-js-sdk";
 
+import { BRAND } from "../brand.ts";
 import { compareText, t, type Key } from "../i18n/index.ts";
 import { MEMBER_TYPES } from "./rtc.ts";
 
@@ -12,17 +13,212 @@ import { MEMBER_TYPES } from "./rtc.ts";
  * report instead of aborting everything.
  */
 
+/**
+ * Roles are power levels. The owner (server creator) keeps 100 and admins get
+ * 75: Matrix never lets anyone change the level of a user whose level equals
+ * their own, so with admins at 100 the owner could not demote them. Servers
+ * made before this still may have admins at 100; they count as admins too.
+ */
+export const OWNER_LEVEL = 100;
+export const ADMIN_LEVEL = 75;
+export const MOD_LEVEL = 50;
+
 export const ROLES: { level: number; key: Key }[] = [
   { level: 0, key: "role.member" },
-  { level: 50, key: "role.moderator" },
-  { level: 100, key: "role.admin" },
+  { level: MOD_LEVEL, key: "role.moderator" },
+  { level: ADMIN_LEVEL, key: "role.admin" },
 ];
+
+/* ----------------------------------------------------------- server roles */
+
+/**
+ * Named roles of a server. Matrix knows only a number per person (the power
+ * level), so a role is a level with a name and a color. The list lives in the
+ * space as a state event; the built-in roles (member, moderator, admin) can be
+ * renamed and colored there too, and new ones sit at any free level below
+ * admin. A person has exactly one role: the one of their level.
+ */
+export const ROLES_EVENT = `${BRAND.appId}.roles`;
+
+export type RoleDef = { level: number; name: string; color: string; custom: boolean };
+
+function cleanColor(v: unknown): string {
+  return typeof v === "string" && /^#[0-9a-f]{6}$/i.test(v) ? v.toLowerCase() : "";
+}
+
+/** Every assignable role of the server, highest first. The owner is not in the list: nobody is made owner. */
+export function serverRoles(client: MatrixClient, spaceId: string): RoleDef[] {
+  const raw = client.getRoom(spaceId)?.currentState.getStateEvents(ROLES_EVENT, "")?.getContent()?.roles;
+  const given = new Map<number, { name: string; color: string }>();
+  for (const r of Array.isArray(raw) ? raw : []) {
+    const level = Math.round(Number(r?.level));
+    if (!Number.isFinite(level) || level < 0 || level >= OWNER_LEVEL || given.has(level)) continue;
+    given.set(level, { name: typeof r?.name === "string" ? r.name.trim().slice(0, 32) : "", color: cleanColor(r?.color) });
+  }
+  const out: RoleDef[] = ROLES.map((b) => {
+    const g = given.get(b.level);
+    given.delete(b.level);
+    return { level: b.level, name: g?.name || t(b.key), color: g?.color ?? "", custom: false };
+  });
+  for (const [level, g] of given) out.push({ level, name: g.name || t("role.custom", { level }), color: g.color, custom: true });
+  return out.sort((a, b) => b.level - a.level);
+}
+
+/** The role a level belongs to: the highest role not above it. */
+export function roleAt(roles: RoleDef[], level: number): RoleDef | null {
+  return roles.find((r) => r.level <= level) ?? null;
+}
+
+/** Store the roles. Built-in ones are written only when renamed or colored. */
+export async function saveRoles(client: MatrixClient, spaceId: string, roles: RoleDef[]): Promise<void> {
+  const builtin = new Map(ROLES.map((b) => [b.level, t(b.key)]));
+  const list = roles
+    .filter((r) => r.custom || r.color || r.name !== builtin.get(r.level))
+    .map((r) => ({ level: r.level, name: r.name, color: r.color }));
+  await client.sendStateEvent(spaceId, ROLES_EVENT as never, { roles: list } as never, "");
+}
+
+/** A free level for a new role right above `below`: the middle of the gap to the next role. */
+export function levelAbove(roles: RoleDef[], below: number): number | null {
+  const higher = roles.filter((r) => r.level > below).map((r) => r.level);
+  const top = Math.min(ADMIN_LEVEL, ...higher);
+  const level = Math.floor((below + top) / 2);
+  return level > below && level < top ? level : null;
+}
+
+/** Thresholds for permissions: every role plus "owner only". */
+export function permLevels(roles: RoleDef[]): { level: number; label: string }[] {
+  return [{ level: OWNER_LEVEL, label: t("role.ownerOnly") }, ...roles.map((r) => ({ level: r.level, label: r.name }))];
+}
+
+/* --------------------------------------------------------- channel access */
+
+/**
+ * Who may see a channel, post in it and join its call. Posting and joining
+ * the call are power levels of the channel itself. Seeing is an invite-only
+ * room: a hidden channel is not listed to others and its messages are out
+ * of their reach; the apps of admins invite everyone whose role qualifies
+ * (and remove whoever lost it), and the invited apps join by themselves.
+ * The threshold is kept in a state event of the channel.
+ */
+export const ACCESS_EVENT = `${BRAND.appId}.access`;
+
+export type ChannelAccess = { view: number; send: number; voice: number };
+
+export function channelAccess(client: MatrixClient, roomId: string): ChannelAccess {
+  const room = client.getRoom(roomId);
+  const pl = plContent(room);
+  const events = (pl.events ?? {}) as Record<string, number>;
+  const hidden = room?.getJoinRule() === "invite";
+  const view = Number(room?.currentState.getStateEvents(ACCESS_EVENT, "")?.getContent()?.view ?? 0);
+  const voiceLevels = MEMBER_TYPES.map((tp) => events[tp] ?? pl.state_default ?? 50);
+  return {
+    view: hidden && Number.isFinite(view) ? Math.max(0, view) : 0,
+    send: pl.events_default ?? 0,
+    voice: Math.max(0, ...voiceLevels),
+  };
+}
+
+/** The join rule a visible channel of this server gets: open, or open to server members. */
+function openRule(client: MatrixClient, spaceId: string): Record<string, unknown> {
+  const spaceRule = client.getRoom(spaceId)?.getJoinRule();
+  return !spaceRule || spaceRule === "public"
+    ? { join_rule: "public" }
+    : { join_rule: "restricted", allow: [{ type: "m.room_membership", room_id: spaceId }] };
+}
+
+export async function setChannelAccess(client: MatrixClient, spaceId: string, roomId: string, next: ChannelAccess): Promise<Report> {
+  const room = client.getRoom(roomId);
+  const before = channelAccess(client, roomId);
+  const pl = structuredClone(plContent(room));
+  const events = { ...(pl.events ?? {}) } as Record<string, number>;
+  let plChanged = false;
+  if ((pl.events_default ?? 0) !== next.send) {
+    pl.events_default = next.send;
+    events["m.reaction"] = 0;
+    plChanged = true;
+  }
+  for (const tp of MEMBER_TYPES) {
+    if (events[tp] !== next.voice) {
+      events[tp] = next.voice;
+      plChanged = true;
+    }
+  }
+  if (plChanged) {
+    pl.events = events;
+    await client.sendStateEvent(roomId, "m.room.power_levels" as never, pl as never, "");
+  }
+  if (next.view !== before.view) {
+    const rule = next.view > 0 ? { join_rule: "invite" } : openRule(client, spaceId);
+    await client.sendStateEvent(roomId, "m.room.join_rules" as never, rule as never, "");
+  }
+  // the marker says the channel's limits are deliberate (server-wide saves keep them)
+  if (next.view !== before.view || plChanged) {
+    await client.sendStateEvent(roomId, ACCESS_EVENT as never, { view: next.view, voice: next.voice } as never, "");
+  }
+  return syncChannelMembers(client, spaceId, roomId);
+}
+
+/**
+ * A hidden channel's members follow the roles: whoever qualifies is invited,
+ * whoever does not any more is removed. Admins' apps run this after changing
+ * a role or the channel; nothing happens for visible channels.
+ */
+export async function syncChannelMembers(client: MatrixClient, spaceId: string, roomId: string): Promise<Report> {
+  const report: Report = { ok: 0, failed: [] };
+  const acc = channelAccess(client, roomId);
+  const space = client.getRoom(spaceId);
+  const room = client.getRoom(roomId);
+  if (!space || !room || acc.view <= 0) return report;
+  const self = client.getUserId() ?? "";
+  for (const m of space.getJoinedMembers()) {
+    if (m.userId === self || levelOf(space, m.userId) < acc.view) continue;
+    const there = room.getMember(m.userId)?.membership;
+    if (there === "join" || there === "invite" || there === "ban") continue;
+    try {
+      await client.invite(roomId, m.userId);
+      report.ok += 1;
+    } catch (e) {
+      report.failed.push({ name: m.name || m.userId, error: errText(e) });
+    }
+  }
+  for (const m of room.getMembersWithMembership("join")) {
+    if (m.userId === self || levelOf(space, m.userId) >= acc.view) continue;
+    try {
+      await client.kick(roomId, m.userId, t("access.lost"));
+      report.ok += 1;
+    } catch (e) {
+      report.failed.push({ name: m.name || m.userId, error: errText(e) });
+    }
+  }
+  return report;
+}
+
+/** Hidden channels of a server brought in line with the roles, after a role change. */
+export async function syncServerAccess(client: MatrixClient, spaceId: string): Promise<Report> {
+  const total: Report = { ok: 0, failed: [] };
+  for (const room of serverRooms(client, spaceId)) {
+    if (room.roomId === spaceId || room.getJoinRule() !== "invite") continue;
+    const r = await syncChannelMembers(client, spaceId, room.roomId);
+    total.ok += r.ok;
+    total.failed.push(...r.failed);
+  }
+  return total;
+}
 
 export function roleName(level: number, owner = false): string {
   if (owner) return t("role.owner");
-  if (level >= 100) return t("role.admin");
-  if (level >= 50) return t("role.moderator");
+  if (level >= ADMIN_LEVEL) return t("role.admin");
+  if (level >= MOD_LEVEL) return t("role.moderator");
   return t("role.member");
+}
+
+/**
+ * The highest role this user may hand out. Only the owner appoints admins;
+ * others give roles below their own and below admin.
+ */
+export function maxGrant(myLevel: number, isOwner: boolean): number {
+  return isOwner ? ADMIN_LEVEL : Math.min(ADMIN_LEVEL - 1, myLevel - 1);
 }
 
 /** Room creator. For a space this is the server owner. */
@@ -150,9 +346,10 @@ export async function writePerms(client: MatrixClient, spaceId: string, perms: P
       events["m.room.topic"] = perms.channels;
       events["m.room.avatar"] = perms.channels;
     }
-    // call membership must stay open to everyone
-    for (const t of MEMBER_TYPES) {
-      if (t in events && events[t] > 0) events[t] = 0;
+    // call membership stays open to everyone, unless the channel restricted its call on purpose
+    const restricted = !isSpace && room.currentState.getStateEvents(ACCESS_EVENT, "") !== null;
+    for (const tp of MEMBER_TYPES) {
+      if (!restricted && tp in events && events[tp] > 0) events[tp] = 0;
     }
 
     pl.events = events;

@@ -5,6 +5,7 @@ import { t } from "../i18n/index.ts";
 import { useStore } from "../store.ts";
 import { voice, type DeviceInfo } from "../voice/voice.ts";
 import { useEscape, useLinger } from "./controls.tsx";
+import { CameraQuality } from "./Settings.tsx";
 
 /** Live preview of one camera: it is obvious which one looks at you. */
 function Preview({ cam, current, onPick }: { cam: DeviceInfo; current: boolean; onPick: () => void }) {
@@ -70,6 +71,7 @@ export function CameraPicker() {
             />
           ))}
         </div>
+        <CameraQuality />
         <div className="row">
           {state.camera && (
             <button className="ghost" onClick={() => (close(), void voice.setCamera(false))}>

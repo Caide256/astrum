@@ -64,6 +64,12 @@ export type MicChain = {
   onState: (cb: (s: MicState) => void) => () => void;
   setSensitivity: (auto: boolean, threshold: number) => void;
   setPtt: (ptt: boolean, held: boolean, delayMs: number) => void;
+  /**
+   * Level of the raw input before any processing, in dBFS. Only a dead
+   * device, a muted jack or blocked access gives true digital silence;
+   * the processed level can be near zero in a quiet room.
+   */
+  rawDb: () => number;
   close: () => Promise<void>;
 };
 
@@ -166,6 +172,11 @@ export async function openMic(opts: MicOptions): Promise<MicChain> {
   tail.connect(gate);
   gate.connect(sink);
 
+  const raw = ctx.createAnalyser();
+  raw.fftSize = 2048;
+  source.connect(raw);
+  const probe = new Float32Array(raw.fftSize);
+
   let last: MicState = { db: -120, open: false, threshold: opts.threshold };
   const listeners = new Set<(s: MicState) => void>();
   gate.port.onmessage = (e: MessageEvent) => {
@@ -187,6 +198,13 @@ export async function openMic(opts: MicOptions): Promise<MicChain> {
     },
     setSensitivity: (auto, threshold) => gate.port.postMessage({ auto, threshold }),
     setPtt: (ptt, held, delayMs) => gate.port.postMessage({ ptt, pttHeld: held, pttDelay: delayMs }),
+    rawDb: () => {
+      raw.getFloatTimeDomainData(probe);
+      let sum = 0;
+      for (let i = 0; i < probe.length; i += 1) sum += probe[i] * probe[i];
+      const rms = Math.sqrt(sum / probe.length);
+      return rms > 1e-9 ? 20 * Math.log10(rms) : -200;
+    },
     close: async () => {
       listeners.clear();
       stream.getTracks().forEach((t) => t.stop());

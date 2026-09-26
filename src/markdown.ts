@@ -5,7 +5,8 @@
  * code, > quotes and >>> for the rest of the message, - and 1. lists with
  * nesting, - [ ] task items, pipe tables, --- rules. Inline: **bold**,
  * *italic* and _italic_, __underline__, ~~strike~~, ||spoiler||, `code`,
- * [text](url), bare links, backslash escapes.
+ * [text](url), bare links, backslash escapes, @mentions (a user id or just
+ * its name part; which person it means is decided by the caller).
  *
  * The parser builds a small tree. The page renders it as React elements
  * (ui/Markdown.tsx); for other clients it is turned into the HTML that Matrix
@@ -17,7 +18,13 @@ export type Inline =
   | { t: "br" }
   | { t: "code"; v: string }
   | { t: "b" | "i" | "u" | "s" | "spoiler"; c: Inline[] }
-  | { t: "link"; href: string; c: Inline[] };
+  | { t: "link"; href: string; c: Inline[] }
+  | { t: "mention"; id: string };
+
+/** Who an @mention means: `id` is "@name" or "@name:server" as written. */
+export type MentionResolver = (id: string) => { userId: string; name: string } | null;
+
+const MENTION_AT = /^@([a-z0-9._=\-/]+)(?::([a-z0-9.-]+(?::\d{1,5})?))?/i;
 
 export type Item = {
   /** null: a plain item; true or false: a task item and whether the source marks it done. */
@@ -179,6 +186,22 @@ export function parseInline(src: string): Inline[] {
         continue;
       }
     }
+    // @name or @name:server at a word start; an e-mail address has a letter before the @
+    if (ch === "@" && (i === 0 || !(WORD.test(src[i - 1]) || src[i - 1] === "@"))) {
+      const m = MENTION_AT.exec(src.slice(i));
+      if (m) {
+        // sentence punctuation after a name is not part of it
+        const local = m[1].replace(/[.\-/=]+$/, "");
+        const server = m[2] ? m[2].replace(/[.-]+$/, "") : "";
+        if (local) {
+          const id = server && local === m[1] ? `@${local}:${server}` : `@${local}`;
+          out.push({ t: "mention", id });
+          i += id.length;
+          continue;
+        }
+      }
+    }
+
     if ((ch === "h" || ch === "H" || ch === "m" || ch === "M") && (i === 0 || !WORD.test(src[i - 1]))) {
       const bare = URL_AT.exec(src.slice(i));
       if (bare) {
@@ -380,7 +403,11 @@ export function parse(src: string): Block[] {
 export function isPlain(blocks: Block[]): boolean {
   if (blocks.length !== 1 || blocks[0].t !== "p") return blocks.length === 0;
   return blocks[0].c.every(
-    (n) => n.t === "text" || n.t === "br" || (n.t === "link" && n.c.length === 1 && n.c[0].t === "text" && n.c[0].v === n.href),
+    (n) =>
+      n.t === "text" ||
+      n.t === "br" ||
+      n.t === "mention" ||
+      (n.t === "link" && n.c.length === 1 && n.c[0].t === "text" && n.c[0].v === n.href),
   );
 }
 
@@ -407,10 +434,14 @@ function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
 }
 
-function inlineHtml(nodes: Inline[]): string {
+function inlineHtml(nodes: Inline[], resolve?: MentionResolver): string {
   return nodes
     .map((n) => {
       switch (n.t) {
+        case "mention": {
+          const who = resolve?.(n.id);
+          return who ? `<a href="https://matrix.to/#/${esc(who.userId)}">${esc(who.name)}</a>` : esc(n.id);
+        }
         case "text":
           return esc(n.v);
         case "br":
@@ -418,32 +449,32 @@ function inlineHtml(nodes: Inline[]): string {
         case "code":
           return `<code>${esc(n.v)}</code>`;
         case "b":
-          return `<strong>${inlineHtml(n.c)}</strong>`;
+          return `<strong>${inlineHtml(n.c, resolve)}</strong>`;
         case "i":
-          return `<em>${inlineHtml(n.c)}</em>`;
+          return `<em>${inlineHtml(n.c, resolve)}</em>`;
         case "u":
-          return `<u>${inlineHtml(n.c)}</u>`;
+          return `<u>${inlineHtml(n.c, resolve)}</u>`;
         case "s":
-          return `<del>${inlineHtml(n.c)}</del>`;
+          return `<del>${inlineHtml(n.c, resolve)}</del>`;
         case "spoiler":
-          return `<span data-mx-spoiler>${inlineHtml(n.c)}</span>`;
+          return `<span data-mx-spoiler>${inlineHtml(n.c, resolve)}</span>`;
         case "link":
-          return `<a href="${esc(n.href)}">${inlineHtml(n.c)}</a>`;
+          return `<a href="${esc(n.href)}">${inlineHtml(n.c, resolve)}</a>`;
       }
     })
     .join("");
 }
 
-function blockHtml(b: Block): string {
+function blockHtml(b: Block, resolve?: MentionResolver): string {
   switch (b.t) {
     case "p":
-      return `<p>${inlineHtml(b.c)}</p>`;
+      return `<p>${inlineHtml(b.c, resolve)}</p>`;
     case "h":
-      return `<h${b.level}>${inlineHtml(b.c)}</h${b.level}>`;
+      return `<h${b.level}>${inlineHtml(b.c, resolve)}</h${b.level}>`;
     case "code":
       return `<pre><code${b.lang ? ` class="language-${esc(b.lang)}"` : ""}>${esc(b.v)}</code></pre>`;
     case "quote":
-      return `<blockquote>${b.c.map(blockHtml).join("")}</blockquote>`;
+      return `<blockquote>${b.c.map((x) => blockHtml(x, resolve)).join("")}</blockquote>`;
     case "hr":
       return "<hr>";
     case "list": {
@@ -453,7 +484,7 @@ function blockHtml(b: Block): string {
         .map((it) => {
           // Matrix clients drop <input>, so the box is a character
           const box = it.task === null ? "" : it.task ? "☑ " : "☐ ";
-          return `<li>${box}${inlineHtml(it.c)}${it.sub.map(blockHtml).join("")}</li>`;
+          return `<li>${box}${inlineHtml(it.c, resolve)}${it.sub.map((x) => blockHtml(x, resolve)).join("")}</li>`;
         })
         .join("");
       return `<${tag}${start}>${items}</${tag}>`;
@@ -461,7 +492,7 @@ function blockHtml(b: Block): string {
     case "table": {
       const cell = (tag: string, c: Inline[], k: number) => {
         const a = b.align[k];
-        return `<${tag}${a ? ` align="${a}"` : ""}>${inlineHtml(c)}</${tag}>`;
+        return `<${tag}${a ? ` align="${a}"` : ""}>${inlineHtml(c, resolve)}</${tag}>`;
       };
       const head = `<thead><tr>${b.head.map((c, k) => cell("th", c, k)).join("")}</tr></thead>`;
       const rows = b.rows.map((r) => `<tr>${r.map((c, k) => cell("td", c, k)).join("")}</tr>`).join("");
@@ -471,14 +502,41 @@ function blockHtml(b: Block): string {
 }
 
 /** formatted_body for Matrix. A lone paragraph goes without <p>, as Element does. */
-export function toHtml(blocks: Block[]): string {
-  if (blocks.length === 1 && blocks[0].t === "p") return inlineHtml(blocks[0].c);
-  return blocks.map(blockHtml).join("");
+export function toHtml(blocks: Block[], resolve?: MentionResolver): string {
+  if (blocks.length === 1 && blocks[0].t === "p") return inlineHtml(blocks[0].c, resolve);
+  return blocks.map((b) => blockHtml(b, resolve)).join("");
 }
 
-/** Message content fields for a text: formatted_body only when there is markup. */
-export function formatted(text: string): { format?: string; formatted_body?: string } {
+/** Every @mention of the text that means a real person, as user ids. */
+export function mentionedUsers(blocks: Block[], resolve?: MentionResolver): string[] {
+  const out = new Set<string>();
+  if (!resolve) return [];
+  const inl = (nodes: Inline[]) => {
+    for (const n of nodes) {
+      if (n.t === "mention") {
+        const who = resolve(n.id);
+        if (who) out.add(who.userId);
+      } else if ("c" in n) inl(n.c);
+    }
+  };
+  const walk = (list: Block[]) => {
+    for (const b of list) {
+      if (b.t === "p" || b.t === "h") inl(b.c);
+      else if (b.t === "quote") walk(b.c);
+      else if (b.t === "list") b.items.forEach((it) => (inl(it.c), walk(it.sub)));
+      else if (b.t === "table") [...b.head, ...b.rows.flat()].forEach(inl);
+    }
+  };
+  walk(blocks);
+  return [...out];
+}
+
+/**
+ * Message content fields for a text: formatted_body only when there is markup
+ * or a mention (other clients show mentions as pills from the HTML).
+ */
+export function formatted(text: string, resolve?: MentionResolver): { format?: string; formatted_body?: string } {
   const blocks = parse(text);
-  if (isPlain(blocks)) return {};
-  return { format: "org.matrix.custom.html", formatted_body: toHtml(blocks) };
+  if (isPlain(blocks) && !mentionedUsers(blocks, resolve).length) return {};
+  return { format: "org.matrix.custom.html", formatted_body: toHtml(blocks, resolve) };
 }

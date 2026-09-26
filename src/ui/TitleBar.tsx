@@ -19,8 +19,21 @@ const INITIAL: WindowState = { frame: hasOwnFrame, maximized: false, fullscreen:
 export function useWindowState(): WindowState {
   const [state, setState] = useState<WindowState>(INITIAL);
   useEffect(() => {
-    void getWindowState().then((s) => s && setState(s));
-    return onWindowState(setState);
+    const ask = () => void getWindowState().then((s) => s && setState(s));
+    ask();
+    // a video leaving full screen: the window state is asked again, the bar must come back
+    const onPage = () => {
+      ask();
+      window.setTimeout(ask, 300);
+    };
+    document.addEventListener("fullscreenchange", onPage);
+    window.addEventListener("focus", ask);
+    const off = onWindowState(setState);
+    return () => {
+      off();
+      document.removeEventListener("fullscreenchange", onPage);
+      window.removeEventListener("focus", ask);
+    };
   }, []);
   return state;
 }

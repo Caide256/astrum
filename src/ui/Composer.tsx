@@ -1,8 +1,19 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent } from "react";
 
-import { app, cancelCompose, editLastOwn, maxUpload, sendMessage, typingNow } from "../app.ts";
+import {
+  app,
+  cancelCompose,
+  editLastOwn,
+  maxUpload,
+  mentionCandidates,
+  prefetchPreviews,
+  sendMessage,
+  typingNow,
+  type MentionHit,
+} from "../app.ts";
 import { t } from "../i18n/index.ts";
 import { useStore } from "../store.ts";
+import { Avatar } from "./Avatar.tsx";
 import { EmojiPicker } from "./EmojiPicker.tsx";
 import { FormatBar, applyFormat, formatForKey, type FormatId } from "./FormatBar.tsx";
 import { IconClose, IconFile, IconFormat, IconPlus, IconSend, IconSmile } from "./icons.tsx";
@@ -116,6 +127,10 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
   const [emoji, setEmoji] = useState(false);
   const [formatOpen, setFormatOpen] = useState(false);
   const [selected, setSelected] = useState(false);
+  // "@" typed: who to offer, and which row is picked
+  const [mention, setMention] = useState<{ start: number; end: number; query: string } | null>(null);
+  const [pick, setPick] = useState(0);
+  const hits: MentionHit[] = mention ? mentionCandidates(roomId, mention.query) : [];
   const field = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   // the selection to restore once React has written the new text into the field
@@ -139,6 +154,13 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
     window.addEventListener("beforeunload", flush);
     return () => window.removeEventListener("beforeunload", flush);
   }, []);
+
+  // link cards are fetched while typing, so sending does not wait for them
+  useEffect(() => {
+    if (!text.includes("http")) return;
+    const timer = window.setTimeout(() => prefetchPreviews(text), 700);
+    return () => window.clearTimeout(timer);
+  }, [text]);
 
   // the field grows with the text up to a third of the window
   useLayoutEffect(() => {
@@ -200,7 +222,8 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const canSend = editing ? !!text.trim() : !!text.trim() || files.length > 0;
+  // an attachment's caption may be removed, a text message cannot become empty
+  const canSend = editing ? !!text.trim() || !!editing.media : !!text.trim() || files.length > 0;
 
   const submit = () => {
     if (!canSend) return;
@@ -223,9 +246,51 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
     setText(next.text);
   };
 
+  /** The "@..." right before the caret, if any. */
+  const findMention = (value: string, caret: number) => {
+    const m = /(^|[^\p{L}\p{N}_@])@([^\s@]{0,40})$/u.exec(value.slice(0, caret));
+    if (!m) {
+      setMention(null);
+      return;
+    }
+    setMention((prev) => {
+      const next = { start: caret - m[2].length - 1, end: caret, query: m[2] };
+      if (!prev || prev.query !== next.query) setPick(0);
+      return next;
+    });
+  };
+
+  const insertMention = (hit: MentionHit) => {
+    if (!mention) return;
+    const value = `${hit.insert} `;
+    const next = text.slice(0, mention.start) + value + text.slice(mention.end);
+    const at = mention.start + value.length;
+    pendingSel.current = [at, at];
+    setText(next);
+    setMention(null);
+  };
+
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     // while an IME composes a word, Enter confirms the word
     if (e.nativeEvent.isComposing) return;
+    if (mention && hits.length) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const step = e.key === "ArrowDown" ? 1 : -1;
+        setPick((p) => (p + step + hits.length) % hits.length);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        insertMention(hits[Math.min(pick, hits.length - 1)]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMention(null);
+        return;
+      }
+    }
     const shortcut = formatForKey(e);
     if (shortcut) {
       e.preventDefault();
@@ -293,10 +358,11 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
         {(replyTo || editing) && (
           <div className="compose-bar">
             {editing ? (
-              <span className="ellipsis">{t("composer.editing")}</span>
+              <span className="ellipsis">{editing.media ? t("composer.editingCaption") : t("composer.editing")}</span>
             ) : (
               <span className="ellipsis">
-                {t("composer.replyTo")} <b>{replyTo?.senderName}</b>: {replyTo?.body}
+                {replyTo?.quote ? t("composer.quoteOf") : t("composer.replyTo")} <b>{replyTo?.senderName}</b>:{" "}
+                {replyTo?.quote ? <i>«{replyTo.body}»</i> : replyTo?.body}
               </span>
             )}
             <button
@@ -329,6 +395,29 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
 
         {(formatOpen || selected) && <FormatBar onFormat={format} />}
 
+        {mention && hits.length > 0 && (
+          <div className="mention-pop" role="listbox">
+            <div className="mention-head">{t("composer.mentionHead")}</div>
+            {hits.map((h, i) => (
+              <button
+                type="button"
+                key={h.userId}
+                className={`mention-row ${i === pick ? "on" : ""}`}
+                onMouseDown={(e) => {
+                  // keep the focus in the field
+                  e.preventDefault();
+                  insertMention(h);
+                }}
+                onMouseEnter={() => setPick(i)}
+              >
+                <Avatar mxc={h.avatar} name={h.name} size={22} />
+                <b className="ellipsis">{h.name}</b>
+                <span className="state ellipsis">{h.userId}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="composer">
           <button
             type="button"
@@ -356,11 +445,20 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
             onChange={(e) => {
               setText(e.target.value);
               typingNow(!!e.target.value);
+              findMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
             }}
             onPaste={onPaste}
             onKeyDown={onKeyDown}
-            onSelect={(e) => setSelected(e.currentTarget.selectionEnd > e.currentTarget.selectionStart)}
-            onBlur={() => setSelected(false)}
+            onSelect={(e) => {
+              const el = e.currentTarget;
+              setSelected(el.selectionEnd > el.selectionStart);
+              if (el.selectionEnd === el.selectionStart) findMention(el.value, el.selectionStart);
+              else setMention(null);
+            }}
+            onBlur={() => {
+              setSelected(false);
+              setMention(null);
+            }}
             placeholder={
               editing ? t("composer.placeholder.edit") : files.length ? t("composer.placeholder.caption") : t("composer.placeholder", { name: title })
             }

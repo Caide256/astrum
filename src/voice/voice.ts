@@ -7,7 +7,7 @@ import {
   Room,
   RoomEvent,
   Track,
-  VideoPresets,
+  VideoPreset,
   type Participant,
   type RemoteParticipant,
   type RemoteTrack,
@@ -51,10 +51,38 @@ import {
  * moderator's request to leave the call. Other clients ignore these packets.
  */
 
+/**
+ * Background of a person's tile in a call when the camera is off: a color
+ * taken from the avatar (the most common one, or the one along its edge), or
+ * one picked by hand. Sent to others over the data channel.
+ */
+export type TileLook = { mode: "dominant" | "edge" | "color"; color: string };
+
+/** Something the person should notice: talking while muted, or a microphone that gives nothing. */
+export type VoiceHint = "" | "muted-talk" | "mic-silent";
+
+/** One measurement of the connection to the media server. */
+export type NetSample = { t: number; rtt: number; outLoss: number; inLoss: number };
+
+/** Video coming in: a camera or a share being watched. */
+export type IncomingVideo = { width: number; height: number; fps: number; kbps: number; codec: string; gpu: boolean };
+
+export type NetStats = {
+  server: string;
+  samples: NetSample[];
+  share: CodecInfo | null;
+  camera: CodecInfo | null;
+  /** How the media flows: udp or tcp, through a relay or not, and the estimated upload in kbit/s. */
+  link: { protocol: string; relay: boolean; upKbps: number } | null;
+  incoming: IncomingVideo[];
+};
+
 export type VoiceMember = {
   id: string;
   userId: string;
   name: string;
+  /** Tile background chosen by the person, if their app told us. */
+  tile: TileLook | null;
   speaking: boolean;
   muted: boolean;
   /** Hears nothing; reported by clients of this app only. */
@@ -115,6 +143,9 @@ export type AudioSettings = {
   pttDelay: number;
   /** Share encoder: auto tries the GPU (H264) and falls back to VP8 on the CPU if it produces nothing. */
   shareCodec: ShareCodec;
+  /** Camera picture height and frame rate. */
+  camHeight: number;
+  camFps: number;
 };
 
 export type ShareCodec = "auto" | "h264" | "vp8";
@@ -160,6 +191,8 @@ export type CodecInfo = {
   height: number;
   /** Video codecs enabled on the LiveKit server. Empty means all. */
   serverCodecs: string[];
+  /** Why the encoder lowers the picture: "cpu", "bandwidth" or "none". */
+  limit: string;
 };
 
 /** Tell a hardware codec from a software one by its implementation name. */
@@ -188,6 +221,7 @@ async function readCodec(
     fps: Math.round(Number(f.framesPerSecond ?? 0)),
     width: Number(f.frameWidth ?? 0),
     height: Number(f.frameHeight ?? 0),
+    limit: String(f.qualityLimitationReason ?? ""),
   };
 }
 
@@ -206,6 +240,7 @@ export type VoiceState = {
   devices: { mics: DeviceInfo[]; speakers: DeviceInfo[]; cams: DeviceInfo[] };
   settings: AudioSettings;
   error: string;
+  hint: VoiceHint;
 };
 
 const DEFAULT_SETTINGS: AudioSettings = {
@@ -225,6 +260,8 @@ const DEFAULT_SETTINGS: AudioSettings = {
   inputMode: "voice",
   pttDelay: 200,
   shareCodec: "auto",
+  camHeight: 720,
+  camFps: 30,
 };
 
 /**
@@ -274,11 +311,39 @@ function screenCodec(pref: ShareCodec): "h264" | "vp8" {
   return hasH264() ? "h264" : "vp8";
 }
 
-/** A camera: 720p at a bitrate that keeps faces sharp, with two lower layers for small tiles. */
-const CAMERA_ENCODING: VideoEncoding = { maxBitrate: 2_500_000, maxFramerate: 30 };
+export const CAMERA_HEIGHTS = [360, 540, 720, 1080];
+export const CAMERA_FPS = [15, 24, 30, 60];
+
+/**
+ * Camera encoding for a picture size and frame rate. Bitrates are generous:
+ * faces and hands move all the time, and a starved encoder smears them.
+ */
+function cameraPlan(height: number, fps: number): { main: VideoPreset } {
+  const h = CAMERA_HEIGHTS.includes(height) ? height : 720;
+  const f = CAMERA_FPS.includes(fps) ? fps : 30;
+  const base: Record<number, number> = { 360: 900_000, 540: 1_700_000, 720: 3_000_000, 1080: 5_500_000 };
+  const bitrate = Math.round(base[h] * Math.pow(f / 30, 0.6));
+  return { main: new VideoPreset(Math.round((h * 16) / 9), h, bitrate, f) };
+}
 
 /** Packets between clients of this app over the LiveKit data channel. */
-type Packet = { t: "state"; deaf: boolean } | { t: "watch"; on: boolean } | { t: "kick" };
+type Packet =
+  | { t: "state"; deaf: boolean; tile?: TileLook }
+  | { t: "watch"; on: boolean }
+  | { t: "kick" }
+  /** A viewer cannot decode the share: the sharer should switch to VP8. */
+  | { t: "codec"; want: "vp8" };
+
+function cleanTile(raw: unknown): TileLook | null {
+  const v = raw as Partial<TileLook> | null;
+  if (!v || (v.mode !== "dominant" && v.mode !== "edge" && v.mode !== "color")) return null;
+  const color = typeof v.color === "string" && /^#[0-9a-f]{6}$/i.test(v.color) ? v.color : "";
+  if (v.mode === "color" && !color) return null;
+  return { mode: v.mode, color };
+}
+
+/** How long a watched share may deliver nothing decodable before the viewer asks for VP8. */
+const DECODE_STALL_MS = 7000;
 
 const TOPIC = BRAND.appId;
 const encoder = new TextEncoder();
@@ -286,6 +351,11 @@ const decoder = new TextDecoder();
 
 /** How long the GPU encoder may stay silent while viewers wait before the share moves to VP8. */
 const ENCODER_STALL_MS = 5000;
+
+/** The media server refused to take our track: its token grants no right to publish. */
+function isNoPublishRight(e: unknown): boolean {
+  return /insufficient permissions|not allowed to publish|permission denied.*publish/i.test(String((e as Error)?.message ?? e));
+}
 
 function isCancel(e: unknown): boolean {
   return /Permission denied|NotAllowedError|AbortError|canceled|cancelled/i.test(String(e));
@@ -345,6 +415,7 @@ function blank(): Omit<VoiceState, "devices" | "settings" | "muted" | "deafened"
     streams: [],
     share: null,
     error: "",
+    hint: "",
   };
 }
 
@@ -393,6 +464,25 @@ export class VoiceClient {
   private testHold: SelfState | null = null;
   private codecWatch = 0;
   private shareFps = 30;
+  /** Codec the own share is published with right now. */
+  private shareCodecNow: "h264" | "vp8" = "vp8";
+  /** Tile looks of others, from their state packets, and the own one. */
+  private remoteTile = new Map<string, TileLook>();
+  private ownTile: TileLook | null = null;
+  /** Talking while muted was heard until then. */
+  private mutedTalkUntil = 0;
+  private silentFor = 0;
+  private hintTimer = 0;
+  /** Connection measurements and the counters they are computed from. */
+  private net: NetSample[] = [];
+  private netPrev = { sent: 0, lost: 0, recv: 0, recvLost: 0 };
+  private netLink: NetStats["link"] = null;
+  private netIncoming: IncomingVideo[] = [];
+  private inBytes = new Map<string, { bytes: number; at: number }>();
+  private netTimer = 0;
+  private serverHost = "";
+  /** Watched shares that decode nothing yet: since when, and whether VP8 was already asked for. */
+  private decodeWatch = new Map<string, { since: number; asked: boolean; sid: string }>();
   /** Moderation hooks from the app: may this person make us leave, and what to do then. */
   kickAllowed: (fromUserId: string) => boolean = () => false;
   onKicked: (fromUserId: string) => void = () => undefined;
@@ -729,6 +819,7 @@ export class VoiceClient {
         id: p.identity,
         userId,
         name,
+        tile: local ? this.ownTile : (this.remoteTile.get(p.identity) ?? null),
         speaking: muted ? false : this.held(p.identity, talking, now),
         muted,
         deafened,
@@ -790,7 +881,7 @@ export class VoiceClient {
 
     const signature =
       members
-        .map((m) => `${m.id}${+m.speaking}${+m.muted}${+m.deafened}${+m.camera}${+m.screen}${m.volume}${+m.localMuted}`)
+        .map((m) => `${m.id}${+m.speaking}${+m.muted}${+m.deafened}${+m.camera}${+m.screen}${m.volume}${+m.localMuted}${m.tile?.mode ?? ""}${m.tile?.color ?? ""}`)
         .join("|") +
       "//" +
       videos.map((v) => v.key).join("|") +
@@ -852,6 +943,12 @@ export class VoiceClient {
   private setMeter(s: MicState): void {
     const flipped = s.open !== this.meterState.open;
     this.meterState = s;
+    // a voice above the threshold while muted: the person probably forgot
+    if (this.state.connected && this.state.muted && !this.state.deafened && !this.testHold && s.db > s.threshold && s.db > -60) {
+      const fresh = this.mutedTalkUntil < performance.now();
+      this.mutedTalkUntil = performance.now() + 2500;
+      if (fresh) this.updateHint();
+    }
     this.meterListeners.forEach((l) => l(s));
     if (flipped) this.refreshMembers();
   }
@@ -899,6 +996,10 @@ export class VoiceClient {
    */
   private micFailed(e: unknown): void {
     const err = e as { name?: string; message?: string };
+    if (isNoPublishRight(e)) {
+      this.patch({ muted: true, error: t("voice.err.noPublishRight", { host: this.serverHost }) });
+      return;
+    }
     const why = /NotAllowed|Permission/i.test(err?.name ?? "")
       ? t("voice.err.micDenied")
       : /NotFound/i.test(err?.name ?? "")
@@ -970,7 +1071,14 @@ export class VoiceClient {
   }
 
   private sendState(to?: string): void {
-    this.send({ t: "state", deaf: this.state.deafened }, to);
+    this.send({ t: "state", deaf: this.state.deafened, ...(this.ownTile ? { tile: this.ownTile } : {}) }, to);
+  }
+
+  /** The own tile background: shown to others in calls. */
+  setTile(look: TileLook | null): void {
+    this.ownTile = look;
+    this.sendState();
+    this.refreshMembers(true);
   }
 
   private receive(payload: Uint8Array, from: RemoteParticipant | undefined, topic: string | undefined): void {
@@ -983,6 +1091,9 @@ export class VoiceClient {
     }
     if (packet.t === "state") {
       this.remoteDeaf.set(from.identity, !!packet.deaf);
+      const tile = cleanTile(packet.tile);
+      if (tile) this.remoteTile.set(from.identity, tile);
+      else this.remoteTile.delete(from.identity);
       this.refreshMembers(true);
     } else if (packet.t === "watch") {
       if (!this.screenTrack) return;
@@ -991,10 +1102,197 @@ export class VoiceClient {
         this.sound("viewerJoin");
       } else if (!packet.on) this.viewers.delete(from.identity);
       this.refreshMembers(true);
+    } else if (packet.t === "codec") {
+      // a viewer's decoder cannot show the GPU stream: everyone gets VP8 instead
+      const track = this.screenTrack;
+      if (track && this.shareCodecNow === "h264" && this.state.settings.shareCodec === "auto") void this.moveToVp8(track);
     } else if (packet.t === "kick") {
       // the sender's identity is signed by the JWT service; its role is checked in the room
       const userId = matrixUserFromIdentity(from.identity);
       if (userId && this.kickAllowed(userId)) this.onKicked(userId);
+    }
+  }
+
+  /* ------------------------------------------------------------------- hints */
+
+  /**
+   * What to point out next to the buttons: talking while muted (seen by the
+   * level meter, which keeps running while the track is muted), or a
+   * microphone that has given pure silence for a while, which means a wrong
+   * device, a muted jack or blocked access.
+   */
+  private updateHint(tick = false): void {
+    let hint: VoiceHint = "";
+    const s = this.state;
+    if (s.connected) {
+      if (tick) {
+        const raw = this.mic?.rawDb() ?? -200;
+        this.silentFor = !s.muted && raw < -110 ? this.silentFor + 1 : 0;
+      }
+      if (!this.micTrack && !s.connecting) hint = "mic-silent";
+      else if (this.silentFor >= 8) hint = "mic-silent";
+      else if (s.muted && !s.deafened && this.mutedTalkUntil > performance.now()) hint = "muted-talk";
+    }
+    if (hint !== s.hint) this.patch({ hint });
+  }
+
+  /* ------------------------------------------------------------ network stats */
+
+  /**
+   * Round trip to the media server and packet loss both ways, every two
+   * seconds for the last five minutes. Round trip comes from the ICE
+   * candidate pair; loss from the server's reports on our audio (outgoing)
+   * and from the counters of the voices we receive (incoming).
+   */
+  private async sampleNet(): Promise<void> {
+    const room = this.room;
+    if (!room || room.state !== ConnectionState.Connected) return;
+    const pcs = (room as unknown as { engine?: { pcManager?: { publisher?: { getStats(): Promise<RTCStatsReport> | undefined }; subscriber?: { getStats(): Promise<RTCStatsReport> | undefined } } } }).engine?.pcManager;
+    const [pub, sub] = await Promise.all([
+      Promise.resolve(pcs?.publisher?.getStats()).catch(() => undefined),
+      Promise.resolve(pcs?.subscriber?.getStats()).catch(() => undefined),
+    ]);
+
+    /** The selected candidate pair of a connection, with its local candidate. */
+    const pairOf = (report: RTCStatsReport | undefined) => {
+      if (!report) return null;
+      let pair: Record<string, any> | null = null;
+      report.forEach((s: Record<string, any>) => {
+        if (s.type === "transport" && s.selectedCandidatePairId) pair = report.get(s.selectedCandidatePairId) ?? pair;
+      });
+      if (!pair) {
+        report.forEach((s: Record<string, any>) => {
+          if (s.type === "candidate-pair" && s.nominated && s.state === "succeeded") pair = s;
+        });
+      }
+      const p = pair as Record<string, any> | null;
+      return p ? { pair: p, local: report.get(p.localCandidateId) as Record<string, any> | undefined } : null;
+    };
+
+    const subPair = pairOf(sub);
+    const pubPair = pairOf(pub);
+    const rttPair = subPair?.pair ?? pubPair?.pair;
+    let rtt = typeof rttPair?.currentRoundTripTime === "number" ? rttPair.currentRoundTripTime * 1000 : -1;
+
+    let sent = 0;
+    let lost = 0;
+    pub?.forEach((s: Record<string, any>) => {
+      if (s.type === "outbound-rtp") sent += Number(s.packetsSent ?? 0);
+      else if (s.type === "remote-inbound-rtp") {
+        lost += Math.max(0, Number(s.packetsLost ?? 0));
+        if (rtt < 0 && typeof s.roundTripTime === "number") rtt = s.roundTripTime * 1000;
+      }
+    });
+
+    let recv = 0;
+    let recvLost = 0;
+    const now = performance.now();
+    const incoming: IncomingVideo[] = [];
+    sub?.forEach((s: Record<string, any>) => {
+      if (s.type !== "inbound-rtp") return;
+      recv += Number(s.packetsReceived ?? 0);
+      recvLost += Math.max(0, Number(s.packetsLost ?? 0));
+      if (s.kind !== "video" || !s.frameWidth) return;
+      const prev = this.inBytes.get(s.id);
+      const bytes = Number(s.bytesReceived ?? 0);
+      const kbps = prev && now > prev.at ? Math.round(((bytes - prev.bytes) * 8) / (now - prev.at)) : 0;
+      this.inBytes.set(s.id, { bytes, at: now });
+      const engine = String(s.decoderImplementation ?? "");
+      incoming.push({
+        width: Number(s.frameWidth ?? 0),
+        height: Number(s.frameHeight ?? 0),
+        fps: Math.round(Number(s.framesPerSecond ?? 0)),
+        kbps,
+        codec: String((sub.get(s.codecId) as Record<string, any> | undefined)?.mimeType ?? "").replace(/^video\//i, "").toUpperCase(),
+        gpu: onGpu(engine, s.powerEfficientDecoder),
+      });
+    });
+    this.netIncoming = incoming;
+
+    const linkSide = pubPair ?? subPair;
+    this.netLink = linkSide
+      ? {
+          protocol: String(linkSide.local?.relayProtocol || linkSide.local?.protocol || "").toUpperCase(),
+          relay: linkSide.local?.candidateType === "relay",
+          upKbps: Math.round(Number(pubPair?.pair.availableOutgoingBitrate ?? 0) / 1000),
+        }
+      : null;
+
+    const prev = this.netPrev;
+    const pct = (lostNow: number, lostThen: number, okNow: number, okThen: number) => {
+      const l = Math.max(0, lostNow - lostThen);
+      const total = l + Math.max(0, okNow - okThen);
+      return total > 0 ? (l / total) * 100 : 0;
+    };
+    const first = prev.sent === 0 && prev.recv === 0;
+    const sample: NetSample = {
+      t: Date.now(),
+      rtt: Math.round(Math.max(0, rtt)),
+      outLoss: first || !sent ? 0 : pct(lost, prev.lost, sent, prev.sent),
+      inLoss: first ? 0 : pct(recvLost, prev.recvLost, recv, prev.recv),
+    };
+    this.netPrev = { sent, lost, recv, recvLost };
+    if (rtt < 0 && !sent && !recv) return;
+    this.net.push(sample);
+    if (this.net.length > 150) this.net.splice(0, this.net.length - 150);
+  }
+
+  /** The connection panel: measurements, and how the own share and camera are encoded. */
+  async netStats(): Promise<NetStats> {
+    const cam = this.room?.localParticipant.getTrackPublication(Track.Source.Camera)?.track as LocalVideoTrack | undefined;
+    const camera = cam?.sender ? await readCodec(cam.sender, "outbound-rtp").catch(() => null) : null;
+    return {
+      server: this.serverHost,
+      samples: [...this.net],
+      share: await this.shareCodec(),
+      camera: camera ? { ...camera, serverCodecs: this.serverCodecs() } : null,
+      link: this.netLink,
+      incoming: [...this.netIncoming],
+    };
+  }
+
+  /* ---------------------------------------------------------- decode watch */
+
+  /**
+   * A watched share whose video arrives but never decodes (or never arrives)
+   * is most likely a GPU stream this computer cannot show. The sharer is
+   * asked once to switch to VP8, which every client decodes.
+   */
+  private async checkDecoding(): Promise<void> {
+    const room = this.room;
+    if (!room) return;
+    const now = performance.now();
+    for (const id of this.watching) {
+      const pub = room.remoteParticipants.get(id)?.getTrackPublication(Track.Source.ScreenShare);
+      const track = pub?.track as RemoteVideoTrack | undefined;
+      if (!pub || !track?.receiver || pub.isMuted) {
+        this.decodeWatch.delete(id);
+        continue;
+      }
+      let w = this.decodeWatch.get(id);
+      if (!w || w.sid !== pub.trackSid) {
+        w = { since: now, asked: false, sid: pub.trackSid };
+        this.decodeWatch.set(id, w);
+      }
+      if (w.asked) continue;
+      let decoded = 0;
+      let codec = "";
+      const stats = await track.receiver.getStats().catch(() => null);
+      stats?.forEach((s: Record<string, any>) => {
+        if (s.type === "inbound-rtp" && s.kind === "video") {
+          decoded += Number(s.framesDecoded ?? 0);
+          codec = String((stats.get(s.codecId) as Record<string, any> | undefined)?.mimeType ?? "");
+        }
+      });
+      if (decoded > 0) {
+        w.asked = true;
+        continue;
+      }
+      // only a GPU stream is worth switching; VP8 not decoding is a network problem
+      if (now - w.since >= DECODE_STALL_MS && (!codec || /h264/i.test(codec))) {
+        w.asked = true;
+        this.send({ t: "codec", want: "vp8" }, id);
+      }
     }
   }
 
@@ -1057,6 +1355,11 @@ export class VoiceClient {
   async connect(roomId: string, url: string, token: string): Promise<void> {
     await this.disconnect();
     this.patch({ ...blank(), roomId, connecting: true });
+    try {
+      this.serverHost = new URL(url).host;
+    } catch {
+      this.serverHost = url;
+    }
     this.watching.clear();
     this.peeking.clear();
     this.lostAt.clear();
@@ -1105,7 +1408,9 @@ export class VoiceClient {
       .on(RoomEvent.ParticipantDisconnected, (participant) => {
         this.sound("userLeave");
         this.remoteDeaf.delete(participant.identity);
+        this.remoteTile.delete(participant.identity);
         this.viewers.delete(participant.identity);
+        this.decodeWatch.delete(participant.identity);
         force();
       })
       .on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => this.receive(payload, participant, topic))
@@ -1152,6 +1457,13 @@ export class VoiceClient {
     this.sendState();
     // remote speaking flags are held for a moment and must be released on time
     this.holdTimer = window.setInterval(() => this.refreshMembers(), 150);
+    this.hintTimer = window.setInterval(() => this.updateHint(true), 1000);
+    this.net = [];
+    this.netPrev = { sent: 0, lost: 0, recv: 0, recvLost: 0 };
+    this.netTimer = window.setInterval(() => {
+      void this.sampleNet();
+      void this.checkDecoding();
+    }, 2000);
     this.applyVolumes();
     this.refreshMembers(true);
     void this.refreshDevices();
@@ -1184,6 +1496,8 @@ export class VoiceClient {
     }
     this.saveSelf();
     this.sound(muted ? "mute" : "unmute");
+    if (!muted) this.mutedTalkUntil = 0;
+    this.updateHint();
     this.refreshMembers(true);
   }
 
@@ -1235,11 +1549,18 @@ export class VoiceClient {
       }
     }
 
+    const plan = cameraPlan(this.state.settings.camHeight, this.state.settings.camFps);
     const enable = (camId: string) =>
       room.localParticipant.setCameraEnabled(
         on,
-        { deviceId: camId ? { exact: camId } : undefined, resolution: VideoPresets.h720.resolution },
-        { videoEncoding: CAMERA_ENCODING, simulcast: true, videoSimulcastLayers: [VideoPresets.h180, VideoPresets.h360] },
+        { deviceId: camId ? { exact: camId } : undefined, resolution: plan.main.resolution },
+        {
+          videoEncoding: plan.main.encoding,
+          // one full layer: with a few people there is nobody to serve a small one to,
+          // and the server kept handing out the small layer whenever the estimate dipped
+          simulcast: false,
+          degradationPreference: "maintain-framerate",
+        },
       );
     try {
       try {
@@ -1254,9 +1575,17 @@ export class VoiceClient {
       }
       this.patch({ error: "" });
     } catch (e) {
-      this.patch({ error: t("voice.err.camera", { error: String(e) }) });
+      this.patch({ error: isNoPublishRight(e) ? t("voice.err.noPublishRight", { host: this.serverHost }) : t("voice.err.camera", { error: String(e) }) });
     }
     this.refreshMembers(true);
+  }
+
+  /** New camera quality: a running camera is restarted with it. */
+  async setCameraQuality(height: number, fps: number): Promise<void> {
+    await this.applySettings({ camHeight: height, camFps: fps });
+    if (!this.state.camera) return;
+    await this.setCamera(false);
+    await this.setCamera(true);
   }
 
   /* ------------------------------------------------------------ screen share */
@@ -1389,6 +1718,8 @@ export class VoiceClient {
       if (!isCancel(e)) this.patch({ error: t("voice.err.shareFailed", { error: String(e) }) });
       return;
     }
+    const failPublish = (e: unknown) =>
+      isNoPublishRight(e) ? t("voice.err.noPublishRight", { host: this.serverHost }) : t("voice.err.shareFailed", { error: String(e) });
 
     const video = stream.getVideoTracks()[0];
     if (!video) {
@@ -1403,10 +1734,11 @@ export class VoiceClient {
       track = await this.publishScreen(video, opts.fps, codec);
     } catch (e) {
       stream.getTracks().forEach((t) => t.stop());
-      this.patch({ error: t("voice.err.shareFailed", { error: String(e) }) });
+      this.patch({ error: failPublish(e) });
       return;
     }
     this.screenTrack = track;
+    this.shareCodecNow = codec;
     this.viewers.clear();
     const dims = await this.tuneScreen(track, opts.fps);
     if (codec === "h264" && this.state.settings.shareCodec === "auto") this.watchEncoder(track);
@@ -1455,15 +1787,19 @@ export class VoiceClient {
   }
 
   /**
-   * Some GPUs accept the H264 encoder and then produce nothing: viewers get a
-   * black tile while the sharer sees the local preview. Once somebody watches
-   * (the layer is active) and not a single frame came out for a few seconds,
-   * the same capture is published again as VP8 on the CPU.
+   * H264 is only worth it on the GPU. Two ways it goes wrong: the GPU
+   * encoder is accepted and then produces nothing (viewers get a black tile),
+   * or the GPU refuses the session (its encoder is busy with NVIDIA Instant
+   * Replay, OBS or another app, or does not take the picture size) and
+   * Chromium quietly falls back to the software H264 encoder, which is slow
+   * and shrinks the picture to a blur. Either way the same capture is
+   * published again as VP8, which is much better on the CPU.
    */
   private watchEncoder(track: LocalVideoTrack): void {
     window.clearInterval(this.codecWatch);
     let silentFor = 0;
     let last = performance.now();
+    const started = performance.now();
     this.codecWatch = window.setInterval(() => {
       if (this.screenTrack !== track) {
         window.clearInterval(this.codecWatch);
@@ -1476,24 +1812,37 @@ export class VoiceClient {
         const step = now - last;
         last = now;
         let frames = 0;
+        let engine = "";
+        let efficient: unknown = undefined;
         stats.forEach((s: Record<string, any>) => {
-          if (s.type === "outbound-rtp" && s.kind === "video") frames += Number(s.framesEncoded ?? 0);
+          if (s.type === "outbound-rtp" && s.kind === "video") {
+            frames += Number(s.framesEncoded ?? 0);
+            engine = String(s.encoderImplementation ?? engine);
+            efficient = s.powerEfficientEncoder ?? efficient;
+          }
         });
         const active = sender.getParameters().encodings?.some((e) => e.active !== false) ?? false;
         if (frames > 0) {
-          window.clearInterval(this.codecWatch);
+          silentFor = 0;
+          // the implementation is known once frames go out
+          if (engine && !onGpu(engine, efficient)) {
+            window.clearInterval(this.codecWatch);
+            void this.moveToVp8(track, "voice.err.gpuBusy");
+            return;
+          }
+          if (engine && now - started > 15_000) window.clearInterval(this.codecWatch);
           return;
         }
         silentFor = active ? silentFor + step : 0;
         if (silentFor >= ENCODER_STALL_MS) {
           window.clearInterval(this.codecWatch);
-          void this.moveToVp8(track);
+          void this.moveToVp8(track, "voice.err.gpuFallback");
         }
       });
     }, 1000);
   }
 
-  private async moveToVp8(old: LocalVideoTrack): Promise<void> {
+  private async moveToVp8(old: LocalVideoTrack, why: "voice.err.gpuFallback" | "voice.err.gpuBusy" = "voice.err.gpuFallback"): Promise<void> {
     const room = this.room;
     if (!room || this.screenTrack !== old) return;
     const video = old.mediaStreamTrack;
@@ -1507,8 +1856,9 @@ export class VoiceClient {
     try {
       const track = await this.publishScreen(video, this.shareFps, "vp8");
       this.screenTrack = track;
+      this.shareCodecNow = "vp8";
       await this.tuneScreen(track, this.shareFps);
-      this.patch({ error: t("voice.err.gpuFallback") });
+      this.patch({ error: t(why) });
     } catch (e) {
       video.stop();
       await this.stopScreenAudio();
@@ -1656,8 +2006,18 @@ export class VoiceClient {
     const wasConnected = this.state.connected;
     window.clearInterval(this.holdTimer);
     window.clearInterval(this.codecWatch);
+    window.clearInterval(this.hintTimer);
+    window.clearInterval(this.netTimer);
     this.holdTimer = 0;
     this.remoteDeaf.clear();
+    this.remoteTile.clear();
+    this.decodeWatch.clear();
+    this.net = [];
+    this.netLink = null;
+    this.netIncoming = [];
+    this.inBytes.clear();
+    this.silentFor = 0;
+    this.mutedTalkUntil = 0;
     this.viewers.clear();
     await this.stopScreenAudio();
     await this.closeMic();

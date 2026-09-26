@@ -21,6 +21,12 @@ export type Channel = {
   unread: number;
   /** Unread messages that mention the user. */
   mentions: number;
+  /** The user may not post here (read-only for their role). */
+  readonly: boolean;
+  /** A voice channel the user may not join with their role. */
+  voiceLocked: boolean;
+  /** Seen only by some roles. */
+  hidden: boolean;
 };
 
 export type Server = {
@@ -72,7 +78,26 @@ function toChannel(client: MatrixClient, roomId: string, order: string): Channel
     joined: room.getMyMembership() === "join",
     unread: room.getUnreadNotificationCount() ?? 0,
     mentions: room.getUnreadNotificationCount(NotificationCountType.Highlight) ?? 0,
+    readonly: !mayPost(client, room),
+    voiceLocked: isVoiceRoom(room) && !mayCall(client, room),
+    hidden: room.getJoinRule() === "invite",
   };
+}
+
+function mayPost(client: MatrixClient, room: Room): boolean {
+  try {
+    return room.currentState.maySendEvent("m.room.message", client.getUserId() ?? "");
+  } catch {
+    return true;
+  }
+}
+
+function mayCall(client: MatrixClient, room: Room): boolean {
+  try {
+    return room.currentState.maySendStateEvent(MEMBER_TYPES[0], client.getUserId() ?? "");
+  } catch {
+    return true;
+  }
 }
 
 /** Text above voice, then by the order the server set, then by name. */
@@ -139,6 +164,12 @@ export type CreateChannelOpts = {
   name: string;
   kind: ChannelKind;
   topic?: string;
+  /**
+   * "public": anyone who can reach the room joins it; "restricted": only
+   * members of the server. Taken from the server itself when not given.
+   */
+  access?: "public" | "restricted";
+  order?: string;
 };
 
 /**
@@ -172,32 +203,99 @@ function channelPowerLevels(client: MatrixClient, spaceId: string): Record<strin
   return out;
 }
 
-/** Create a channel and add it to the space. */
+/**
+ * Create a channel and add it to the space.
+ *
+ * A channel of a server open by address is public; a channel of an invite-only
+ * server is open to the server members only (join rule "restricted"). History
+ * is "shared": whoever joins later reads the whole channel, like in Discord.
+ * Channels are never published to the homeserver room directory.
+ */
 export async function createChannel(client: MatrixClient, opts: CreateChannelOpts): Promise<string> {
   const server = client.getDomain() ?? "";
+  const spaceRule = client.getRoom(opts.spaceId)?.getJoinRule();
+  const access = opts.access ?? (!spaceRule || spaceRule === "public" ? "public" : "restricted");
   const created = await client.createRoom({
     name: opts.name,
     topic: opts.topic,
-    visibility: "public" as never,
-    preset: "public_chat" as never,
+    visibility: "private" as never,
+    preset: (access === "public" ? "public_chat" : "private_chat") as never,
     creation_content: opts.kind === "voice" ? { type: "m.video_room" } : undefined,
     power_level_content_override: channelPowerLevels(client, opts.spaceId) as never,
     initial_state: [
-      {
-        type: "m.room.guest_access",
-        state_key: "",
-        content: { guest_access: "can_join" },
-      },
+      { type: "m.room.guest_access", state_key: "", content: { guest_access: "can_join" } },
+      { type: "m.room.history_visibility", state_key: "", content: { history_visibility: "shared" } },
+      { type: "m.space.parent", state_key: opts.spaceId, content: { via: [server], canonical: true } },
+      ...(access === "restricted"
+        ? [
+            {
+              type: "m.room.join_rules",
+              state_key: "",
+              content: { join_rule: "restricted", allow: [{ type: "m.room_membership", room_id: opts.spaceId }] },
+            },
+          ]
+        : []),
     ],
   });
 
   await client.sendStateEvent(
     opts.spaceId,
     "m.space.child" as never,
-    { via: [server], suggested: true } as never,
+    { via: [server], suggested: true, ...(opts.order ? { order: opts.order } : {}) } as never,
     created.room_id,
   );
   return created.room_id;
+}
+
+export type CreateServerOpts = {
+  name: string;
+  /** Address localpart: "main" makes #main:<own domain>. Empty for none. */
+  alias: string;
+  /** Anyone with the address may join; otherwise by invite only. */
+  open: boolean;
+  textName: string;
+  voiceName: string;
+};
+
+/**
+ * A new server: a space with one text and one voice channel. The creator is
+ * the owner (level 100), admins get 75 so the owner can always demote them;
+ * moderators (50) manage channels and the server look, everyone may invite. The address is taken in the same request, so a taken
+ * address fails before anything is created.
+ *
+ * "Open" means open to whoever can reach this homeserver: its own users and
+ * users of the servers federation allows. The federation list itself lives in
+ * the homeserver config, not here.
+ */
+export async function createServer(client: MatrixClient, opts: CreateServerOpts): Promise<string> {
+  const me = client.getUserId() ?? "";
+  const created = await client.createRoom({
+    name: opts.name,
+    visibility: "private" as never,
+    preset: (opts.open ? "public_chat" : "private_chat") as never,
+    room_alias_name: opts.alias || undefined,
+    creation_content: { type: "m.space" },
+    power_level_content_override: {
+      users: { [me]: 100 },
+      // a space has no chat of its own
+      events_default: 100,
+      invite: 0,
+      events: {
+        "m.space.child": 50,
+        "m.room.name": 50,
+        "m.room.avatar": 50,
+        "m.room.topic": 50,
+        // admins (75) manage roles below their own; only the owner appoints admins
+        "m.room.power_levels": 75,
+      },
+    } as never,
+    initial_state: [{ type: "m.room.history_visibility", state_key: "", content: { history_visibility: "shared" } }],
+  });
+  const spaceId = created.room_id;
+  const access = opts.open ? "public" : "restricted";
+  await createChannel(client, { spaceId, name: opts.textName, kind: "text", access, order: "a" });
+  await createChannel(client, { spaceId, name: opts.voiceName, kind: "voice", access, order: "b" });
+  return spaceId;
 }
 
 export async function deleteChannel(client: MatrixClient, spaceId: string, roomId: string): Promise<void> {

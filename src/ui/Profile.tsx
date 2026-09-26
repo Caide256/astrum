@@ -17,7 +17,7 @@ import {
   type StatusMode,
 } from "../app.ts";
 import { t, type Key } from "../i18n/index.ts";
-import { ROLES } from "../matrix/admin.ts";
+import { maxGrant } from "../matrix/admin.ts";
 import { isMuted, setMuted, useMutes } from "../prefs.ts";
 import { useStore } from "../store.ts";
 import { voice } from "../voice/voice.ts";
@@ -104,6 +104,9 @@ function ModerationRows({ userId }: { userId: string }) {
   const can = access(spaceId);
   const level = serverAdmin.levelOf(spaceId, userId);
   if (level >= can.level || !(can.roles || can.kick || can.ban)) return null;
+  // only the owner appoints or demotes admins
+  const grant = maxGrant(can.level, serverAdmin.owner(spaceId) === me());
+  const rolesHere = can.roles && level <= grant;
 
   const run = async () => {
     const ok = acting === "kick" ? await serverAdmin.kick(spaceId, userId, reason) : await serverAdmin.ban(spaceId, userId, reason);
@@ -112,18 +115,23 @@ function ModerationRows({ userId }: { userId: string }) {
 
   return (
     <div className="menu-admin">
-      {can.roles && (
+      {rolesHere && (
         <div className="menu-roles">
           <IconShield />
-          {ROLES.filter((r) => r.level < can.level).map((r) => (
-            <button
-              key={r.level}
-              className={`ghost small ${level === r.level ? "on-soft" : ""}`}
-              onClick={() => void serverAdmin.setRole(spaceId, userId, r.level)}
-            >
-              {t(r.key)}
-            </button>
-          ))}
+          {serverAdmin
+            .roles(spaceId)
+            .filter((r) => r.level <= grant)
+            .reverse()
+            .map((r) => (
+              <button
+                key={r.level}
+                className={`ghost small ${level === r.level ? "on-soft" : ""}`}
+                style={r.color ? { color: r.color } : undefined}
+                onClick={() => void serverAdmin.setRole(spaceId, userId, r.level)}
+              >
+                {r.name}
+              </button>
+            ))}
         </div>
       )}
 
@@ -236,8 +244,8 @@ export function UserMenu() {
           </button>
         )}
 
-        {!own && <VolumeRow userId={menu.userId} />}
-        {!own && <VoiceKickRow userId={menu.userId} />}
+        {!own && menu.voice && <VolumeRow userId={menu.userId} />}
+        {!own && menu.voice && <VoiceKickRow userId={menu.userId} />}
 
         {!own && (
           <button className="menu-item" onClick={() => setMuted("users", menu.userId, !isMuted("users", menu.userId))}>
@@ -270,6 +278,7 @@ export function ProfileCard() {
   // the card fades out, so the last shown person is kept
   const { shown: userId, closing } = useLinger(live);
   const activeChannel = useStore(app, (s) => s.activeChannel);
+  const fromVoice = useStore(app, (s) => s.profileVoice);
   const state = useSyncExternalStore(voice.subscribe, voice.getState, voice.getState);
   const close = () => app.set({ profileUser: null });
   useEscape(!!live, close);
@@ -287,7 +296,11 @@ export function ProfileCard() {
           <div className="profile-id">
             <h2 className="ellipsis">{info.name}</h2>
             <div className="state ellipsis">{info.userId}</div>
-            <div className={`presence ${info.presence}`}>{t(PRESENCE_NAME[info.presence])}</div>
+            {info.deleted ? (
+              <div className="presence offline">{t("people.deletedHint")}</div>
+            ) : (
+              <div className={`presence ${info.presence}`}>{t(PRESENCE_NAME[info.presence])}</div>
+            )}
           </div>
         </div>
 
@@ -302,7 +315,7 @@ export function ProfileCard() {
             <dt>{info.inServer ? t("profile.serverRole") : t("profile.chatRights")}</dt>
             <dd>
               {info.role}
-              {info.power && ![50, 100].includes(info.power) ? ` ${t("profile.level", { level: info.power })}` : ""}
+              {info.power && ![50, 75, 100].includes(info.power) ? ` ${t("profile.level", { level: info.power })}` : ""}
             </dd>
           </div>
           {info.voiceChannel && (
@@ -321,7 +334,7 @@ export function ProfileCard() {
           )}
         </dl>
 
-        {member && !member.local && <VolumeRow userId={userId} />}
+        {member && !member.local && fromVoice && <VolumeRow userId={userId} />}
 
         <div className="row">
           <button className="ghost" onClick={() => copyText(info.userId)}>

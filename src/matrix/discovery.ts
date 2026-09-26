@@ -64,6 +64,29 @@ async function fetchWellKnown(domain: string): Promise<Record<string, any> | nul
   return null;
 }
 
+/**
+ * Alias to room id through the own homeserver. Returns null when the alias
+ * does not exist; throws a readable error when the answer says nothing about
+ * the alias itself (federation closed, the other server is down).
+ */
+async function resolveAlias(client: MatrixClient, alias: string, domain: string): Promise<string | null> {
+  try {
+    const res = await client.getRoomIdForAlias(alias);
+    return res.room_id;
+  } catch (e) {
+    const err = e as { errcode?: string; httpStatus?: number; data?: { error?: string }; message?: string };
+    const status = Number(err?.httpStatus ?? 0);
+    const text = String(err?.data?.error ?? err?.message ?? "");
+    if (err?.errcode === "M_NOT_FOUND" || status === 404) return null;
+    const own = client.getDomain() ?? "";
+    if (err?.errcode === "M_FORBIDDEN" || status === 403 || /federat/i.test(text)) {
+      throw new Error(t("discovery.err.federation", { own, domain }));
+    }
+    if (status >= 500) throw new Error(t("discovery.err.unreachable", { own, domain }));
+    throw new Error(text || t("discovery.err.noAlias", { alias }));
+  }
+}
+
 /** Domain to server card. Aliases are resolved through the own homeserver, no CORS involved. */
 export async function lookupServer(client: MatrixClient, input: string): Promise<ServerCard> {
   const domain = normalizeDomain(input);
@@ -71,9 +94,7 @@ export async function lookupServer(client: MatrixClient, input: string): Promise
   // a full #name:domain address is looked up as is
   const typed = input.trim();
   if (/^#[^:\s]+:\S+$/.test(typed)) {
-    try {
-      await client.getRoomIdForAlias(typed);
-    } catch {
+    if (!(await resolveAlias(client, typed, domain))) {
       throw new Error(t("discovery.err.noAlias", { alias: typed }));
     }
     return { domain, alias: typed, name: typed, description: "", icon: null, guessed: false };
@@ -82,6 +103,10 @@ export async function lookupServer(client: MatrixClient, input: string): Promise
   const entry = (wk?.[WELL_KNOWN_KEY] ?? wk?.server ?? null) as Record<string, any> | null;
 
   if (entry?.alias) {
+    // the owner may have announced the address before creating it
+    if (!(await resolveAlias(client, String(entry.alias), domain))) {
+      throw new Error(t("discovery.err.aliasMissing", { domain, alias: String(entry.alias) }));
+    }
     return {
       domain,
       alias: String(entry.alias),
@@ -94,15 +119,35 @@ export async function lookupServer(client: MatrixClient, input: string): Promise
 
   for (const guess of GUESSES) {
     const alias = `#${guess}:${domain}`;
-    try {
-      await client.getRoomIdForAlias(alias);
+    // a closed federation or a dead server is reported at once, not as "nothing found"
+    if (await resolveAlias(client, alias, domain)) {
       return { domain, alias, name: domain, description: "", icon: null, guessed: true };
-    } catch {
-      // no such alias, try the next
     }
   }
 
   throw new Error(t("discovery.err.notFound", { domain, key: WELL_KNOWN_KEY }));
+}
+
+/**
+ * A free address to suggest for a new server on the own homeserver: the one
+ * its well-known announces if nobody took it yet (a fresh host points to an
+ * address that does not exist), otherwise "main" if free. Friends then add
+ * the server by the domain alone.
+ */
+export async function suggestAddress(client: MatrixClient): Promise<string> {
+  const domain = client.getDomain() ?? "";
+  if (!domain) return "";
+  const free = async (localpart: string) => {
+    try {
+      return !(await resolveAlias(client, `#${localpart}:${domain}`, domain));
+    } catch {
+      return false;
+    }
+  };
+  const wk = await fetchWellKnown(domain);
+  const announced = /^#([^:]+):(.+)$/.exec(String((wk?.[WELL_KNOWN_KEY] as Record<string, unknown> | undefined)?.alias ?? ""));
+  if (announced && announced[2] === domain && (await free(announced[1]))) return announced[1];
+  return (await free("main")) ? "main" : "";
 }
 
 export async function joinServer(client: MatrixClient, card: ServerCard): Promise<string> {
