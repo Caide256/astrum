@@ -10,6 +10,7 @@ import {
   startUpdate,
   type UpdateState,
 } from "./desktop.ts";
+import type { Lang } from "./i18n/index.ts";
 
 /**
  * Update state for the page. The main process checks GitHub releases
@@ -78,6 +79,31 @@ export function closeUpdateDialog(): void {
 
 export async function checkNow(): Promise<void> {
   take(await checkUpdate());
+}
+
+/**
+ * Release notes in the app's language. A release description holds one
+ * collapsible section per language, as GitHub shows them:
+ *
+ *   <details><summary>English</summary> ... </details>
+ *   <details><summary>Русский</summary> ... </details>
+ *
+ * The section of the current language is shown, English if there is none,
+ * the first section otherwise; text outside the sections (a common line on
+ * top) goes first. Notes without sections are shown as they are.
+ */
+export function localNotes(notes: string, lang: Lang): string {
+  const text = notes.replace(/<!--[\s\S]*?-->/g, "");
+  const sections = [...text.matchAll(/<details\b[^>]*>\s*<summary\b[^>]*>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>/gi)].map((m) => ({
+    title: m[1].replace(/<[^>]+>/g, "").trim().toLowerCase(),
+    body: m[2].trim(),
+  }));
+  if (!sections.length) return text.trim();
+  const english = (s: string) => /english|англ|^en\b/.test(s);
+  const russian = (s: string) => /рус|russian|^ru\b/.test(s);
+  const pick = sections.find((s) => (lang === "ru" ? russian(s.title) : english(s.title))) ?? sections.find((s) => english(s.title)) ?? sections[0];
+  const intro = text.replace(/<details\b[\s\S]*?<\/details>/gi, "").trim();
+  return [intro, pick.body].filter(Boolean).join("\n\n");
 }
 
 /** Download, verify, then install on its own. */

@@ -129,7 +129,7 @@ async function check() {
       status: "available",
       version,
       page,
-      notes: String(data.body || "").slice(0, 4000),
+      notes: String(data.body || "").slice(0, 30000),
       canInstall: !!release && !state.portable && electron.app.isPackaged,
     });
   } catch (e) {

@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 
 import { BRAND, LOGO_URL } from "../brand.ts";
 import { getWindowState, hasOwnFrame, onWindowState, windowAction, type WindowState } from "../desktop.ts";
-import { t } from "../i18n/index.ts";
-import { closeUpdateDialog, hasUpdater, installUpdate, openUpdateDialog, openUpdatePage, useUpdate } from "../update.ts";
+import { t, useLang } from "../i18n/index.ts";
+import { closeUpdateDialog, hasUpdater, installUpdate, localNotes, openUpdateDialog, openUpdatePage, useUpdate } from "../update.ts";
 import { useEscape, useLinger } from "./controls.tsx";
 import { IconDownload, IconWinClose, IconWinMaximize, IconWinMinimize, IconWinRestore } from "./icons.tsx";
 import { Markdown } from "./Markdown.tsx";
@@ -92,6 +92,7 @@ export function TitleBar() {
  */
 export function UpdateDialog({ beforeInstall }: { beforeInstall?: () => void }) {
   const { update, dialog } = useUpdate();
+  const lang = useLang();
   const { shown, closing } = useLinger(dialog && !!update);
   useEscape(dialog, closeUpdateDialog);
   if (!shown || !update) return null;
@@ -107,7 +108,7 @@ export function UpdateDialog({ beforeInstall }: { beforeInstall?: () => void }) 
 
         {update.notes && (
           <div className="update-notes">
-            <Markdown text={update.notes} />
+            <Markdown text={localNotes(update.notes, lang)} />
           </div>
         )}
 
