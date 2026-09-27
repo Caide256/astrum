@@ -2,7 +2,8 @@
 
 Each version has an English and a Russian section. The release description on
 GitHub uses the same two sections, and the app shows the one of its language in
-the update window.
+the update window. Mentions like `@everyone` always go in backticks: GitHub takes
+a bare mention for a GitHub user and lists that user as a contributor of the release.
 
 ## 0.8.1
 
@@ -35,8 +36,8 @@ the update window.
 - **Profile banner**: the avatar color, an own color or a picture, with up to three emoji on top. Shown on the profile card and behind the avatar in calls.
 - **Server profile**: an own name and picture for one server only.
 - **Statuses** in a drop-down: Online, Away, Do not disturb, Streamer mode, Invisible. Do not disturb and Streamer mode silence notifications; Streamer mode also hides ids, domains and addresses.
-- **@everyone and @here**, for roles allowed to use them.
-- **Permissions** as a table of roles and rights, with new rights for @everyone and for sounds.
+- **`@everyone` and `@here`**, for roles allowed to use them.
+- **Permissions** as a table of roles and rights, with new rights for `@everyone` and for sounds.
 - **Search** in the chat header: finds parts of words, works in encrypted chats, results in a popup, the member list stays.
 - **Unread**: a bar on top ("N new messages since 12:30", Mark as read), a mark on unread channels, voice channel chats count too. A chat reopens where you left it.
 - A picture menu on right click: open, save as, copy.
@@ -48,7 +49,7 @@ the update window.
 - Direct chats are deleted from the right click menu.
 - The microphone hint floats above the buttons and can be closed. "No sound from the microphone" appears only if nothing was heard since joining.
 - The chat next to a call slides out smoothly; message tools float over the message.
-- Names without the "(@user:server)" suffix.
+- Names without the "(`@user:server`)" suffix.
 - The image viewer zooms with the wheel only.
 
 ### Fixed
@@ -80,8 +81,8 @@ License: GPLv3 (the app includes moonlight-common-c).
 - **Баннер профиля**: цвет аватарки, свой цвет или картинка и до трёх эмодзи поверх. Виден в карточке профиля и за аватаркой в звонке.
 - **Профиль на сервере**: своё имя и картинка только для одного сервера.
 - **Статусы** в выпадающем списке: «В сети», «Отошёл», «Не беспокоить», «Режим стримера», «Невидимка». «Не беспокоить» и режим стримера глушат уведомления, режим стримера ещё и прячет id, домены и адреса.
-- **@everyone и @here** для ролей, которым это разрешено.
-- **Права** таблицей «роль × право», появились права на @everyone и на звуки.
+- **`@everyone` и `@here`** для ролей, которым это разрешено.
+- **Права** таблицей «роль × право», появились права на `@everyone` и на звуки.
 - **Поиск** в шапке чата: находит куски слов, работает в зашифрованных чатах, результаты во всплывающем окне, список участников остаётся на месте.
 - **Непрочитанное**: полоса сверху («N новых сообщений с 12:30», «Отметить прочитанным»), отметка у непрочитанных каналов, чаты голосовых каналов тоже учитываются. Чат открывается там, где его оставили.
 - Меню картинки по правой кнопке: открыть, сохранить как, копировать.
@@ -93,7 +94,7 @@ License: GPLv3 (the app includes moonlight-common-c).
 - Личный чат удаляется из меню по правой кнопке.
 - Подсказка про микрофон всплывает над кнопками и закрывается крестиком. «От микрофона не слышно ни звука» появляется, только если с входа в звонок не было ни звука.
 - Чат рядом со звонком выезжает плавно, кнопки действий всплывают поверх сообщения.
-- Имена без приписки «(@user:server)».
+- Имена без приписки «(`@user:server`)».
 - Просмотрщик картинок приближает только колесом.
 
 ### Исправлено
