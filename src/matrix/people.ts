@@ -87,7 +87,7 @@ export function listDirects(client: MatrixClient): Direct[] {
       out.push({
         userId,
         roomId,
-        name: gone ? t("people.deleted") : member?.name || room.name || userId,
+        name: gone ? t("people.deleted") : plainName(member) || room.name || localName(userId),
         avatar: gone ? "" : member?.getMxcAvatarUrl() || room.getMxcAvatarUrl() || "",
         unread: room.getUnreadNotificationCount() ?? 0,
         ts: room.getLastActiveTimestamp() ?? 0,
@@ -244,12 +244,38 @@ export async function changePassword(client: MatrixClient, oldPassword: string, 
   }
 }
 
+/* ------------------------------------------------------------------ names */
+
+/**
+ * A member's own display name. The SDK's `name` adds " (@user:server)" when
+ * two members share a name, which is noise on screen; an account without a
+ * display name gives "" so callers fall back to the name part of the id.
+ */
+export function plainName(member: { rawDisplayName?: string; userId: string } | null | undefined): string {
+  if (!member) return "";
+  const raw = (member.rawDisplayName ?? "").trim();
+  return raw && raw !== member.userId ? raw : "";
+}
+
+/** "@ray:example.org" -> "ray". */
+export function localName(userId: string): string {
+  return userId.replace(/^@/, "").split(":")[0] || userId;
+}
+
 /* --------------------------------------------------------------- presence */
 
-export type Presence = "online" | "unavailable" | "offline";
+export type Presence = "online" | "unavailable" | "dnd" | "offline";
+
+/**
+ * "Do not disturb" has no presence state of its own in Matrix: it travels as
+ * the status message next to "online", which other clients show as text.
+ */
+export const DND_STATUS = "dnd";
 
 export function presenceOf(client: MatrixClient, userId: string): Presence {
-  const p = client.getUser(userId)?.presence;
+  const user = client.getUser(userId);
+  const p = user?.presence;
+  if ((p === "online" || p === "unavailable") && (user?.presenceStatusMsg ?? "").trim().toLowerCase() === DND_STATUS) return "dnd";
   if (p === "online") return "online";
   if (p === "unavailable") return "unavailable";
   return "offline";
@@ -287,7 +313,7 @@ export function listInvites(client: MatrixClient): Invite[] {
       return {
         roomId: room.roomId,
         eventId: ev?.getId() ?? "",
-        name: direct ? who?.name || inviter : room.name || room.roomId,
+        name: direct ? plainName(who) || localName(inviter) : room.name || room.roomId,
         avatar: (direct ? who?.getMxcAvatarUrl() : room.getMxcAvatarUrl()) || "",
         inviter,
         direct,
@@ -412,8 +438,8 @@ export function searchLocalUsers(client: MatrixClient, term: string): UserHit[] 
     if (room.getMyMembership() !== "join") continue;
     for (const m of room.getJoinedMembers()) {
       if (m.userId === me || out.has(m.userId)) continue;
-      if (`${m.name} ${m.userId}`.toLowerCase().includes(q)) {
-        out.set(m.userId, { userId: m.userId, name: m.name || m.userId, avatar: m.getMxcAvatarUrl() || "", shared: true });
+      if (`${plainName(m)} ${m.userId}`.toLowerCase().includes(q)) {
+        out.set(m.userId, { userId: m.userId, name: plainName(m) || localName(m.userId), avatar: m.getMxcAvatarUrl() || "", shared: true });
       }
     }
   }

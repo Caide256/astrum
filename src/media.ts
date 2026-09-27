@@ -1,6 +1,7 @@
 import type { MatrixClient } from "matrix-js-sdk";
 
 import { t } from "./i18n/index.ts";
+import { isMxc, safeMime } from "./mxc.ts";
 
 /**
  * Media from the homeserver.
@@ -44,7 +45,7 @@ export function peekMedia(mxc: string, size = 0): string {
 }
 
 export function mediaUrl(mxc: string, size = 0): Promise<string> {
-  if (!mxc || !mxc.startsWith("mxc://") || !client) return Promise.resolve("");
+  if (!isMxc(mxc) || !client) return Promise.resolve("");
 
   const key = keyOf(mxc, size);
   const ready = cache.get(key);
@@ -59,7 +60,7 @@ export function mediaUrl(mxc: string, size = 0): Promise<string> {
     try {
       const res = await fetch(http, { headers: { Authorization: `Bearer ${token}` } });
       if (!res.ok) throw new Error(String(res.status));
-      const url = URL.createObjectURL(await res.blob());
+      const url = URL.createObjectURL(new Blob([await res.arrayBuffer()], { type: safeMime(res.headers.get("content-type") ?? "") }));
       cache.set(key, url);
       return url;
     } catch {
@@ -144,7 +145,7 @@ export async function decryptAttachment(data: ArrayBuffer, file: EncryptedFile):
 
 /** Download and decrypt an attachment into a blob URL, cached like other media. */
 export function encryptedMediaUrl(file: EncryptedFile, mime: string): Promise<string> {
-  if (!client || !file?.url?.startsWith("mxc://")) return Promise.resolve("");
+  if (!client || !isMxc(file?.url)) return Promise.resolve("");
   const key = `enc:${file.url}`;
   const ready = cache.get(key);
   if (ready) return Promise.resolve(ready);
@@ -157,7 +158,7 @@ export function encryptedMediaUrl(file: EncryptedFile, mime: string): Promise<st
       if (!res.ok) res = await fetch(httpOf(file.url, 0, false));
       if (!res.ok) throw new Error(String(res.status));
       const plain = await decryptAttachment(await res.arrayBuffer(), file);
-      const url = URL.createObjectURL(new Blob([plain], { type: mime || file.mimetype || "application/octet-stream" }));
+      const url = URL.createObjectURL(new Blob([plain], { type: safeMime(mime || file.mimetype || "") }));
       cache.set(key, url);
       return url;
     } catch {

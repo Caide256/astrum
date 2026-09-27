@@ -38,6 +38,17 @@ module.exports = {
   },
   // latest.yml is written for the updater; nothing is uploaded by the build itself
   publish: owner && repo ? [{ provider: "github", owner, repo }] : null,
+  // The packed exe cannot be turned into a plain Node.js runner (ELECTRON_RUN_AS_NODE),
+  // take code through NODE_OPTIONS or accept a debugger from the command line, and
+  // loads the app only from its own archive. The page is still served from file://,
+  // so the file protocol keeps its privileges.
+  electronFuses: {
+    runAsNode: false,
+    enableCookieEncryption: true,
+    enableNodeOptionsEnvironmentVariable: false,
+    enableNodeCliInspectArguments: false,
+    onlyLoadAppFromAsar: true,
+  },
   // the helper is named after the product, so Task Manager shows whose it is
   extraResources: [
     {

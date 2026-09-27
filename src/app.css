@@ -1472,12 +1472,6 @@ button.on-soft {
   color: var(--accent);
 }
 
-/* ------------------------------------------------------------------- search */
-
-.search-panel form {
-  margin: 0;
-}
-
 .hit {
   display: block;
   width: 100%;
@@ -1813,10 +1807,6 @@ button.hangup:hover:not(:disabled) {
   gap: 6px;
   margin-left: auto;
   color: var(--ok);
-}
-
-.chat-head .head-tool.tight {
-  margin-left: 0;
 }
 
 /* --------------------------------------------------------------------- call */
@@ -3786,11 +3776,6 @@ button.wide-button {
   padding: 8px 6px;
 }
 
-.search-state {
-  display: block;
-  margin: 8px 2px;
-}
-
 /* ------------------------------------------------------------ password field */
 
 .pw-field {
@@ -4487,27 +4472,6 @@ button.md-box:disabled {
 
 .channel .count.soft {
   background: var(--bg-3);
-  color: var(--text);
-}
-
-.muted-list {
-  display: grid;
-  gap: 10px;
-  margin-top: 6px;
-}
-
-.muted-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 6px 4px 8px;
-  border-radius: 8px;
-  background: var(--bg-2);
-  margin-top: 4px;
-  color: var(--muted);
-}
-
-.muted-row .grow {
   color: var(--text);
 }
 
@@ -5276,56 +5240,6 @@ button.attention {
   }
 }
 
-.me-bar button.dock-hint,
-.me-bar button.dock-hint:hover {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  z-index: 20;
-  max-width: 210px;
-  padding: 7px 10px;
-  border: none;
-  border-radius: 8px;
-  background: var(--warn);
-  color: #1b1300;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.3;
-  text-align: left;
-  box-shadow: 0 6px 18px var(--shadow);
-  cursor: pointer;
-  width: auto;
-  height: auto;
-  white-space: normal;
-}
-
-.me-bar button.dock-hint:hover {
-  filter: brightness(1.08);
-}
-
-.dock-hint::after {
-  content: "";
-  position: absolute;
-  top: 100%;
-  border: 6px solid transparent;
-  border-top-color: var(--warn);
-}
-
-.dock-hint.mic {
-  right: 58px;
-}
-
-.dock-hint.mic::after {
-  right: 12px;
-}
-
-.dock-hint.gear {
-  right: 0;
-}
-
-.dock-hint.gear::after {
-  right: 10px;
-}
-
 .net-back {
   position: fixed;
   inset: 0;
@@ -5463,32 +5377,6 @@ button.attention {
   flex: 1;
 }
 
-.tile-pref {
-  display: flex;
-  gap: 14px;
-  align-items: center;
-  margin-bottom: 8px;
-}
-
-.tile-preview {
-  width: 160px;
-  height: 90px;
-  flex: none;
-  border-radius: 10px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--line);
-  transition: background 0.3s ease;
-}
-
-.tile-pref-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-  flex: 1;
-}
-
 /* -------------------------------------------------------------- own themes */
 
 .theme-card.add {
@@ -5610,21 +5498,6 @@ button.attention {
   margin-right: 2px;
 }
 
-.direct-drop {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
-  margin-bottom: 2px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
-  font-size: 12px;
-}
-
-.direct-drop .ellipsis {
-  flex: 1;
-}
-
 .create-channel {
   display: flex;
   align-items: center;
@@ -5693,12 +5566,6 @@ button.quote.fragment {
   font-weight: 600;
 }
 
-.pins-panel .group-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
 .pin-item {
   display: flex;
   align-items: flex-start;
@@ -5740,31 +5607,6 @@ button.quote.fragment {
 
 .new-line::after {
   flex: 0 0 18px;
-}
-
-.jump-bar {
-  position: absolute;
-  left: 16px;
-  right: 16px;
-  bottom: 86px;
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 14px;
-  border: none;
-  border-radius: 10px;
-  background: var(--accent);
-  color: var(--on-accent);
-  font-size: 13px;
-  box-shadow: 0 8px 22px var(--shadow);
-  animation: slide-up 0.18s ease-out;
-}
-
-.jump-bar:hover:not(:disabled) {
-  background: var(--accent-hover);
-  color: var(--on-accent);
 }
 
 /* ------------------------------------------------------------ message look */
@@ -5974,10 +5816,6 @@ button.quote.fragment {
   transform-origin: bottom left;
 }
 
-.me-bar button.dock-hint {
-  animation: slide-up 0.18s ease-out;
-}
-
 .compose-bar,
 .format-bar,
 .uploads {
@@ -5990,7 +5828,6 @@ button.quote.fragment {
 .delete-account,
 .recovery-setup,
 .channel-editor,
-.direct-drop,
 .menu-reason,
 .card-preview {
   animation: grow-in 0.16s ease-out;
@@ -6023,4 +5860,1194 @@ button.quote.fragment {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* --------------------------------------------------------------- moonlight */
+
+.ml-host .ml-pin {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--bg-1);
+  border: 1px dashed var(--accent);
+}
+
+.ml-pin b {
+  font: 700 26px/1 Consolas, "Cascadia Mono", monospace;
+  letter-spacing: 0.25em;
+  color: var(--accent);
+}
+
+.ml-pin .spinner {
+  width: 18px;
+  height: 18px;
+  margin: 0 0 0 auto;
+  border-width: 2px;
+}
+
+.ml-pin .state {
+  font-size: 12px;
+  max-width: 260px;
+}
+
+.ml-bind,
+.ml-quality {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.ml-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 12px;
+}
+
+.ctile.moonlight video {
+  width: 100%;
+  height: 100%;
+  background: #000;
+}
+
+.ml-viewer {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 60;
+  width: min(760px, calc(100vw - 48px));
+  aspect-ratio: 16 / 10;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  background: #000;
+  border: 1px solid var(--line);
+  box-shadow: 0 18px 48px var(--shadow);
+  animation: pop-up 0.2s ease-out;
+  resize: both;
+}
+
+.ml-viewer-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  background: var(--pop-1);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.ml-viewer-bar b {
+  flex: 1;
+}
+
+.ml-viewer-bar .state {
+  font-size: 11px;
+}
+
+.ml-viewer-bar .small {
+  opacity: 1;
+}
+
+.ml-viewer-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.ml-viewer-body video {
+  width: 100%;
+  height: 100%;
+}
+
+.ml-viewer:fullscreen {
+  border-radius: 0;
+  width: 100vw;
+  height: 100vh;
+}
+
+/* ======================================================= fixes and panels of 0.8 */
+
+/* the global button border shifted the round server icons by a pixel */
+.server-btn {
+  border: 0;
+}
+
+/* the watch buttons on a share tile are round, their icon in the middle */
+.ctile-offer .round-btn {
+  display: grid;
+  place-items: center;
+  gap: 0;
+}
+
+/* ------------------------------------------------ channel column and its edge */
+
+.shell {
+  grid-template-columns: 68px var(--channels-w, 240px) minmax(0, 1fr) 200px;
+}
+
+.shell:not(:has(> .members)) {
+  grid-template-columns: 68px var(--channels-w, 240px) minmax(0, 1fr);
+}
+
+@media (max-width: 900px) {
+  .shell,
+  .shell:not(:has(> .members)) {
+    grid-template-columns: 56px min(var(--channels-w, 200px), 240px) minmax(0, 1fr);
+  }
+}
+
+.channels {
+  position: relative;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+}
+
+.column-grip {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -4px;
+  width: 7px;
+  z-index: 6;
+  cursor: col-resize;
+}
+
+.column-grip::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background-color 0.15s ease;
+}
+
+.column-grip:hover::after,
+.column-grip.on::after {
+  background: var(--accent);
+}
+
+/* ------------------------------------------ channel rows: highlight the whole row */
+
+.channel-item {
+  user-select: none;
+}
+
+.channels.reordering,
+.channels.reordering * {
+  cursor: grabbing !important;
+}
+
+.channel-row {
+  border-radius: 7px;
+  transition: background-color 0.12s ease;
+}
+
+.channel-row:hover {
+  background: var(--bg-2);
+}
+
+.channel-row.active {
+  background: var(--bg-3);
+}
+
+.channel-row .channel,
+.channel-row .channel:hover,
+.channel-row .channel.active {
+  background: transparent;
+}
+
+.channel-row:hover .channel {
+  color: var(--text);
+}
+
+.channel-row button.tiny:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
+}
+
+.unread-pill {
+  position: absolute;
+  left: -8px;
+  top: 11px;
+  width: 4px;
+  height: 8px;
+  border-radius: 0 4px 4px 0;
+  background: var(--text);
+  animation: pop-in 0.16s ease-out;
+}
+
+.channel .count {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ------------------------------------------ the voice hint above the own bar */
+
+/* floats over the call buttons like a tooltip; the cross hides it until the
+   next call. Laid out as a grid so a narrow column wraps it neatly */
+.me-bar > .dock-notice {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 20;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "icon text close"
+    "icon act act";
+  align-items: center;
+  gap: 6px 10px;
+  padding: 10px 8px 10px 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
+  background: color-mix(in srgb, var(--warn) 12%, var(--bg-1));
+  box-shadow: 0 10px 28px var(--shadow);
+  font-size: 12.5px;
+  line-height: 1.35;
+  animation: notice-in 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* the little arrow points at the button that fixes it: the microphone, or the settings */
+.me-bar > .dock-notice::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  right: 84px;
+  border: 7px solid transparent;
+  border-top-color: color-mix(in srgb, var(--warn) 55%, transparent);
+}
+
+.me-bar > .dock-notice.mic-silent::after {
+  right: 7px;
+}
+
+@keyframes notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.dock-notice-icon {
+  grid-area: icon;
+  align-self: start;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--warn);
+  color: #1b1300;
+}
+
+.dock-notice-text {
+  grid-area: text;
+  min-width: 0;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.me-bar .dock-notice button.dock-notice-close {
+  grid-area: close;
+  align-self: start;
+  padding: 3px;
+  border-radius: 6px;
+  color: var(--muted);
+  background: transparent;
+}
+
+.me-bar .dock-notice button.dock-notice-close:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--bg-3);
+}
+
+.me-bar .dock-notice button.dock-notice-act {
+  grid-area: act;
+  justify-self: start;
+  padding: 4px 12px;
+  border: none;
+  border-radius: 7px;
+  background: var(--warn);
+  color: #1b1300;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.me-bar .dock-notice button.dock-notice-act:hover:not(:disabled) {
+  background: var(--warn);
+  filter: brightness(1.08);
+}
+
+/* ------------------------------------------------------------- chat header */
+
+.chat-head .head-tool,
+.back-to-call {
+  margin-left: 0;
+}
+
+.chat-head .head-gap {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-head .topic {
+  min-width: 0;
+}
+
+.head-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  width: 150px;
+  padding: 0 4px 0 9px;
+  height: 30px;
+  border-radius: 7px;
+  background: var(--bg-0);
+  color: var(--muted);
+  cursor: text;
+  transition: width 0.18s ease;
+}
+
+.head-search.wide,
+.head-search:focus-within {
+  width: 230px;
+}
+
+.head-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 13px;
+  outline: none;
+  box-shadow: none;
+}
+
+.head-search svg {
+  flex: none;
+}
+
+.head-search button.tiny {
+  opacity: 1;
+  padding: 3px;
+}
+
+/* ---------------------------------------- timeline, unread bar, popovers */
+
+.timeline-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.unread-bar {
+  position: absolute;
+  top: 0;
+  left: 12px;
+  right: 12px;
+  z-index: 5;
+  display: flex;
+  align-items: stretch;
+  border-radius: 0 0 10px 10px;
+  overflow: hidden;
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: 0 6px 18px var(--shadow);
+  animation: drop-in 0.18s ease-out;
+}
+
+.unread-bar.older {
+  background: var(--bg-3);
+  color: var(--text);
+}
+
+.unread-bar button {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  padding: 6px 14px;
+}
+
+.unread-bar button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.unread-bar .unread-jump {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unread-bar .unread-act {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+@keyframes drop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.head-pop-back {
+  position: fixed;
+  inset: 0;
+  z-index: 7;
+}
+
+.head-pop {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 8;
+  width: min(440px, calc(100% - 24px));
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+  box-shadow: 0 12px 34px var(--shadow);
+  animation: drop-in 0.16s ease-out;
+}
+
+.head-pop-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px 8px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.head-pop-top > :first-child {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.head-pop-top button.tiny {
+  opacity: 1;
+}
+
+/* five results fit, the rest scrolls */
+.head-pop-list {
+  max-height: 350px;
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.head-pop .hit {
+  margin-bottom: 4px;
+}
+
+.head-pop .hit:last-child {
+  margin-bottom: 0;
+}
+
+.head-pop .hit-body {
+  -webkit-line-clamp: 2;
+}
+
+.hit-body mark {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--text);
+  border-radius: 3px;
+  padding: 0 1px;
+}
+
+/* ------------------------------------------------------------------ toast */
+
+.toast {
+  z-index: 70;
+}
+
+.toast.good {
+  color: var(--text);
+  box-shadow: 0 8px 26px var(--shadow);
+}
+
+/* the lightbox zooms with the wheel only; a click does nothing */
+.lightbox-stage img {
+  cursor: default;
+}
+
+/* ------------------------------------------- the chat next to a call slides out */
+
+.call-wrap {
+  --call-chat-w: 380px;
+}
+
+@media (max-width: 1100px) {
+  .call-wrap {
+    --call-chat-w: 320px;
+  }
+}
+
+/* the panel grows from nothing while the chat inside keeps its width, so the
+   text never reflows; the call tiles follow the shrinking stage smoothly */
+.call-chat {
+  width: var(--call-chat-w);
+  overflow: hidden;
+  animation: call-chat-open 0.24s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.call-chat > .chat {
+  flex: none;
+  width: var(--call-chat-w);
+}
+
+.call-chat.closing {
+  animation: call-chat-close 0.2s cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+
+@keyframes call-chat-open {
+  from {
+    width: 0;
+  }
+  to {
+    width: var(--call-chat-w);
+  }
+}
+
+@keyframes call-chat-close {
+  from {
+    width: var(--call-chat-w);
+  }
+  to {
+    width: 0;
+  }
+}
+
+/* ------------------------------------------------------------ do not disturb */
+
+.status-dot.dnd {
+  background: var(--danger);
+}
+
+.status-dot.dnd::after {
+  content: "";
+  position: absolute;
+  left: 22%;
+  right: 22%;
+  top: 50%;
+  height: 22%;
+  min-height: 2px;
+  transform: translateY(-50%);
+  border-radius: 2px;
+  background: var(--bg-1);
+}
+
+.dock .status-dot.dnd::after {
+  background: var(--bg-0);
+}
+
+.status-chip.dnd {
+  background: var(--danger);
+}
+
+.presence.dnd {
+  color: var(--danger-text);
+}
+
+/* ------------------------------------------------ hidden ids, streamer mode */
+
+:root.hide-ids .sensitive {
+  display: none !important;
+}
+
+:root.hide-ids .sensitive-blur {
+  filter: blur(6px);
+  user-select: none;
+}
+
+.streamer-chip {
+  flex: none;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 5px;
+  background: #9147ff;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+}
+
+.me-bar button.streamer-chip:hover:not(:disabled) {
+  background: #7d2df0;
+  color: #fff;
+}
+
+/* --------------------------------------------------------- settings layout */
+
+.pane-title {
+  margin: 0 0 18px;
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.modal.settings > .settings-body {
+  padding: 26px 28px 16px;
+}
+
+.tab-pane > .section-title {
+  margin: 26px 0 12px;
+}
+
+.tab-pane > .pane-title + .section-title,
+.tab-pane > .pane-title + * > .section-title:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.tab-pane .seg {
+  display: inline-flex;
+  width: auto;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.tab-pane > .state,
+.tab-pane .field > .state {
+  display: block;
+  margin: 6px 0 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.tab-pane > .note {
+  margin: 8px 0 10px;
+}
+
+.tab-pane .toggle-row {
+  margin-top: 8px;
+}
+
+/* ------------------------------------------------- live preview of messages */
+
+.timeline.look-preview {
+  flex: none;
+  overflow: hidden;
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg-2);
+  pointer-events: none;
+  animation: none;
+}
+
+/* ----------------------------------------------------------------- banners */
+
+.banner {
+  position: relative;
+  overflow: hidden;
+  transition: background-color 0.3s ease;
+}
+
+.banner-deco {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.banner-deco span {
+  position: absolute;
+  line-height: 1;
+  opacity: 0.9;
+  filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.35));
+}
+
+.ctile.member > .banner-deco {
+  z-index: 0;
+}
+
+.ctile.member > .avatar,
+.ctile.member > .avatar-wrap {
+  position: relative;
+  z-index: 1;
+}
+
+.modal.profile {
+  overflow: hidden;
+}
+
+.profile-banner {
+  height: 108px;
+  margin: -22px -22px 0;
+  font-size: 14px;
+}
+
+.modal.profile > .profile-top {
+  position: relative;
+  align-items: flex-start;
+  margin-top: -38px;
+}
+
+.modal.profile .profile-avatar {
+  flex: none;
+  border-radius: 50%;
+  box-shadow: 0 0 0 5px var(--bg-1);
+  background: var(--bg-1);
+}
+
+.modal.profile > .profile-top .profile-id {
+  padding-top: 44px;
+}
+
+.banner-pref {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 6px;
+}
+
+.banner-preview {
+  width: 220px;
+  height: 124px;
+  flex: none;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  font-size: 11px;
+}
+
+.banner-preview-who {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  z-index: 1;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
+.banner-preview-who .avatar {
+  box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.25);
+}
+
+.banner-controls {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.banner-emoji {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.banner-emoji .state {
+  margin-right: 4px;
+}
+
+.emoji-chip {
+  font-size: 18px;
+  line-height: 1;
+  padding: 4px 7px;
+}
+
+@media (max-width: 760px) {
+  .banner-pref {
+    flex-direction: column;
+  }
+}
+
+/* -------------------------------------------------------- permissions table */
+
+.perm-table-wrap {
+  overflow-x: auto;
+  margin-bottom: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.perm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.perm-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 6px;
+  max-width: 96px;
+  background: var(--bg-2);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  text-align: center;
+  border-bottom: 1px solid var(--line);
+}
+
+.perm-table th .ellipsis {
+  display: block;
+}
+
+.perm-table td {
+  padding: 9px 6px;
+  text-align: center;
+  border-top: 1px solid var(--line);
+}
+
+.perm-table tbody tr:first-child td {
+  border-top: none;
+}
+
+.perm-table tbody tr:hover td {
+  background: var(--hover);
+}
+
+.perm-table td.perm-name {
+  text-align: left;
+  padding-left: 12px;
+  min-width: 190px;
+}
+
+.perm-table td.perm-name .state {
+  font-size: 11.5px;
+}
+
+.perm-table input[type="checkbox"] {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.perm-table input[type="checkbox"]:disabled {
+  cursor: default;
+}
+
+.perm-table td.inherited input {
+  opacity: 0.45;
+}
+
+/* ------------------------------------------------------------- group pings */
+
+.mention.group {
+  background: color-mix(in srgb, var(--gold) 22%, transparent);
+  color: var(--gold);
+  cursor: default;
+}
+
+.mention.group:hover {
+  background: color-mix(in srgb, var(--gold) 32%, transparent);
+  color: var(--gold);
+}
+
+.mention-group-icon {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--gold) 28%, var(--bg-3));
+  color: var(--gold);
+  font-weight: 800;
+  font-size: 13px;
+}
+
+/* ---------------------------------------------------------------- soundboard */
+
+.board-pop {
+  position: fixed;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  max-height: min(420px, 70vh);
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+  color: var(--text);
+  box-shadow: 0 14px 38px var(--shadow);
+  animation: slide-up 0.16s ease-out;
+}
+
+.board-pop .head-pop-top b {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.board-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.board-sound {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 8px 4px;
+  border-radius: 9px;
+  background: var(--bg-2);
+  font-size: 12px;
+}
+
+.board-sound .ellipsis {
+  max-width: 100%;
+}
+
+.board-sound:hover:not(:disabled) {
+  background: var(--bg-3);
+}
+
+.board-emoji {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.admin-row > .board-emoji {
+  font-size: 18px;
+  width: 26px;
+  text-align: center;
+}
+
+.board-volume {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 10px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.board-volume input {
+  flex: 1;
+  min-width: 0;
+}
+
+.board-volume span {
+  width: 34px;
+  text-align: right;
+}
+
+.sound-add {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 160px) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.sound-add .ellipsis {
+  display: block;
+  max-width: 140px;
+}
+
+.emoji-pick-btn {
+  width: 40px;
+  height: 36px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+}
+
+/* hints and statuses are muted wherever no closer rule says otherwise */
+.state {
+  color: var(--muted);
+}
+
+.banner-emoji .state,
+.banner-controls .state {
+  font-size: 12px;
+}
+
+/* the message tools float over the message's corner instead of holding a
+   column of their own, which squeezed the text in narrow chats */
+.msg {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.msg-tools {
+  position: absolute;
+  top: -14px;
+  right: 10px;
+  z-index: 3;
+  padding: 2px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+  box-shadow: 0 4px 14px var(--shadow);
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.msg:hover .msg-tools,
+.msg-tools.shown {
+  pointer-events: auto;
+}
+
+.msg-tools .state {
+  padding: 0 6px;
+  white-space: nowrap;
+}
+
+:root[data-msg-align="own-right"] .msg.own .msg-tools,
+:root[data-msg-align="right"] .msg .msg-tools {
+  right: auto;
+  left: 10px;
+}
+
+/* ------------------------------------------------------ status drop-down */
+
+.status-pick {
+  position: relative;
+  margin: 14px 0 2px;
+}
+
+.status-current {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg-2);
+  text-align: left;
+}
+
+.status-current svg {
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.status-current.open svg {
+  transform: rotate(180deg);
+}
+
+.status-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  padding: 5px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+  box-shadow: 0 14px 34px var(--shadow);
+  animation: drop-in 0.14s ease-out;
+}
+
+.status-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: transparent;
+  text-align: left;
+}
+
+.status-option .status-chip {
+  margin-top: 4px;
+  flex: none;
+}
+
+.status-option.on {
+  background: var(--bg-3);
+}
+
+.status-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+.status-text small {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.3;
+}
+
+.status-chip.streamer {
+  background: #9147ff;
+}
+
+/* ---------------------------------------------- menus over the image viewer */
+
+.menu-back.over-viewer {
+  z-index: 55;
+}
+
+/* the look preview's senders are scrambled, like ciphertext */
+.who.cipher {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  letter-spacing: 0.04em;
+  opacity: 0.9;
+}
+
+/* the status list may reach past the card's bottom: the card does not clip, the banner rounds itself */
+.modal.profile {
+  overflow: visible;
+}
+
+.profile-banner {
+  border-radius: 13px 13px 0 0;
 }

@@ -3,9 +3,11 @@ import { useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   access,
   app,
+  bannerOf,
   canDisconnectFromCall,
   closeUserMenu,
   copyText,
+  deleteDirect,
   displayName,
   disconnectFromCall,
   me,
@@ -22,36 +24,86 @@ import { isMuted, setMuted, useMutes } from "../prefs.ts";
 import { useStore } from "../store.ts";
 import { voice } from "../voice/voice.ts";
 import { Avatar } from "./Avatar.tsx";
+import { Banner } from "./Banner.tsx";
 import { useEscape, useLinger } from "./controls.tsx";
-import { IconBell, IconBellOff, IconChat, IconCopy, IconDoorOut, IconShield, IconSpeaker, IconUser, IconVolume } from "./icons.tsx";
+import { useMoonlightFor } from "./Moonlight.tsx";
+import { startWatching } from "../moonlight.ts";
+import {
+  IconBell,
+  IconBellOff,
+  IconChat,
+  IconChevron,
+  IconCopy,
+  IconDoorOut,
+  IconScreen,
+  IconShield,
+  IconSpeaker,
+  IconTrash,
+  IconUser,
+  IconVolume,
+} from "./icons.tsx";
 
 const PRESENCE_NAME: Record<string, Key> = {
   online: "presence.online",
   unavailable: "presence.away",
+  dnd: "presence.dnd",
   offline: "presence.offline",
 };
 
 const STATUS_MODES: { mode: StatusMode; title: Key; hint: Key }[] = [
   { mode: "auto", title: "presence.online", hint: "status.auto.hint" },
   { mode: "unavailable", title: "presence.away", hint: "status.away.hint" },
+  { mode: "dnd", title: "presence.dnd", hint: "status.dnd.hint" },
+  { mode: "streamer", title: "status.streamer", hint: "status.streamer.hint" },
   { mode: "offline", title: "status.invisible", hint: "status.invisible.hint" },
 ];
 
-/** Own status: automatic, away, or invisible. */
+/** Own status: a drop-down with every mode and what it does. */
 function StatusPicker() {
   const mode = useStore(app, (s) => s.statusMode);
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
   const current = STATUS_MODES.find((m) => m.mode === mode) ?? STATUS_MODES[0];
+  useEscape(open, () => setOpen(false));
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [open]);
+
   return (
-    <div className="status-pick">
-      <div className="seg">
-        {STATUS_MODES.map((m) => (
-          <button key={m.mode} className={m.mode === mode ? "on" : ""} onClick={() => setStatusMode(m.mode)}>
-            <i className={`status-chip ${m.mode === "auto" ? "online" : m.mode}`} />
-            {t(m.title)}
-          </button>
-        ))}
-      </div>
-      <div className="state">{t(current.hint)}</div>
+    <div className="status-pick" ref={box}>
+      <button className={`status-current ${open ? "open" : ""}`} onClick={() => setOpen(!open)}>
+        <i className={`status-chip ${current.mode === "auto" ? "online" : current.mode}`} />
+        <span className="grow">{t(current.title)}</span>
+        <IconChevron />
+      </button>
+      {open && (
+        <div className="status-list" role="listbox">
+          {STATUS_MODES.map((m) => (
+            <button
+              key={m.mode}
+              role="option"
+              aria-selected={m.mode === mode}
+              className={`status-option ${m.mode === mode ? "on" : ""}`}
+              onClick={() => {
+                setStatusMode(m.mode);
+                setOpen(false);
+              }}
+            >
+              <i className={`status-chip ${m.mode === "auto" ? "online" : m.mode}`} />
+              <span className="status-text">
+                <b>{t(m.title)}</b>
+                <small>{t(m.hint)}</small>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -173,6 +225,24 @@ function ModerationRows({ userId }: { userId: string }) {
 
 /* --------------------------------------------------------- right-click menu */
 
+/** A person tied to a Moonlight host: their stream is one click away. */
+function MoonlightRow({ userId }: { userId: string }) {
+  const tied = useMoonlightFor(userId);
+  if (!tied) return null;
+  return (
+    <button
+      className="menu-item"
+      onClick={() => {
+        closeUserMenu();
+        void startWatching(userId);
+      }}
+    >
+      <IconScreen />
+      <span>{t("ml.watch")}</span>
+    </button>
+  );
+}
+
 /** In the same call: a moderator can make the person leave it. */
 function VoiceKickRow({ userId }: { userId: string }) {
   const state = useSyncExternalStore(voice.subscribe, voice.getState, voice.getState);
@@ -199,8 +269,38 @@ function VoiceKickRow({ userId }: { userId: string }) {
   );
 }
 
+/** Opened on a direct chat: delete it, after a confirmation right in the menu. */
+function DeleteDirectRow({ roomId, name }: { roomId: string; name: string }) {
+  const [asking, setAsking] = useState(false);
+  return asking ? (
+    <div className="menu-reason">
+      <span className="state">{t("dm.deleteConfirm", { name })}</span>
+      <div className="row gap-top">
+        <button className="ghost small" onClick={() => setAsking(false)}>
+          {t("common.cancel")}
+        </button>
+        <button
+          className="danger small"
+          onClick={() => {
+            closeUserMenu();
+            void deleteDirect(roomId);
+          }}
+        >
+          {t("common.delete")}
+        </button>
+      </div>
+    </div>
+  ) : (
+    <button className="menu-item" onClick={() => setAsking(true)}>
+      <IconTrash />
+      <span className="danger-text">{t("dm.delete")}</span>
+    </button>
+  );
+}
+
 export function UserMenu() {
   const menu = useStore(app, (s) => s.userMenu);
+  const directs = useStore(app, (s) => s.directs);
   useMutes();
   const box = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x: 0, y: 0 });
@@ -226,6 +326,7 @@ export function UserMenu() {
 
   const name = displayName(menu.userId, menu.roomId);
   const own = menu.userId === me();
+  const direct = directs.find((d) => d.roomId === menu.roomId && d.userId === menu.userId);
 
   return (
     <div className="menu-back" onClick={closeUserMenu} onContextMenu={(e) => e.preventDefault()}>
@@ -243,6 +344,8 @@ export function UserMenu() {
             <span>{t("profile.message")}</span>
           </button>
         )}
+
+        {!own && <MoonlightRow userId={menu.userId} />}
 
         {!own && menu.voice && <VolumeRow userId={menu.userId} />}
         {!own && menu.voice && <VoiceKickRow userId={menu.userId} />}
@@ -266,6 +369,8 @@ export function UserMenu() {
         </button>
 
         <ModerationRows userId={menu.userId} />
+
+        {direct && !own && <DeleteDirectRow roomId={direct.roomId} name={direct.name} />}
       </div>
     </div>
   );
@@ -287,15 +392,18 @@ export function ProfileCard() {
 
   const info = profileOf(userId, activeChannel);
   const member = state.members.find((m) => m.userId === userId);
+  // without a banner of their own the avatar gives the color, as in Discord
+  const look = info.deleted ? null : (bannerOf(userId, activeChannel) ?? { mode: "dominant" as const, color: "" });
 
   return (
     <div className={`modal-back ${closing ? "closing" : ""}`} onClick={close}>
       <div className="modal profile" onClick={(e) => e.stopPropagation()}>
+        <Banner look={look} avatar={info.avatar} className="profile-banner" />
         <div className="profile-top">
           <Avatar mxc={info.avatar} name={info.name} size={72} status={info.presence} className="profile-avatar" />
           <div className="profile-id">
             <h2 className="ellipsis">{info.name}</h2>
-            <div className="state ellipsis">{info.userId}</div>
+            <div className="state ellipsis sensitive">{info.userId}</div>
             {info.deleted ? (
               <div className="presence offline">{t("people.deletedHint")}</div>
             ) : (
@@ -307,7 +415,7 @@ export function ProfileCard() {
         {info.own && <StatusPicker />}
 
         <dl className="profile-facts">
-          <div>
+          <div className="sensitive">
             <dt>{t("profile.homeserver")}</dt>
             <dd>{info.server}</dd>
           </div>

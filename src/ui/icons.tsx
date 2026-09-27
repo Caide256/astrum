@@ -503,3 +503,11 @@ export const IconMarkRead = (p: Props) => (
     <path d="M1.8 8.4 4.8 11.4 11 4.8M8.2 11.2l.4.3 6-6.6" />
   </Svg>
 );
+
+export const IconMusic = (p: Props) => (
+  <Svg {...p}>
+    <path d="M6 12V3.6l7-1.4V10.6" />
+    <circle cx="4.2" cy="12" r="1.8" />
+    <circle cx="11.2" cy="10.6" r="1.8" />
+  </Svg>
+);

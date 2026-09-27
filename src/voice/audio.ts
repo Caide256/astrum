@@ -323,6 +323,62 @@ const SOUNDS: Record<Blip, Note[]> = {
   mention: seq([1175, 1568, 1175], 0.09, 0.2, "sine", 0.15, 0.35),
 };
 
+/* ------------------------------------------------------------- soundboard */
+
+let boardCtx: AudioContext | null = null;
+let boardSink = "";
+const boardBuffers = new Map<string, Promise<AudioBuffer | null>>();
+
+function boardContext(sinkId: string): AudioContext {
+  boardCtx ??= new AudioContext();
+  const ctx = boardCtx as AudioContext & { setSinkId?: (id: string) => Promise<void> };
+  if (sinkId !== boardSink && ctx.setSinkId) {
+    boardSink = sinkId;
+    void ctx.setSinkId(sinkId).catch(() => undefined);
+  }
+  if (ctx.state === "suspended") void ctx.resume();
+  return ctx;
+}
+
+/**
+ * Play a soundboard sound on the chosen output. The file is downloaded and
+ * decoded once, then reused. `volume` is in percent, the soundboard's own.
+ */
+export async function playBoardSound(key: string, load: () => Promise<ArrayBuffer>, volume: number, sinkId = ""): Promise<void> {
+  if (volume <= 0) return;
+  try {
+    const ctx = boardContext(sinkId);
+    let buf = boardBuffers.get(key);
+    if (!buf) {
+      buf = load()
+        .then((data) => ctx.decodeAudioData(data))
+        .catch(() => null);
+      boardBuffers.set(key, buf);
+      if (boardBuffers.size > 80) boardBuffers.delete(boardBuffers.keys().next().value as string);
+    }
+    const audio = await buf;
+    if (!audio) return;
+    const src = ctx.createBufferSource();
+    src.buffer = audio;
+    const gain = ctx.createGain();
+    gain.gain.value = Math.pow(Math.min(100, volume) / 100, 1.3) * 1.2;
+    src.connect(gain).connect(ctx.destination);
+    src.start();
+  } catch {
+    // no audio output available
+  }
+}
+
+/** Length of an audio file in seconds, 0 if it cannot be decoded. */
+export async function soundLength(data: ArrayBuffer): Promise<number> {
+  try {
+    const ctx = boardContext(boardSink);
+    return (await ctx.decodeAudioData(data.slice(0))).duration;
+  } catch {
+    return 0;
+  }
+}
+
 let blipCtx: AudioContext | null = null;
 let blipSink = "";
 let uiGain = 1;

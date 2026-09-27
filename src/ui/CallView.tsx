@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, typ
 import {
   app,
   avatarMxc,
+  bannerOf,
   displayName,
   leaveVoice,
   openShareSettings,
@@ -12,14 +13,17 @@ import {
   toggleCallChat,
   toggleCamera,
 } from "../app.ts";
-import { useAvatarColor } from "../avatarColor.ts";
+import { ml, stopWatching } from "../moonlight.ts";
 import { t, tn } from "../i18n/index.ts";
 import { useStore } from "../store.ts";
 import { voice, type VoiceMember, type VoiceStream, type VoiceVideo } from "../voice/voice.ts";
 import { Avatar } from "./Avatar.tsx";
+import { EmojiDeco, useBannerStyle } from "./Banner.tsx";
 import { Chat } from "./Main.tsx";
 import { useLinger } from "./controls.tsx";
 import { popOut } from "./popout.ts";
+import { MoonlightPicture } from "./Moonlight.tsx";
+import { SoundboardButton } from "./Soundboard.tsx";
 import { VideoView } from "./Stage.tsx";
 import {
   IconChat,
@@ -45,7 +49,8 @@ import {
 
 type Tile =
   | { kind: "member"; key: string; member: VoiceMember; video?: VoiceVideo }
-  | { kind: "stream"; key: string; stream: VoiceStream; video?: VoiceVideo };
+  | { kind: "stream"; key: string; stream: VoiceStream; video?: VoiceVideo }
+  | { kind: "moonlight"; key: string; userId: string };
 
 const RATIO = 16 / 9;
 const GAP = 8;
@@ -169,13 +174,39 @@ function TileView({
 }) {
   const roomId = useStore(app, (s) => s.voiceChannel);
   const box = useRef<HTMLDivElement>(null);
-  // the tile background the person chose: a color from the avatar, or their own
+  // the banner the person chose: sent by their app in the call, or read from their server membership
   const person = tile.kind === "member" ? tile.member : null;
-  const look = person?.tile ?? null;
-  const fromAvatar = useAvatarColor(
-    person && look && look.mode !== "color" ? avatarMxc(person.userId, roomId) : "",
-    look && look.mode !== "color" ? look.mode : null,
-  );
+  const mlWatch = useStore(ml, (s) => s.watching);
+  const look = person ? (person.tile ?? bannerOf(person.userId, roomId)) : null;
+  const bannerStyle = useBannerStyle(look, person ? avatarMxc(person.userId, roomId) : "", person ? tint(person.userId || person.id) : "");
+
+  if (tile.kind === "moonlight") {
+    return (
+      <div
+        ref={box}
+        className={`ctile stream moonlight ${focused ? "focused" : ""}`}
+        style={style}
+        onClick={onFocus}
+        onDoubleClick={() => toggleFullscreen(box.current)}
+      >
+        <MoonlightPicture />
+        <div className="tile-tools" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+          <button className="icon" title={t("call.fullscreen")} onClick={() => toggleFullscreen(box.current)}>
+            <IconFullscreen />
+          </button>
+          <button className="icon" title={t("ml.stop")} onClick={stopWatching}>
+            <IconClose />
+          </button>
+        </div>
+        <div className="ctile-label">
+          <i className="live-dot" />
+          <IconScreen />
+          <span className="ellipsis">{t("ml.title", { who: displayName(tile.userId, roomId) })}</span>
+          {mlWatch?.status === "live" && <span className="viewers">{mlWatch.height}p</span>}
+        </div>
+      </div>
+    );
+  }
 
   if (tile.kind === "stream") {
     const { stream, video } = tile;
@@ -235,7 +266,7 @@ function TileView({
     <div
       ref={box}
       className={`ctile member ${member.speaking ? "speaking" : ""} ${focused ? "focused" : ""}`}
-      style={{ ...style, background: video ? "#000" : (look?.mode === "color" ? look.color : fromAvatar) || tint(member.userId || member.id) }}
+      style={{ ...style, ...(video ? { background: "#000" } : bannerStyle) }}
       onClick={onFocus}
       onDoubleClick={() => video && toggleFullscreen(box.current)}
       onContextMenu={(e) => {
@@ -250,7 +281,10 @@ function TileView({
           <VideoTools video={video} title={who} />
         </>
       ) : (
-        <Avatar mxc={avatarMxc(member.userId, roomId)} name={who} size={Math.max(40, Math.min(96, ((style?.height as number) || 120) * 0.42))} />
+        <>
+          <EmojiDeco emoji={look?.emoji} scale={Math.max(0.7, Math.min(1.6, (((style?.height as number) || 120) / 160)))} />
+          <Avatar mxc={avatarMxc(member.userId, roomId)} name={who} size={Math.max(40, Math.min(96, ((style?.height as number) || 120) * 0.42))} />
+        </>
       )}
       <div className="ctile-label">
         {member.deafened ? <IconHeadsetOff className="flag off" /> : member.muted && <IconMicOff className="flag off" />}
@@ -301,6 +335,10 @@ function Controls() {
       </div>
 
       <div className="ctl-group">
+        <SoundboardButton className="ctl" />
+      </div>
+
+      <div className="ctl-group">
         <button
           className={`ctl ${state.screen ? "live" : ""}`}
           title={state.screen ? t("call.shareMenu") : t("call.shareScreen")}
@@ -325,7 +363,7 @@ export function CallView() {
   const servers = useStore(app, (s) => s.servers);
   const requested = useStore(app, (s) => s.callFocus);
   const chatOpen = useStore(app, (s) => s.callChat);
-  const chatPanel = useLinger(chatOpen, 180);
+  const chatPanel = useLinger(chatOpen, 220);
   const [focus, setFocus] = useState<string | null>(null);
   const [stageRef, size] = useSize<HTMLDivElement>();
 
@@ -346,7 +384,9 @@ export function CallView() {
   const videoOf = (identity: string, screen: boolean) =>
     state.videos.find((v) => v.identity === identity && v.screen === screen);
 
+  const watching = useStore(ml, (s) => s.watching);
   const tiles: Tile[] = [
+    ...(watching ? [{ kind: "moonlight", key: "ml", userId: watching.userId } as Tile] : []),
     ...state.streams.map<Tile>((s) => ({ kind: "stream", key: `s:${s.identity}`, stream: s, video: videoOf(s.identity, true) })),
     ...state.members.map<Tile>((m) => ({ kind: "member", key: `m:${m.id}`, member: m, video: videoOf(m.id, false) })),
   ];

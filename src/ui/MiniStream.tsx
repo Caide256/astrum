@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore, type PointerEvent } 
 
 import { app, displayName, openStreamMenu, showCall } from "../app.ts";
 import { t } from "../i18n/index.ts";
+import { usePlayerPrefs } from "../prefs.ts";
 import { useStore } from "../store.ts";
 import { voice, type VoiceVideo } from "../voice/voice.ts";
 import { popOut } from "./popout.ts";
@@ -12,8 +13,9 @@ import { IconClose, IconPopout, IconSwap, IconVolume, IconVolumeOff } from "./ic
  * The call in a small floating player while another channel is open. It shows
  * the tile last expanded in the call, a share or a camera, and switches
  * between every watched share and every camera. It can be dragged anywhere in
- * the window and snaps to the nearest corner on release. A double click
- * returns to the call and expands the shown tile.
+ * the window and snaps to the nearest corner on release, or stays where it
+ * was let go when the magnet is off in the settings. The player can be turned
+ * off altogether. A double click returns to the call and expands the shown tile.
  */
 
 type Corner = "tl" | "tr" | "bl" | "br";
@@ -22,6 +24,24 @@ const W = 340;
 const H = Math.round((W * 9) / 16);
 const MARGIN = 16;
 const KEY = "app.mini-corner";
+const FREE_KEY = "app.mini-free";
+
+/** Where the player was let go without the magnet: a share of the free room, so a resize keeps it inside. */
+type Free = { fx: number; fy: number };
+
+function loadFree(): Free | null {
+  try {
+    const v = JSON.parse(localStorage.getItem(FREE_KEY) ?? "null") as Free | null;
+    return v && Number.isFinite(v.fx) && Number.isFinite(v.fy) ? { fx: Math.min(1, Math.max(0, v.fx)), fy: Math.min(1, Math.max(0, v.fy)) } : null;
+  } catch {
+    return null;
+  }
+}
+
+function freePos(f: Free): { x: number; y: number } {
+  const top = topInset();
+  return { x: f.fx * (window.innerWidth - W), y: top + f.fy * (window.innerHeight - H - top) };
+}
 
 function loadCorner(): Corner {
   try {
@@ -55,6 +75,8 @@ export function MiniStream() {
   const voiceChannel = useStore(app, (s) => s.voiceChannel);
   const lastFocus = useStore(app, (s) => s.lastFocus);
   const [corner, setCorner] = useState<Corner>(loadCorner);
+  const [free, setFree] = useState<Free | null>(loadFree);
+  const prefs = usePlayerPrefs();
   const [drag, setDrag] = useState<{ x: number; y: number } | null>(null);
   const [picking, setPicking] = useState(false);
   const [, relayout] = useState(0);
@@ -76,10 +98,10 @@ export function MiniStream() {
   const pinned = choices.find((v) => tileKey(v) === lastFocus);
   // a camera shows only when it was picked; a watched share shows on its own
   const video = pinned ?? shares[0];
-  if (!voiceChannel || !video || inCall) return null;
+  if (!voiceChannel || !video || inCall || !prefs.mini) return null;
 
   const stream = video.screen ? state.streams.find((s) => s.identity === video.identity) : undefined;
-  const pos = drag ?? cornerPos(corner);
+  const pos = drag ?? (!prefs.magnet && free ? freePos(free) : cornerPos(corner));
 
   const onDown = (e: PointerEvent) => {
     if ((e.target as HTMLElement).closest("button, input, .mini-pick")) return;
@@ -104,6 +126,18 @@ export function MiniStream() {
     const s = start.current;
     start.current = null;
     if (!s?.moved || !drag) return;
+    if (!prefs.magnet) {
+      const top = topInset();
+      const next = { fx: drag.x / Math.max(1, window.innerWidth - W), fy: (drag.y - top) / Math.max(1, window.innerHeight - H - top) };
+      setFree(next);
+      setDrag(null);
+      try {
+        localStorage.setItem(FREE_KEY, JSON.stringify(next));
+      } catch {
+        // storage unavailable
+      }
+      return;
+    }
     // snap to the corner nearest to the player's center
     const cx = drag.x + W / 2;
     const cy = drag.y + H / 2;

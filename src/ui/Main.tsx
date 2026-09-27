@@ -1,4 +1,16 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type DragEvent, type FormEvent, type MouseEvent, type UIEvent } from "react";
+import {
+  Fragment,
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type DragEvent,
+  type FormEvent,
+  type MouseEvent,
+  type UIEvent,
+} from "react";
 
 import {
   acceptInvite,
@@ -11,9 +23,11 @@ import {
   channelMembers,
   closeMenus,
   closePlaceMenu,
+  closeSearch,
   closeUserMenu,
+  closeImageMenu,
+  copyImage,
   declineInvite,
-  deleteDirect,
   deleteMessage,
   discard,
   displayName,
@@ -31,6 +45,7 @@ import {
   openChat,
   openDirectWith,
   openImage,
+  openImageMenu,
   openPlaceMenu,
   openProfile,
   openServerSettings,
@@ -41,6 +56,8 @@ import {
   removePreview,
   resend,
   roomMuted,
+  safeFileName,
+  saveImage,
   runSearch,
   screenButton,
   searchPeople,
@@ -48,6 +65,7 @@ import {
   selectChannel,
   selectServer,
   setChatAtBottom,
+  setStatusMode,
   startQuote,
   togglePin,
   canPinHere,
@@ -69,7 +87,7 @@ import {
 import { fmtDateTime, fmtTime, t, tn } from "../i18n/index.ts";
 import { encryptedMediaUrl } from "../media.ts";
 import type { UserHit } from "../matrix/people.ts";
-import { hasOwnOrder, isMuted, setChannelOrder, setMuted, useChannelOrders, useMutes } from "../prefs.ts";
+import { hasOwnOrder, idsHidden, isMuted, setChannelOrder, setMuted, useChannelOrders, useMutes, usePrivacy } from "../prefs.ts";
 import type { Channel, Server } from "../matrix/servers.ts";
 import { useStore } from "../store.ts";
 import { voice, type NetSample, type NetStats, type VoiceMember } from "../voice/voice.ts";
@@ -79,10 +97,13 @@ import { CameraPicker } from "./CameraPicker.tsx";
 import { Composer, attachFiles, humanSize } from "./Composer.tsx";
 import { useEscape, useLinger } from "./controls.tsx";
 import { EmojiPicker } from "./EmojiPicker.tsx";
+import { Guard } from "./Guard.tsx";
 import { Lightbox } from "./Lightbox.tsx";
 import { InlineMarkdown, Markdown } from "./Markdown.tsx";
 import { ScreenMenu, StreamMenu, StreamPeek, peekEnter, peekLeave } from "./Menus.tsx";
 import { MiniStream } from "./MiniStream.tsx";
+import { MoonlightViewer } from "./Moonlight.tsx";
+import { SoundboardButton } from "./Soundboard.tsx";
 import { ProfileCard, UserMenu } from "./Profile.tsx";
 import { ServerSettings } from "./ServerSettings.tsx";
 import { Settings } from "./Settings.tsx";
@@ -96,8 +117,11 @@ import {
   IconChevron,
   IconClip,
   IconClose,
+  IconCopy,
   IconDoorOut,
+  IconDownload,
   IconEdit,
+  IconExpand,
   IconEye,
   IconGear,
   IconHangup,
@@ -122,6 +146,7 @@ import {
   IconSmile,
   IconSpeaker,
   IconTrash,
+  IconUser,
   IconUsers,
   IconVideo,
   IconVideoOff,
@@ -162,7 +187,7 @@ function PersonRow({
   return (
     <div
       className={`occupant clickable ${flags?.speaking ? "speaking" : ""}`}
-      title={live ? undefined : userId}
+      title={live || idsHidden() ? undefined : userId}
       onClick={() => openProfile(userId, true)}
       onContextMenu={menuHandler(userId, roomId, true)}
       // hovering someone who shares the screen shows a preview with a watch button
@@ -219,8 +244,8 @@ function ServerBar() {
       {servers.map((g: Server) => {
         const on = view === "server" && g.spaceId === active;
         const muted = isMuted("servers", g.spaceId);
-        const mentions = g.channels.reduce((n, c) => n + (c.kind === "text" ? c.mentions : 0), 0);
-        const fresh = !muted && g.channels.some((c) => c.kind === "text" && c.unread > 0 && !roomMuted(c.roomId));
+        const mentions = g.channels.reduce((n, c) => n + c.mentions, 0);
+        const fresh = !muted && g.channels.some((c) => c.unread > 0 && !roomMuted(c.roomId));
         return (
           // the pill on the left: short for unread, taller on hover, long for the open server
           <div key={g.spaceId} className={`server-item ${on ? "active" : ""} ${fresh ? "unread" : ""} ${muted ? "muted" : ""}`}>
@@ -323,7 +348,7 @@ function PeopleSearch({ term, onDone }: { term: string; onDone: () => void }) {
         <button
           key={u.userId}
           className="channel direct person-hit"
-          title={u.userId}
+          title={idsHidden() ? undefined : u.userId}
           onClick={() => {
             onDone();
             void openDirectWith(u.userId);
@@ -332,7 +357,7 @@ function PeopleSearch({ term, onDone }: { term: string; onDone: () => void }) {
           <Avatar mxc={u.avatar} name={u.name} size={24} />
           <span className="grow ellipsis">
             <span className="ellipsis">{u.name}</span>
-            <span className="hit-id ellipsis">{u.userId}</span>
+            <span className="hit-id ellipsis sensitive">{u.userId}</span>
           </span>
           <IconChat className="hit-go" />
         </button>
@@ -351,7 +376,6 @@ function DirectList() {
   const invites = useStore(app, (s) => s.invites);
   const activeChannel = useStore(app, (s) => s.activeChannel);
   const [term, setTerm] = useState("");
-  const [dropping, setDropping] = useState<string | null>(null);
 
   return (
     <div className="channel-scroll">
@@ -404,35 +428,21 @@ function DirectList() {
 
           <div className="group-title">{t("dm.title")}</div>
           {directs.length === 0 && <div className="state pad">{t("dm.empty")}</div>}
-          {directs.map((d) =>
-            dropping === d.roomId ? (
-              <div key={d.roomId} className="direct-drop">
-                <span className="ellipsis">{t("dm.deleteConfirm", { name: d.name })}</span>
-                <button className="danger small" onClick={() => (setDropping(null), void deleteDirect(d.roomId))}>
-                  {t("common.delete")}
-                </button>
-                <button className="ghost small" onClick={() => setDropping(null)}>
-                  {t("common.cancel")}
-                </button>
-              </div>
-            ) : (
-              <div key={d.roomId} className="channel-row direct-row">
-                <button
-                  className={`channel direct ${d.roomId === activeChannel ? "active" : ""} ${isMuted("users", d.userId) ? "muted" : ""}`}
-                  onClick={() => void openChat(d.roomId)}
-                  onContextMenu={menuHandler(d.userId, d.roomId)}
-                >
-                  <Avatar mxc={d.avatar} name={d.name} size={24} status={presenceOf(d.userId)} />
-                  <span className="ellipsis">{d.name}</span>
-                  {isMuted("users", d.userId) && <IconBellOff className="mute-mark" />}
-                  {d.unread > 0 && <span className="count">{d.unread}</span>}
-                </button>
-                <button className="ghost icon tiny" title={t("dm.delete")} onClick={() => setDropping(d.roomId)}>
-                  <IconClose />
-                </button>
-              </div>
-            ),
-          )}
+          {directs.map((d) => (
+            <div key={d.roomId} className="channel-row direct-row">
+              <button
+                className={`channel direct ${d.roomId === activeChannel ? "active" : ""} ${isMuted("users", d.userId) ? "muted" : ""}`}
+                onClick={() => void openChat(d.roomId)}
+                // the right click menu holds deleting the chat: a cross on the row was too easy to hit
+                onContextMenu={menuHandler(d.userId, d.roomId)}
+              >
+                <Avatar mxc={d.avatar} name={d.name} size={24} status={presenceOf(d.userId)} />
+                <span className="ellipsis">{d.name}</span>
+                {isMuted("users", d.userId) && <IconBellOff className="mute-mark" />}
+                {d.unread > 0 && <span className="count">{d.unread}</span>}
+              </button>
+            </div>
+          ))}
         </>
       )}
     </div>
@@ -440,6 +450,85 @@ function DirectList() {
 }
 
 /* ------------------------------------------------------------ channel list */
+
+/** A server's channels in the own order, if the user arranged them; new channels go last. */
+function arrangeChannels(list: Channel[], own: string[] | undefined): Channel[] {
+  if (!own) return list;
+  const rank = new Map(own.map((id, i) => [id, i]));
+  return list
+    .map((c, i) => ({ c, r: rank.get(c.roomId) ?? own.length + i }))
+    .sort((a, b) => a.r - b.r)
+    .map((x) => x.c);
+}
+
+/** Move a channel in the own order: before or after another channel of the same kind. */
+function moveChannel(server: Server, own: string[] | undefined, id: string, target: string, after: boolean): void {
+  const texts = arrangeChannels(server.channels.filter((c) => c.kind === "text"), own).map((c) => c.roomId);
+  const voices = arrangeChannels(server.channels.filter((c) => c.kind === "voice"), own).map((c) => c.roomId);
+  const list = texts.includes(id) ? texts : voices;
+  if (!list.includes(target) || id === target) return;
+  list.splice(list.indexOf(id), 1);
+  list.splice(list.indexOf(target) + (after ? 1 : 0), 0, id);
+  setChannelOrder(server.spaceId, [...texts, ...voices]);
+}
+
+const CHANNELS_W_KEY = "app.channels-w";
+const CHANNELS_W = { min: 180, max: 420, base: 240 };
+
+function loadChannelsWidth(): number {
+  try {
+    const v = Number(localStorage.getItem(CHANNELS_W_KEY));
+    return Number.isFinite(v) && v >= CHANNELS_W.min && v <= CHANNELS_W.max ? v : CHANNELS_W.base;
+  } catch {
+    return CHANNELS_W.base;
+  }
+}
+
+function applyChannelsWidth(w: number): void {
+  document.documentElement.style.setProperty("--channels-w", `${Math.round(w)}px`);
+}
+applyChannelsWidth(loadChannelsWidth());
+
+/** The edge between the channel column and the chat: dragged to make the column wider or narrower. */
+function ColumnGrip() {
+  const start = useRef<{ x: number; w: number } | null>(null);
+  const [active, setActive] = useState(false);
+  const save = (w: number) => {
+    try {
+      localStorage.setItem(CHANNELS_W_KEY, String(Math.round(w)));
+    } catch {
+      // kept until restart
+    }
+  };
+  return (
+    <div
+      className={`column-grip ${active ? "on" : ""}`}
+      title={t("channels.resize")}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        start.current = { x: e.clientX, w: loadChannelsWidth() };
+        setActive(true);
+      }}
+      onPointerMove={(e) => {
+        const s = start.current;
+        if (!s) return;
+        const w = Math.max(CHANNELS_W.min, Math.min(CHANNELS_W.max, s.w + e.clientX - s.x));
+        applyChannelsWidth(w);
+        save(w);
+      }}
+      onPointerUp={() => {
+        start.current = null;
+        setActive(false);
+      }}
+      onDoubleClick={() => {
+        applyChannelsWidth(CHANNELS_W.base);
+        save(CHANNELS_W.base);
+      }}
+    />
+  );
+}
 
 function ChannelList() {
   const view = useStore(app, (s) => s.view);
@@ -455,32 +544,67 @@ function ChannelList() {
   const tick = useStore(app, (s) => s.tick);
   const orders = useChannelOrders();
   const server = servers.find((g) => g.spaceId === activeServer);
-  // the own order, if the user dragged channels around; new channels go last
   const own = server ? orders[server.spaceId] : undefined;
-  const arrange = (list: Channel[]) => {
-    if (!own) return list;
-    const rank = new Map(own.map((id, i) => [id, i]));
-    return list
-      .map((c, i) => ({ c, r: rank.get(c.roomId) ?? own.length + i }))
-      .sort((a, b) => a.r - b.r)
-      .map((x) => x.c);
-  };
-  const textChannels = server ? arrange(server.channels.filter((c) => c.kind === "text")) : loose;
-  const voiceChannels = server ? arrange(server.channels.filter((c) => c.kind === "voice")) : [];
+  const textChannels = server ? arrangeChannels(server.channels.filter((c) => c.kind === "text"), own) : loose;
+  const voiceChannels = server ? arrangeChannels(server.channels.filter((c) => c.kind === "voice"), own) : [];
 
-  // dragging a channel: which one, and where it would land
+  // Dragging a channel with the mouse, for everyone: the order is personal.
+  // Pointer events instead of HTML drag and drop, which a button inside the
+  // row and the window frame both could swallow.
   const [drag, setDrag] = useState<string | null>(null);
-  const [over, setOver] = useState<{ id: string; after: boolean } | null>(null);
-  const dropOn = (target: Channel) => {
-    if (!server || !drag || !over || drag === target.roomId) return;
-    const kind = target.kind;
-    const list = (kind === "text" ? textChannels : voiceChannels).map((c) => c.roomId).filter((id) => id !== drag);
-    if (!(kind === "text" ? textChannels : voiceChannels).some((c) => c.roomId === drag)) return;
-    const at = list.indexOf(target.roomId) + (over.after ? 1 : 0);
-    list.splice(at, 0, drag);
-    const other = (kind === "text" ? voiceChannels : textChannels).map((c) => c.roomId);
-    setChannelOrder(server.spaceId, kind === "text" ? [...list, ...other] : [...other, ...list]);
+  const [over, setOverState] = useState<{ id: string; after: boolean } | null>(null);
+  const overRef = useRef<{ id: string; after: boolean } | null>(null);
+  const press = useRef<{ id: string; kind: string; x: number; y: number; moved: boolean } | null>(null);
+  const swallowClick = useRef(false);
+  const setOver = (next: { id: string; after: boolean } | null) => {
+    const cur = overRef.current;
+    if (cur?.id === next?.id && cur?.after === next?.after) return;
+    overRef.current = next;
+    setOverState(next);
   };
+  const latest = useRef({ server, own });
+  latest.current = { server, own };
+
+  useEffect(() => {
+    const move = (e: globalThis.PointerEvent) => {
+      const p = press.current;
+      if (!p) return;
+      if (!p.moved) {
+        if (Math.abs(e.clientX - p.x) + Math.abs(e.clientY - p.y) < 6) return;
+        p.moved = true;
+        setDrag(p.id);
+      }
+      const el = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>(".channel-item[data-id]");
+      if (!el || el.dataset.kind !== p.kind || el.dataset.id === p.id) {
+        setOver(null);
+        return;
+      }
+      const r = el.getBoundingClientRect();
+      setOver({ id: el.dataset.id ?? "", after: e.clientY > r.top + Math.min(r.height, 34) / 2 });
+    };
+    const up = () => {
+      const p = press.current;
+      press.current = null;
+      if (!p?.moved) return;
+      // the click that ends a drag must not open the channel
+      swallowClick.current = true;
+      window.setTimeout(() => (swallowClick.current = false), 0);
+      const target = overRef.current;
+      const { server: srv, own: order } = latest.current;
+      if (srv && target) moveChannel(srv, order, p.id, target.id, target.after);
+      setDrag(null);
+      setOver(null);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+  }, []);
+
   const can = access(server?.spaceId ?? null);
   void tick;
 
@@ -508,80 +632,64 @@ function ChannelList() {
 
   const row = (c: Channel) => {
     const muted = roomMuted(c.roomId);
-    const fresh = c.kind === "text" && c.unread > 0 && c.roomId !== activeChannel;
+    // unread: bold and a pill on the edge, as in Discord; only mentions get a number
+    const fresh = c.unread > 0 && c.roomId !== activeChannel && !muted;
     const dropMark = over?.id === c.roomId && drag && drag !== c.roomId ? (over.after ? "drop-after" : "drop-before") : "";
     return (
-    <div
-      key={c.roomId}
-      draggable={!!server}
-      onDragStart={(e) => {
-        setDrag(c.roomId);
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", c.roomId);
-      }}
-      onDragOver={(e) => {
-        if (!drag) return;
-        const same = (c.kind === "text" ? textChannels : voiceChannels).some((x) => x.roomId === drag);
-        if (!same) return;
-        e.preventDefault();
-        const r = e.currentTarget.getBoundingClientRect();
-        const after = e.clientY > r.top + r.height / 2;
-        if (over?.id !== c.roomId || over.after !== after) setOver({ id: c.roomId, after });
-      }}
-      onDrop={(e) => {
-        e.preventDefault();
-        dropOn(c);
-        setDrag(null);
-        setOver(null);
-      }}
-      onDragEnd={() => {
-        setDrag(null);
-        setOver(null);
-      }}
-      className={`channel-item ${drag === c.roomId ? "dragging" : ""} ${dropMark}`}
-    >
-      <div className="channel-row">
-        <button
-          className={`channel ${c.roomId === activeChannel ? "active" : ""} ${c.roomId === voiceChannel ? "live" : ""} ${muted ? "muted" : ""} ${fresh ? "fresh" : ""}`}
-          onClick={() => void selectChannel(c)}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            openPlaceMenu("room", c.roomId, e.clientX, e.clientY);
-          }}
-        >
-          <span className="sigil">{c.kind === "voice" ? <IconSpeaker /> : <IconHash />}</span>
-          <span className="ellipsis">{c.name}</span>
-          {(c.hidden || c.voiceLocked) && (
-            <span className="lock-mark" title={c.voiceLocked ? t("access.voiceLocked") : t("access.hiddenMark")}>
-              <IconLock size={11} />
-            </span>
-          )}
-          {muted && <IconBellOff className="mute-mark" />}
-          {c.mentions > 0 ? (
-            <span className="count">{c.mentions}</span>
-          ) : (
-            c.unread > 0 && c.kind === "text" && !muted && <span className="count soft">{c.unread}</span>
-          )}
-        </button>
-        {c.kind === "voice" && (
-          <button className="ghost icon tiny" title={t("channels.openChat")} onClick={() => void openChat(c.roomId, c.joined)}>
-            <IconChat />
+      <div
+        key={c.roomId}
+        data-id={c.roomId}
+        data-kind={c.kind}
+        className={`channel-item ${drag === c.roomId ? "dragging" : ""} ${dropMark}`}
+        onPointerDown={(e) => {
+          if (!server || e.button !== 0 || (e.target as Element).closest(".occupants, button.tiny")) return;
+          press.current = { id: c.roomId, kind: c.kind, x: e.clientX, y: e.clientY, moved: false };
+        }}
+        onClickCapture={(e) => {
+          if (!swallowClick.current) return;
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+      >
+        {fresh && <span className="unread-pill" />}
+        <div className={`channel-row ${c.roomId === activeChannel ? "active" : ""}`}>
+          <button
+            className={`channel ${c.roomId === activeChannel ? "active" : ""} ${c.roomId === voiceChannel ? "live" : ""} ${muted ? "muted" : ""} ${fresh ? "fresh" : ""}`}
+            onClick={() => void selectChannel(c)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              openPlaceMenu("room", c.roomId, e.clientX, e.clientY);
+            }}
+          >
+            <span className="sigil">{c.kind === "voice" ? <IconSpeaker /> : <IconHash />}</span>
+            <span className="ellipsis">{c.name}</span>
+            {(c.hidden || c.voiceLocked) && (
+              <span className="lock-mark" title={c.voiceLocked ? t("access.voiceLocked") : t("access.hiddenMark")}>
+                <IconLock size={11} />
+              </span>
+            )}
+            {muted && <IconBellOff className="mute-mark" />}
+            {c.mentions > 0 && <span className="count">{c.mentions}</span>}
           </button>
-        )}
-        {can.channels && (
-          <button className="ghost icon tiny" title={t("channels.edit")} onClick={() => editChannel(c.roomId)}>
-            <IconGear />
-          </button>
+          {c.kind === "voice" && (
+            <button className="ghost icon tiny" title={t("channels.openChat")} onClick={() => void openChat(c.roomId, c.joined)}>
+              <IconChat />
+            </button>
+          )}
+          {can.channels && (
+            <button className="ghost icon tiny" title={t("channels.edit")} onClick={() => editChannel(c.roomId)}>
+              <IconGear />
+            </button>
+          )}
+        </div>
+        {c.kind === "voice" && (occupantsOf(c.roomId).length ?? 0) > 0 && (
+          <div className="occupants">
+            {occupantsOf(c.roomId).map((u) => (
+              <PersonRow key={u} userId={u} roomId={c.roomId} flags={c.roomId === voiceChannel ? flags?.get(u) : undefined} />
+            ))}
+          </div>
         )}
       </div>
-      {c.kind === "voice" && (occupantsOf(c.roomId).length ?? 0) > 0 && (
-        <div className="occupants">
-          {occupantsOf(c.roomId).map((u) => (
-            <PersonRow key={u} userId={u} roomId={c.roomId} flags={c.roomId === voiceChannel ? flags?.get(u) : undefined} />
-          ))}
-        </div>
-      )}
-    </div>
     );
   };
 
@@ -613,7 +721,7 @@ function ChannelList() {
     );
 
   return (
-    <section className="channels">
+    <section className={`channels ${drag ? "reordering" : ""}`}>
       <div className="server-head">
         {view === "server" && server ? (
           <button className="server-name" title={t("server.settings")} onClick={() => openServerSettings()}>
@@ -640,11 +748,11 @@ function ChannelList() {
               {can.channels && addButton("voice")}
             </>
           )}
-
         </div>
       )}
 
       <VoiceDock />
+      <ColumnGrip />
     </section>
   );
 }
@@ -658,6 +766,7 @@ function VoiceDock() {
   const myName = useStore(app, (s) => s.myName);
   const myAvatar = useStore(app, (s) => s.myAvatar);
   const myPresence = useStore(app, (s) => s.myPresence);
+  const priv = usePrivacy();
 
   const channelName = servers.flatMap((g) => g.channels).find((c) => c.roomId === voiceChannel)?.name;
   const ptt = state.settings.inputMode === "ptt";
@@ -698,6 +807,7 @@ function VoiceDock() {
             >
               {state.screen ? <IconScreen /> : <IconScreenOff />}
             </button>
+            <SoundboardButton className="icon" />
             <button className="icon hangup" title={t("call.leave")} onClick={() => void leaveVoice()}>
               <IconHangup />
             </button>
@@ -706,6 +816,24 @@ function VoiceDock() {
       )}
 
       <div className="me-bar">
+        {hint && (
+          <div className={`dock-notice ${hint}`} key={hint} role="alert">
+            <span className="dock-notice-icon">{hint === "muted-talk" ? <IconMicOff /> : <IconMic />}</span>
+            <span className="dock-notice-text">{hint === "muted-talk" ? t("hint.mutedTalk") : t("hint.micSilent")}</span>
+            <button className="dock-notice-close" title={t("hint.dismiss")} onClick={() => voice.dismissHint()}>
+              <IconClose />
+            </button>
+            {hint === "muted-talk" ? (
+              <button className="dock-notice-act" onClick={() => void voice.setMuted(false)}>
+                {t("hint.unmute")}
+              </button>
+            ) : (
+              <button className="dock-notice-act" onClick={() => app.set({ settingsOpen: true, settingsTab: "audio" })}>
+                {t("hint.check")}
+              </button>
+            )}
+          </div>
+        )}
         <Avatar
           mxc={myAvatar}
           name={myName || "?"}
@@ -718,6 +846,11 @@ function VoiceDock() {
           {myName}
           {ptt && !state.muted && <small>{t("dock.ptt")}</small>}
         </span>
+        {priv.streamer && (
+          <button className="streamer-chip" title={t("streamer.off")} onClick={() => setStatusMode("auto")}>
+            {t("streamer.chip")}
+          </button>
+        )}
 
         <button
           className={`icon ${state.muted ? "on" : ""} ${hint === "muted-talk" ? "attention" : ""}`}
@@ -733,23 +866,9 @@ function VoiceDock() {
         >
           {state.deafened ? <IconHeadsetOff /> : <IconHeadset />}
         </button>
-        <button
-          className={`icon ${hint === "mic-silent" ? "attention" : ""}`}
-          title={t("settings.title")}
-          onClick={() => app.set({ settingsOpen: true, settingsTab: hint === "mic-silent" ? "audio" : app.get().settingsTab })}
-        >
+        <button className="icon" title={t("settings.title")} onClick={() => app.set({ settingsOpen: true })}>
           <IconGear />
         </button>
-        {hint === "muted-talk" && (
-          <button className="dock-hint mic" onClick={() => void voice.setMuted(false)}>
-            {t("hint.mutedTalk")}
-          </button>
-        )}
-        {hint === "mic-silent" && (
-          <button className="dock-hint gear" onClick={() => app.set({ settingsOpen: true, settingsTab: "audio" })}>
-            {t("hint.micSilent")}
-          </button>
-        )}
       </div>
     </div>
   );
@@ -825,7 +944,7 @@ function NetPanel({ onClose }: { onClose: () => void }) {
       <div className="net-panel" onMouseDown={(e) => e.stopPropagation()}>
         <div className="net-head">
           <b>{t("net.title")}</b>
-          <span className="state ellipsis">{stats?.server ?? ""}</span>
+          <span className="state ellipsis sensitive">{stats?.server ?? ""}</span>
           <button className="ghost icon tiny" title={t("common.close")} onClick={onClose}>
             <IconClose />
           </button>
@@ -900,6 +1019,15 @@ function NetPanel({ onClose }: { onClose: () => void }) {
 
 /* -------------------------------------------------------------------- media */
 
+/** Right click on a picture opens its menu: open, save, copy. */
+function imageMenuHandler(url: string, name: string) {
+  return (e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openImageMenu(url, name, e.clientX, e.clientY);
+  };
+}
+
 /** URL of an attachment: plain media is downloaded, encrypted media is also decrypted. */
 function mediaSrc(media: Media): Promise<string> {
   return media.file ? encryptedMediaUrl(media.file, media.mime) : mediaUrl(media.mxc);
@@ -929,7 +1057,7 @@ async function downloadMedia(media: Media): Promise<void> {
   }
   const a = document.createElement("a");
   a.href = url;
-  a.download = media.name;
+  a.download = safeFileName(media.name, "file");
   a.click();
 }
 
@@ -967,9 +1095,11 @@ function LinkCard({ preview, onRemove }: { preview: LinkPreview; onRemove?: () =
         playing ? (
           <div className="embed-player">
             <iframe
-              src={`https://www.youtube-nocookie.com/embed/${preview.youtube}?autoplay=1&rel=0`}
+              src={`https://www.youtube-nocookie.com/embed/${encodeURIComponent(preview.youtube)}?autoplay=1&rel=0`}
               title={preview.title || "YouTube"}
               allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+              sandbox="allow-scripts allow-same-origin allow-presentation allow-popups allow-popups-to-escape-sandbox"
+              referrerPolicy="strict-origin-when-cross-origin"
               allowFullScreen
             />
           </div>
@@ -984,7 +1114,7 @@ function LinkCard({ preview, onRemove }: { preview: LinkPreview; onRemove?: () =
       ) : (
         media &&
         src && (
-          <button className={wide ? "embed-shot" : "embed-thumb"} onClick={() => openImage(src, media.name)} title={t("chat.openImage")}>
+          <button className={wide ? "embed-shot" : "embed-thumb"} onClick={() => openImage(src, media.name)} onContextMenu={imageMenuHandler(src, media.name)} title={t("chat.openImage")}>
             <img src={src} alt="" loading="lazy" />
           </button>
         )
@@ -1011,7 +1141,7 @@ function MessageMedia({ media }: { media: Media }) {
 
   if (media.kind === "image") {
     return url ? (
-      <button className="media" style={box} onClick={() => openImage(url, media.name)} title={t("chat.openImage")}>
+      <button className="media" style={box} onClick={() => openImage(url, media.name)} onContextMenu={imageMenuHandler(url, media.name)} title={t("chat.openImage")}>
         <img src={url} alt={media.name} loading="lazy" />
       </button>
     ) : (
@@ -1129,10 +1259,14 @@ function isJumbo(text: string): boolean {
 
 /* ------------------------------------------------------------------ message */
 
+/** Longer texts are drawn without Markdown: a crafted giant message must not freeze the chat. */
+const MARKDOWN_MAX = 16_000;
+
 const PICKER_W = 352;
 const PICKER_H = 392;
 
-function MessageRow({ m, roomId, lit }: { m: Message; roomId: string | null; lit: boolean }) {
+/** One message. Drawn again only when the message itself changed (see reuse() in app.ts). */
+const MessageRow = memo(function MessageRow({ m, roomId, lit }: { m: Message; roomId: string | null; lit: boolean }) {
   const [confirming, setConfirming] = useState(false);
   const [pickAt, setPickAt] = useState<{ left: number; top: number } | null>(null);
   const box = useRef<HTMLDivElement>(null);
@@ -1216,7 +1350,7 @@ function MessageRow({ m, roomId, lit }: { m: Message; roomId: string | null; lit
         </div>
         {text && (
           <div className={`body ${m.locked ? "locked" : ""} ${isJumbo(text) ? "jumbo" : ""}`}>
-            {m.locked || isJumbo(text) ? (
+            {m.locked || isJumbo(text) || text.length > MARKDOWN_MAX ? (
               <RichText text={text} />
             ) : (
               <Markdown
@@ -1315,7 +1449,7 @@ function MessageRow({ m, roomId, lit }: { m: Message; roomId: string | null; lit
                 <IconQuote />
               </button>
             )}
-            {m.state === "sent" && canPinHere() && (
+            {m.state === "sent" && m.canPin && (
               <button className={`ghost icon small ${m.pinned ? "on-soft" : ""}`} title={m.pinned ? t("pins.unpin") : t("pins.pin")} onClick={() => void togglePin(m.id)}>
                 <IconPin />
               </button>
@@ -1335,9 +1469,44 @@ function MessageRow({ m, roomId, lit }: { m: Message; roomId: string | null; lit
       </div>
     </div>
   );
-}
+});
 
 /* --------------------------------------------------------------------- chat */
+
+/**
+ * Where each chat was left: at its newest messages, or scrolled up with some
+ * message at the top of the view. Coming back shows the same place. Kept for
+ * the session only.
+ */
+type ScrollMark = { bottom: true } | { bottom: false; anchor: string; offset: number };
+const scrollMarks = new Map<string, ScrollMark>();
+
+function nearBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+
+/** The first message whose lower edge is inside the view; messages are in order, so a binary search does. */
+function markScroll(roomId: string, el: HTMLElement): void {
+  if (nearBottom(el)) {
+    scrollMarks.set(roomId, { bottom: true });
+    return;
+  }
+  const top = el.getBoundingClientRect().top;
+  const nodes = el.querySelectorAll<HTMLElement>(".msg");
+  let lo = 0;
+  let hi = nodes.length - 1;
+  let found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (nodes[mid].getBoundingClientRect().bottom > top + 4) {
+      found = mid;
+      hi = mid - 1;
+    } else lo = mid + 1;
+  }
+  if (found === -1) return;
+  const node = nodes[found];
+  scrollMarks.set(roomId, { bottom: false, anchor: node.id.slice(4), offset: node.getBoundingClientRect().top - top });
+}
 
 function typingLine(names: string[]): string {
   if (names.length === 1) return t("chat.typing.one", { a: names[0] });
@@ -1364,11 +1533,17 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
   const pinsOpen = useStore(app, (s) => s.pinsOpen);
   const pins = useStore(app, (s) => s.pins);
   const [atBottom, setAtBottom] = useState(true);
+  // the "new" line has been in view: the bar about new messages is not needed
+  const [lineSeen, setLineSeen] = useState(false);
 
   const [dragging, setDragging] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
+  const line = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
+  // the place to return to, applied once the chat's messages are drawn
+  const restore = useRef<ScrollMark | null>(null);
+  const markFrame = useRef(0);
 
   const direct = directs.find((d) => d.roomId === activeChannel);
   const channel =
@@ -1376,20 +1551,63 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
   const title = direct?.name ?? channel?.name ?? activeChannel ?? "";
   const voiceHere = channel?.kind === "voice";
 
-  // another chat: start at the bottom again, whatever was scrolled in the previous one
+  const follow = (on: boolean) => {
+    stick.current = on;
+    setAtBottom(on);
+    setChatAtBottom(on);
+  };
+
+  // another chat: back to where it was left, or to its newest messages
   useLayoutEffect(() => {
-    stick.current = true;
-    setAtBottom(true);
-    setChatAtBottom(true);
-    bottom.current?.scrollIntoView({ block: "end" });
+    const mark = activeChannel ? scrollMarks.get(activeChannel) : undefined;
+    restore.current = mark && !mark.bottom ? mark : null;
+    setLineSeen(false);
+    follow(!restore.current);
+    if (!restore.current) bottom.current?.scrollIntoView({ block: "end" });
   }, [activeChannel]);
+
+  useLayoutEffect(() => {
+    const mark = restore.current;
+    const el = scroller.current;
+    if (!mark || mark.bottom || !el || !messages.length) return;
+    restore.current = null;
+    const node = document.getElementById(`msg-${mark.anchor}`);
+    if (!node || !el.contains(node)) {
+      // that message is not loaded any more: the newest ones then
+      follow(true);
+      bottom.current?.scrollIntoView({ block: "end" });
+      return;
+    }
+    el.scrollTop += node.getBoundingClientRect().top - el.getBoundingClientRect().top - mark.offset;
+  }, [messages, activeChannel]);
 
   const toBottom = () => {
     stick.current = true;
     bottom.current?.scrollIntoView({ block: "end", behavior: "smooth" });
   };
+
+  // new messages from others since the chat was opened (or since scrolling away)
   const unreadAt = unreadFrom ? messages.findIndex((x) => x.id === unreadFrom) : -1;
-  const unseen = !atBottom && unreadAt !== -1 ? messages.length - unreadAt : 0;
+  const fresh = unreadAt === -1 ? [] : messages.slice(unreadAt).filter((x) => !x.own);
+
+  useEffect(() => setLineSeen(false), [unreadFrom]);
+
+  useEffect(() => {
+    const el = line.current;
+    const root = scroller.current;
+    if (!el || !root) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) setLineSeen(true);
+    }, { root });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [unreadFrom, activeChannel, messages.length]);
+
+  const toLine = () => line.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+  const readAll = () => {
+    app.set({ unreadFrom: null });
+    if (activeChannel) void markRoomRead(activeChannel);
+  };
 
   useEffect(() => {
     if (stick.current) bottom.current?.scrollIntoView({ block: "end" });
@@ -1407,10 +1625,19 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
 
   const onScroll = (e: UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    if (stick.current !== atBottom) {
-      setAtBottom(stick.current);
-      setChatAtBottom(stick.current);
+    const at = nearBottom(el);
+    stick.current = at;
+    if (at !== atBottom) {
+      setAtBottom(at);
+      setChatAtBottom(at);
+    }
+    // where the chat stands is noted once a frame, not on every scroll event
+    if (activeChannel && !markFrame.current) {
+      const roomId = activeChannel;
+      markFrame.current = requestAnimationFrame(() => {
+        markFrame.current = 0;
+        if (scroller.current && app.get().activeChannel === roomId) markScroll(roomId, scroller.current);
+      });
     }
     if (el.scrollTop < 80) {
       const before = el.scrollHeight;
@@ -1422,6 +1649,8 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
       });
     }
   };
+
+  useEffect(() => () => cancelAnimationFrame(markFrame.current), []);
 
   // an own message goes out: scroll down even if history was being read
   useEffect(() => {
@@ -1450,6 +1679,8 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
     );
   }
 
+  const showNew = fresh.length > 0 && !lineSeen;
+
   return (
     <main
       className={`chat ${dragging ? "dragging" : ""}`}
@@ -1468,6 +1699,7 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
         <span className="sigil">{direct ? <IconChat /> : voiceHere ? <IconSpeaker /> : <IconHash />}</span>
         <b className="ellipsis">{title}</b>
         {channel?.topic && !embedded && <span className="topic">{channel.topic}</span>}
+        <span className="head-gap" />
         {voiceHere && activeChannel === voiceChannel && !embedded && (
           <button className="ghost small head-tool back-to-call" onClick={showCall}>
             <IconSpeaker /> {t("chat.backToCall")}
@@ -1478,64 +1710,76 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
             <IconClose />
           </button>
         ) : (
-          <MuteBell roomId={activeChannel} userId={direct?.userId ?? ""} tight={voiceHere && activeChannel === voiceChannel} />
-        )}
-        {!embedded && pins.length > 0 && (
-          <button
-            className={`ghost icon head-tool tight pin-tool ${pinsOpen ? "on-soft" : ""}`}
-            title={t("pins.title")}
-            onClick={() => app.set({ pinsOpen: !pinsOpen, searchOpen: false })}
-          >
-            <IconPin />
-            <small>{pins.length}</small>
-          </button>
-        )}
-        {!embedded && (
-        <button
-          className={`ghost icon head-tool tight ${searchOpen ? "on-soft" : ""}`}
-          title={t("chat.search")}
-          onClick={() => app.set({ searchOpen: !searchOpen, searchHits: [], pinsOpen: false })}
-        >
-          <IconSearch />
-        </button>
-        )}
-        {!searchOpen && !pinsOpen && !embedded && (
-          <button
-            className={`ghost icon head-tool tight ${membersHidden ? "" : "on-soft"}`}
-            title={membersHidden ? t("chat.showMembers") : t("chat.hideMembers")}
-            onClick={toggleMembers}
-          >
-            <IconUsers />
-          </button>
+          <>
+            <MuteBell roomId={activeChannel} userId={direct?.userId ?? ""} />
+            <button
+              className={`ghost icon head-tool pin-tool ${pinsOpen ? "on-soft" : ""}`}
+              title={t("pins.title")}
+              onClick={() => app.set({ pinsOpen: !pinsOpen })}
+            >
+              <IconPin />
+              {pins.length > 0 && <small>{pins.length}</small>}
+            </button>
+            <HeadSearch roomId={activeChannel} />
+            <button
+              className={`ghost icon head-tool ${membersHidden ? "" : "on-soft"}`}
+              title={membersHidden ? t("chat.showMembers") : t("chat.hideMembers")}
+              onClick={toggleMembers}
+            >
+              <IconUsers />
+            </button>
+          </>
         )}
       </div>
 
-      <div className="timeline" key={`timeline-${activeChannel}`} ref={scroller} onScroll={onScroll}>
-        {history !== "more" && (
-          <div className="chat-start">
-            <b>{direct ? t("chat.start.direct", { name: title }) : t("chat.start.channel", { name: title })}</b>
-            <span>{history === "hidden" ? t("chat.start.hidden") : t("chat.start.text")}</span>
+      <div className="timeline-wrap">
+        {showNew ? (
+          <div className="unread-bar">
+            <button className="unread-jump" onClick={toLine}>
+              {tn("chat.unreadSince", fresh.length, { time: fmtTime(fresh[0].ts) })}
+            </button>
+            <button className="unread-act" onClick={readAll}>
+              {t("mutes.markRead")} <IconMarkRead />
+            </button>
           </div>
+        ) : (
+          !atBottom && (
+            <div className="unread-bar older">
+              <button className="unread-jump" onClick={toBottom}>
+                {t("chat.olderShown")}
+              </button>
+              <button className="unread-act" onClick={toBottom}>
+                {t("chat.toBottom")} ↓
+              </button>
+            </div>
+          )
         )}
-        {messages.map((m) => (
-          <Fragment key={m.id}>
-            {m.id === unreadFrom && (
-              <div className="new-line">
-                <span>{t("chat.newLine")}</span>
-              </div>
-            )}
-            <MessageRow m={m} roomId={activeChannel} lit={highlight === m.id} />
-          </Fragment>
-        ))}
-        <div ref={bottom} />
-      </div>
 
-      {!atBottom && (
-        <button className="jump-bar" onClick={toBottom}>
-          <span>{unseen > 0 ? tn("chat.unseen", unseen) : t("chat.olderShown")}</span>
-          <b>{t("chat.toBottom")} ↓</b>
-        </button>
-      )}
+        {!embedded && searchOpen && <SearchPop roomId={activeChannel} />}
+        {!embedded && pinsOpen && <PinsPop />}
+
+        <div className="timeline" key={`timeline-${activeChannel}`} ref={scroller} onScroll={onScroll}>
+          {history !== "more" && (
+            <div className="chat-start">
+              <b>{direct ? t("chat.start.direct", { name: title }) : t("chat.start.channel", { name: title })}</b>
+              <span>{history === "hidden" ? t("chat.start.hidden") : t("chat.start.text")}</span>
+            </div>
+          )}
+          {messages.map((m) => (
+            <Fragment key={m.id}>
+              {m.id === unreadFrom && (
+                <div className="new-line" ref={line}>
+                  <span>{t("chat.newLine")}</span>
+                </div>
+              )}
+              <Guard key={m.id} fallback={<div className="guard-note msg-broken">{t("guard.message")}</div>}>
+                <MessageRow m={m} roomId={activeChannel} lit={highlight === m.id} />
+              </Guard>
+            </Fragment>
+          ))}
+          <div ref={bottom} />
+        </div>
+      </div>
 
       {dragging && <div className="drop-hint">{t("chat.dropHint")}</div>}
 
@@ -1553,19 +1797,202 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
 }
 
 /** The bell in a chat header: silence this chat, or the person in a direct chat. */
-function MuteBell({ roomId, userId, tight }: { roomId: string; userId: string; tight: boolean }) {
+function MuteBell({ roomId, userId }: { roomId: string; userId: string }) {
   useMutes();
   const kind = userId ? "users" : "rooms";
   const id = userId || roomId;
   const muted = isMuted(kind, id);
   return (
     <button
-      className={`ghost icon head-tool ${tight ? "tight" : ""} ${muted ? "on-soft" : ""}`}
+      className={`ghost icon head-tool ${muted ? "on-soft" : ""}`}
       title={muted ? t("mutes.unmuteChat") : t("mutes.muteChat")}
       onClick={() => setMuted(kind, id, !muted)}
     >
       {muted ? <IconBellOff /> : <IconBell />}
     </button>
+  );
+}
+
+/* --------------------------------------------------------------- image menu */
+
+/** The context menu of a picture, in the chat and in the full-screen viewer. */
+function ImageMenuView() {
+  const menu = useStore(app, (s) => s.imageMenu);
+  useEscape(!!menu, closeImageMenu);
+  if (!menu) return null;
+  const run = (fn: () => void) => () => {
+    closeImageMenu();
+    fn();
+  };
+  return (
+    <div className="menu-back over-viewer" onMouseDown={closeImageMenu} onContextMenu={(e) => (e.preventDefault(), closeImageMenu())}>
+      <div
+        className="menu"
+        style={{ left: Math.min(menu.x, window.innerWidth - 230), top: Math.max(8, Math.min(menu.y, window.innerHeight - 150)) }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        {!menu.inViewer && (
+          <button className="menu-item" onClick={run(() => openImage(menu.url, menu.name))}>
+            <IconExpand />
+            <span>{t("image.open")}</span>
+          </button>
+        )}
+        <button className="menu-item" onClick={run(() => saveImage(menu.url, menu.name))}>
+          <IconDownload />
+          <span>{t("image.save")}</span>
+        </button>
+        <button className="menu-item" onClick={run(() => void copyImage(menu.url))}>
+          <IconCopy />
+          <span>{t("image.copy")}</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------- search */
+
+/**
+ * The search field in the chat header. Enter searches; the results open
+ * under the header and stay until closed, the chat changes or the app
+ * navigates elsewhere. The member list stays where it is.
+ */
+function HeadSearch({ roomId }: { roomId: string }) {
+  const open = useStore(app, (s) => s.searchOpen);
+  const [term, setTerm] = useState("");
+  const field = useRef<HTMLInputElement>(null);
+  useEffect(() => setTerm(""), [roomId]);
+
+  const clear = () => {
+    setTerm("");
+    closeSearch();
+  };
+
+  return (
+    <div className={`head-search ${open || term ? "wide" : ""}`} onClick={() => field.current?.focus()}>
+      <IconSearch />
+      <input
+        ref={field}
+        value={term}
+        placeholder={t("search.short")}
+        onChange={(e) => setTerm(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void runSearch(term);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            clear();
+            field.current?.blur();
+          }
+        }}
+      />
+      {(term || open) && (
+        <button className="ghost icon tiny" title={t("common.clear")} onClick={(e) => (e.stopPropagation(), clear())}>
+          <IconClose />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** The searched words, marked in a found message. */
+function Marked({ text, term }: { text: string; term: string }) {
+  const words = term
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w.length > 0)
+    .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  if (!words.length) return <>{text}</>;
+  const parts = text.split(new RegExp(`(${words.join("|")})`, "gi"));
+  return <>{parts.map((p, i) => (i % 2 ? <mark key={i}>{p}</mark> : p))}</>;
+}
+
+function SearchPop({ roomId }: { roomId: string }) {
+  const hits = useStore(app, (s) => s.searchHits);
+  const searching = useStore(app, (s) => s.searching);
+  const term = useStore(app, (s) => s.searchTerm);
+
+  return (
+    <div className="head-pop search-pop">
+      <div className="head-pop-top">
+        <span className="state">{searching ? t("search.searching") : hits.length ? tn("search.found", hits.length) : t("search.nothing")}</span>
+        <button className="ghost icon tiny" title={t("common.close")} onClick={closeSearch}>
+          <IconClose />
+        </button>
+      </div>
+      <div className="head-pop-list">
+        {hits.map((h) => (
+          <button key={h.eventId} className="hit" onClick={() => void jumpTo(h.eventId)}>
+            <div>
+              <b>{displayName(h.sender, roomId)}</b>
+              <span className="when">{fmtDateTime(h.ts)}</span>
+            </div>
+            <div className="hit-body">
+              <Marked text={h.body} term={term} />
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------- pins */
+
+/** Pinned messages, under the header like the search. A click outside closes them. */
+function PinsPop() {
+  const pins = useStore(app, (s) => s.pins);
+  const activeChannel = useStore(app, (s) => s.activeChannel);
+  const [items, setItems] = useState<PinnedItem[] | null>(null);
+  const can = canPinHere();
+  const close = () => app.set({ pinsOpen: false });
+  useEscape(true, close);
+
+  useEffect(() => {
+    let alive = true;
+    void pinnedMessages().then((list) => alive && setItems(list));
+    return () => {
+      alive = false;
+    };
+  }, [pins.join(","), activeChannel]);
+
+  return (
+    <>
+      <div className="head-pop-back" onMouseDown={close} />
+      <div className="head-pop pins-pop">
+        <div className="head-pop-top">
+          <b>
+            <IconPin /> {t("pins.title")}
+          </b>
+          <button className="ghost icon tiny" title={t("common.close")} onClick={close}>
+            <IconClose />
+          </button>
+        </div>
+        <div className="head-pop-list">
+          {!items && <div className="state pad">{t("pins.loading")}</div>}
+          {items?.length === 0 && <div className="state pad">{t("pins.none")}</div>}
+          {items?.map((p) => (
+            <div key={p.id} className="hit pin-item">
+              <button className="pin-open" onClick={() => void jumpTo(p.id)}>
+                <div>
+                  <b>{p.name}</b>
+                  {p.ts > 0 && <span className="when">{fmtDateTime(p.ts)}</span>}
+                </div>
+                <div className="hit-body">
+                  <InlineMarkdown text={p.body} />
+                </div>
+              </button>
+              {can && (
+                <button className="ghost icon tiny" title={t("pins.unpin")} onClick={() => void togglePin(p.id)}>
+                  <IconClose />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -1575,11 +2002,15 @@ function MuteBell({ roomId, userId, tight }: { roomId: string; userId: string; t
 function PlaceMenu() {
   const menu = useStore(app, (s) => s.placeMenu);
   const servers = useStore(app, (s) => s.servers);
+  const orders = useChannelOrders();
   useMutes();
   useEscape(!!menu, closePlaceMenu);
   if (!menu) return null;
 
   const server = menu.kind === "server" ? servers.find((g) => g.spaceId === menu.id) : servers.find((g) => g.channels.some((c) => c.roomId === menu.id));
+  const own = server ? orders[server.spaceId] : undefined;
+  const siblings = server && menu.kind === "room" ? arrangeChannels(server.channels.filter((c) => c.kind === server.channels.find((x) => x.roomId === menu.id)?.kind), own) : [];
+  const at = siblings.findIndex((c) => c.roomId === menu.id);
   const channel = menu.kind === "room" ? server?.channels.find((c) => c.roomId === menu.id) : undefined;
   const kind = menu.kind === "server" ? "servers" : "rooms";
   const muted = isMuted(kind, menu.id);
@@ -1595,7 +2026,7 @@ function PlaceMenu() {
     <div className="menu-back" onMouseDown={closePlaceMenu} onContextMenu={(e) => (e.preventDefault(), closePlaceMenu())}>
       <div
         className="menu"
-        style={{ left: Math.min(menu.x, window.innerWidth - 240), top: Math.min(menu.y, window.innerHeight - 200) }}
+        style={{ left: Math.min(menu.x, window.innerWidth - 240), top: Math.max(8, Math.min(menu.y, window.innerHeight - 330)) }}
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="menu-head ellipsis">{menu.kind === "server" ? server?.name : channel?.name}</div>
@@ -1623,6 +2054,24 @@ function PlaceMenu() {
             <span>{t("channels.edit")}</span>
           </button>
         )}
+        {server && at > 0 && (
+          <button className="menu-item" onClick={run(() => moveChannel(server, own, menu.id, siblings[at - 1].roomId, false))}>
+            <IconChevron style={{ transform: "rotate(180deg)" }} />
+            <span>{t("order.up")}</span>
+          </button>
+        )}
+        {server && at !== -1 && at < siblings.length - 1 && (
+          <button className="menu-item" onClick={run(() => moveChannel(server, own, menu.id, siblings[at + 1].roomId, true))}>
+            <IconChevron />
+            <span>{t("order.down")}</span>
+          </button>
+        )}
+        {menu.kind === "server" && (
+          <button className="menu-item" onClick={run(() => (selectServer(menu.id), openServerSettings("me")))}>
+            <IconUser />
+            <span>{t("server.tab.me")}</span>
+          </button>
+        )}
         {menu.kind === "server" && (
           <button className="menu-item" onClick={run(() => (selectServer(menu.id), openServerSettings()))}>
             <IconGear />
@@ -1643,85 +2092,6 @@ function PlaceMenu() {
         )}
       </div>
     </div>
-  );
-}
-
-/* ------------------------------------------------------------------- search */
-
-function SearchPanel() {
-  const hits = useStore(app, (s) => s.searchHits);
-  const searching = useStore(app, (s) => s.searching);
-  const activeChannel = useStore(app, (s) => s.activeChannel);
-  const [term, setTerm] = useState("");
-
-  return (
-    <aside className="members search-panel">
-      <form
-        onSubmit={(e) => {
-          e.preventDefault();
-          void runSearch(term);
-        }}
-      >
-        <input autoFocus value={term} onChange={(e) => setTerm(e.target.value)} placeholder={t("search.placeholder")} />
-      </form>
-      <div className="state search-state">
-        {searching ? t("search.searching") : hits.length ? tn("search.found", hits.length) : t("search.hint")}
-      </div>
-      {hits.map((h) => (
-        <button key={h.eventId} className="hit" onClick={() => void jumpTo(h.eventId)}>
-          <div>
-            <b>{displayName(h.sender, activeChannel)}</b>
-            <span className="when">{fmtDateTime(h.ts)}</span>
-          </div>
-          <div className="hit-body">{h.body}</div>
-        </button>
-      ))}
-    </aside>
-  );
-}
-
-/* ------------------------------------------------------------------- pins */
-
-function PinsPanel() {
-  const pins = useStore(app, (s) => s.pins);
-  const activeChannel = useStore(app, (s) => s.activeChannel);
-  const [items, setItems] = useState<PinnedItem[] | null>(null);
-  const can = canPinHere();
-
-  useEffect(() => {
-    let alive = true;
-    void pinnedMessages().then((list) => alive && setItems(list));
-    return () => {
-      alive = false;
-    };
-  }, [pins.join(","), activeChannel]);
-
-  return (
-    <aside className="members search-panel pins-panel">
-      <div className="group-title">
-        <IconPin /> {t("pins.title")}
-      </div>
-      {!items && <div className="state">{t("pins.loading")}</div>}
-      {items?.length === 0 && <div className="state">{t("pins.none")}</div>}
-      {items?.map((p) => (
-        <div key={p.id} className="hit pin-item">
-          <button className="pin-open" onClick={() => void jumpTo(p.id)}>
-            <div>
-              <b>{p.name}</b>
-              {p.ts > 0 && <span className="when">{fmtDateTime(p.ts)}</span>}
-            </div>
-            <div className="hit-body">
-              <InlineMarkdown text={p.body} />
-            </div>
-          </button>
-          {can && (
-            <button className="ghost icon tiny" title={t("pins.unpin")} onClick={() => void togglePin(p.id)}>
-              <IconClose />
-            </button>
-          )}
-        </div>
-      ))}
-    </aside>
   );
 }
 
@@ -1747,7 +2117,7 @@ function Members() {
     <div
       className={`member clickable ${m.presence}`}
       key={m.userId}
-      title={m.userId}
+      title={idsHidden() ? undefined : m.userId}
       onClick={() => openProfile(m.userId)}
       onContextMenu={menuHandler(m.userId, activeChannel)}
     >
@@ -1984,6 +2354,7 @@ const ERROR_TTL_MS = 9000;
 function Toast() {
   const busy = useStore(app, (s) => s.busy);
   const error = useStore(app, (s) => s.error);
+  const notice = useStore(app, (s) => s.notice);
 
   useEffect(() => {
     if (!error) return;
@@ -1993,9 +2364,9 @@ function Toast() {
     return () => window.clearTimeout(timer);
   }, [error]);
 
-  if (!busy && !error) return null;
+  if (!busy && !error && !notice) return null;
   return (
-    <div className={`toast ${error ? "bad" : ""}`}>
+    <div className={`toast ${error ? "bad" : !busy ? "good" : ""}`}>
       {error ? (
         <>
           <span className="toast-text">{error}</span>
@@ -2004,7 +2375,7 @@ function Toast() {
           </button>
         </>
       ) : (
-        busy
+        busy || notice
       )}
     </div>
   );
@@ -2020,8 +2391,6 @@ function OfflineBar() {
 /* ------------------------------------------------------------------- screen */
 
 export function Main() {
-  const searchOpen = useStore(app, (s) => s.searchOpen);
-  const pinsOpen = useStore(app, (s) => s.pinsOpen);
   const activeChannel = useStore(app, (s) => s.activeChannel);
   const callView = useStore(app, (s) => s.callView);
   const voiceChannel = useStore(app, (s) => s.voiceChannel);
@@ -2051,11 +2420,12 @@ export function Main() {
         ) : (
           <>
             <Chat />
-            {searchOpen && activeChannel ? <SearchPanel /> : pinsOpen && activeChannel ? <PinsPanel /> : !membersHidden && <Members />}
+            {!membersHidden && <Members />}
           </>
         )}
       </div>
       <MiniStream />
+      <MoonlightViewer hidden={inCall} />
       <StreamPeek />
       <Toast />
       <OfflineBar />
@@ -2072,6 +2442,7 @@ export function Main() {
       <ScreenMenu />
       <StreamMenu />
       <PlaceMenu />
+      <ImageMenuView />
     </>
   );
 }

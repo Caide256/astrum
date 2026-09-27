@@ -410,9 +410,9 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
                 }}
                 onMouseEnter={() => setPick(i)}
               >
-                <Avatar mxc={h.avatar} name={h.name} size={22} />
+                {h.group ? <span className="mention-group-icon">@</span> : <Avatar mxc={h.avatar} name={h.name} size={22} />}
                 <b className="ellipsis">{h.name}</b>
-                <span className="state ellipsis">{h.userId}</span>
+                {h.group ? <span className="state ellipsis">{h.group}</span> : <span className="state ellipsis sensitive">{h.userId}</span>}
               </button>
             ))}
           </div>

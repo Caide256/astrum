@@ -31,7 +31,7 @@ export function useMxc(mxc: string, size = 0): string {
   return url;
 }
 
-export type Status = "online" | "unavailable" | "offline";
+export type Status = "online" | "unavailable" | "dnd" | "offline";
 
 type Props = {
   mxc?: string | null;
@@ -45,7 +45,7 @@ type Props = {
   onContextMenu?: (e: React.MouseEvent) => void;
 };
 
-const STATUS_TITLE: Record<Status, Key> = { online: "presence.online", unavailable: "presence.away", offline: "presence.offline" };
+const STATUS_TITLE: Record<Status, Key> = { online: "presence.online", unavailable: "presence.away", dnd: "presence.dnd", offline: "presence.offline" };
 
 /** Avatar: the picture if there is one, otherwise the initials. */
 export function Avatar({ mxc, name, size = 34, className = "", title, status, onClick, onContextMenu }: Props) {

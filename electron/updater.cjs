@@ -3,13 +3,16 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const guard = require("./guard.cjs");
 
 /**
  * Updates from GitHub releases of the repository named in brand.json.
  *
  * The latest release is checked shortly after start and then every few hours.
- * The page asks the user; on consent the installer is downloaded and its
- * SHA-512 is compared with latest.yml from the same release. The page then
+ * The page asks the user; on consent the installer is downloaded and its hash
+ * is checked: SHA-512 from latest.yml of the same release, or, if latest.yml
+ * was not attached, the SHA-256 digest GitHub publishes for every asset. The
+ * installer is found by name, <Name>-Setup-<version>.exe. The page then
  * leaves the voice channel and asks to install: the installer runs silently
  * with --force-run, closes the app, installs over it and starts it again.
  * The portable build cannot replace its own exe, so it only opens the release
@@ -95,7 +98,8 @@ async function check() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const version = String(data.tag_name || "").replace(/^v/i, "");
-    const page = String(data.html_url || `https://github.com/${repo}/releases/latest`);
+    const given = String(data.html_url || "");
+    const page = given.startsWith(`https://github.com/${repo}/`) ? given : `https://github.com/${repo}/releases/latest`;
     if (!version || !newer(version, state.current)) {
       release = null;
       set({ status: "latest", version, page, notes: "" });
@@ -105,8 +109,22 @@ async function check() {
     const yml = assets.find((a) => a.name === "latest.yml");
     let manifest = null;
     if (yml) manifest = readManifest(await (await get(yml.browser_download_url, "application/octet-stream")).text());
-    const setup = manifest && assets.find((a) => a.name === manifest.path);
-    release = setup && manifest.sha512 ? { url: setup.browser_download_url, name: setup.name, sha512: manifest.sha512, size: setup.size } : null;
+    // the installer: named in latest.yml, or found by its usual name
+    const setup =
+      (manifest && assets.find((a) => a.name === manifest.path)) ||
+      assets.find((a) => /-Setup-[\d.]+\.exe$/i.test(String(a.name)) && String(a.name).includes(version));
+    const digest = /^sha256:([0-9a-f]{64})$/i.exec(String(setup?.digest || ""));
+    // the installer comes from this repository's releases on GitHub and nowhere else
+    const fromRepo = setup && String(setup.browser_download_url || "").startsWith(`https://github.com/${repo}/releases/download/`);
+    if (!fromRepo) {
+      release = null;
+    } else if (manifest?.sha512 && manifest.path === setup.name) {
+      release = { url: setup.browser_download_url, name: setup.name, algo: "sha512", hash: manifest.sha512, encoding: "base64", size: setup.size };
+    } else if (digest) {
+      release = { url: setup.browser_download_url, name: setup.name, algo: "sha256", hash: digest[1].toLowerCase(), encoding: "hex", size: setup.size };
+    } else {
+      release = null;
+    }
     set({
       status: "available",
       version,
@@ -127,10 +145,11 @@ async function download() {
   if (!release) throw new Error("no installer in the release");
   const dir = path.join(electron.app.getPath("temp"), `${electron.app.getName()}-update`);
   fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, release.name);
+  // the name comes from the network: no folders, no odd characters
+  const file = path.join(dir, path.basename(String(release.name)).replace(/[^\w.-]+/g, "_"));
   const res = await get(release.url, "application/octet-stream");
   const total = Number(res.headers.get("content-length")) || release.size || 0;
-  const hash = crypto.createHash("sha512");
+  const hash = crypto.createHash(release.algo);
   const out = fs.createWriteStream(file);
   const reader = res.body.getReader();
   let got = 0;
@@ -152,7 +171,7 @@ async function download() {
   } finally {
     await new Promise((r) => out.end(r));
   }
-  if (hash.digest("base64") !== release.sha512) {
+  if (hash.digest(release.encoding) !== release.hash) {
     fs.rmSync(file, { force: true });
     throw new Error("checksum mismatch");
   }
@@ -182,7 +201,7 @@ function install() {
 
 function openPage() {
   const url = state.page || (repo ? `https://github.com/${repo}/releases/latest` : "");
-  if (url) void electron.shell.openExternal(url);
+  if (url.startsWith("https://github.com/")) void electron.shell.openExternal(url);
 }
 
 function init(opts) {
@@ -194,11 +213,11 @@ function init(opts) {
   set({ enabled: !!repo, current: electron.app.getVersion(), portable });
 
   const { ipcMain } = electron;
-  ipcMain.handle("app:update-state", () => state);
-  ipcMain.handle("app:update-check", () => check());
-  ipcMain.handle("app:update-start", () => start());
-  ipcMain.handle("app:update-install", () => install());
-  ipcMain.handle("app:update-open", () => openPage());
+  guard.handle(ipcMain, "app:update-state", () => state);
+  guard.handle(ipcMain, "app:update-check", () => check());
+  guard.handle(ipcMain, "app:update-start", () => start());
+  guard.handle(ipcMain, "app:update-install", () => install());
+  guard.handle(ipcMain, "app:update-open", () => openPage());
 
   if (!repo || process.env.APP_SELFTEST) return;
   setTimeout(() => void check(), FIRST_CHECK_MS);

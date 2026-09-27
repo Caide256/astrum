@@ -74,6 +74,29 @@ export type UpdateState = {
   canInstall: boolean;
 };
 
+/* Moonlight: the native helper talks to a Sunshine host (see electron/main.cjs). */
+export type MlAnswer<T> = { ok: boolean; data?: T; error?: string };
+export type MlHostInfo = { paired: boolean; appVersion: string; hostname: string; codecs: number; busy: boolean };
+export type MlApp = { id: number; title: string };
+export type MlStreamOptions = { host: string; app: number; width: number; height: number; fps: number; kbps: number; formats: number };
+
+/** The Moonlight part of the shell, or null in a plain browser. */
+export function moonlightBridge() {
+  const b = bridge;
+  if (!b?.mlStart || !b.mlInfo || !b.mlPair || !b.mlApps || !b.mlStop || !b.mlIdr || !b.onMlEvent || !b.onMlFrame) return null;
+  return {
+    info: b.mlInfo,
+    pair: b.mlPair,
+    apps: b.mlApps,
+    quit: b.mlQuit ?? (async () => ({ ok: false })),
+    start: b.mlStart,
+    stop: b.mlStop,
+    idr: b.mlIdr,
+    onEvent: b.onMlEvent,
+    onFrame: b.onMlFrame,
+  };
+}
+
 /** A link preview from the shell: the page's tags and its picture as bytes. */
 export type RawPreview = {
   url: string;
@@ -100,7 +123,19 @@ type Bridge = {
   onScreenAudio?: (cb: (chunk: ArrayBuffer) => void) => () => void;
   onScreenAudioEnd?: (cb: (reason: string) => void) => () => void;
   copyText?: (text: string) => Promise<void>;
+  copyImage?: (png: Uint8Array) => Promise<void>;
+  sealSecret?: (text: string) => Promise<string | null>;
+  openSecret?: (sealed: string) => Promise<string | null>;
   linkPreview?: (url: string) => Promise<RawPreview | null>;
+  mlInfo?: (host: string) => Promise<MlAnswer<MlHostInfo>>;
+  mlPair?: (host: string, pin: string) => Promise<MlAnswer<{ paired: boolean }>>;
+  mlApps?: (host: string) => Promise<MlAnswer<MlApp[]>>;
+  mlQuit?: (host: string) => Promise<MlAnswer<unknown>>;
+  mlStart?: (opts: MlStreamOptions) => Promise<{ ok: boolean; error?: string }>;
+  mlStop?: () => Promise<void>;
+  mlIdr?: () => Promise<void>;
+  onMlEvent?: (cb: (json: string) => void) => () => void;
+  onMlFrame?: (cb: (frame: ArrayBuffer) => void) => () => void;
   windowAction?: (action: "minimize" | "maximize" | "close" | "state") => Promise<WindowState | null>;
   onWindowState?: (cb: (s: WindowState) => void) => () => void;
   getUpdate?: () => Promise<UpdateState>;
@@ -258,6 +293,48 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Copy a picture. Any format is turned into PNG first: the system clipboard
+ * of Windows takes a bitmap, and PNG is what both the shell and the browser
+ * clipboard accept. An animation keeps its first frame.
+ */
+export async function copyImageToClipboard(url: string): Promise<boolean> {
+  try {
+    const blob = await (await fetch(url)).blob();
+    const bmp = await createImageBitmap(blob);
+    const canvas = new OffscreenCanvas(bmp.width, bmp.height);
+    canvas.getContext("2d")?.drawImage(bmp, 0, 0);
+    bmp.close();
+    const png = await canvas.convertToBlob({ type: "image/png" });
+    if (bridge?.copyImage) await bridge.copyImage(new Uint8Array(await png.arrayBuffer()));
+    else await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Whether secrets can be sealed by the operating system here: only in the desktop shell. */
+export const canSeal = !!bridge?.sealSecret;
+
+/** Seal a secret with the system's per-user encryption; null when the shell cannot. */
+export async function sealSecret(text: string): Promise<string | null> {
+  try {
+    return (await bridge?.sealSecret?.(text)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Open a sealed secret; null if it cannot be opened (another user, another computer). */
+export async function openSecret(sealed: string): Promise<string | null> {
+  try {
+    return (await bridge?.openSecret?.(sealed)) ?? null;
+  } catch {
+    return null;
   }
 }
 

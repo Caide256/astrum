@@ -3,7 +3,9 @@ import { useEffect, useRef, useState } from "react";
 import {
   access,
   app,
+  closeServerJoin,
   copyText,
+  displayName,
   hideChannel,
   inviteToServer,
   makeServerAddress,
@@ -12,16 +14,19 @@ import {
   openServerJoin,
   serverAdmin,
   serverJoinRule,
+  setServerProfile,
   showChannel,
   type ServerTab,
 } from "../app.ts";
 import { t, tn, type Key } from "../i18n/index.ts";
-import { ADMIN_LEVEL, PERM_NAMES, levelAbove, maxGrant, permLevels, type ChannelAccess, type Perms, type RoleDef } from "../matrix/admin.ts";
+import { ADMIN_LEVEL, OWNER_LEVEL, PERM_NAMES, levelAbove, maxGrant, type ChannelAccess, type Perms, type RoleDef } from "../matrix/admin.ts";
 import { GUESSES } from "../matrix/discovery.ts";
 import { compareChannels, type BrowseChannel, type Channel, type Server } from "../matrix/servers.ts";
+import { useServerProfiles } from "../prefs.ts";
 import { useStore } from "../store.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Cropper } from "./Cropper.tsx";
+import { SoundsTab } from "./Soundboard.tsx";
 import { useEscape, useLinger } from "./controls.tsx";
 import { IconCheck, IconChevron, IconCopy, IconDoorOut, IconHash, IconRefresh, IconSpeaker, IconTrash } from "./icons.tsx";
 
@@ -95,15 +100,21 @@ function AddressBox({ server }: { server: Server }) {
       <label>{t("address.title")}</label>
       {alias ? (
         <>
-          <div className="note">
+          <div className="note sensitive-blur">
             {guessable ? t("address.byDomain", { domain, alias }) : t("address.byAlias", { alias })}{" "}
             {open ? t("address.open") : t("address.closed")}
           </div>
-          {!open && can.server && (
+          {can.server && (
             <div className="row left">
-              <button className="ghost small" onClick={() => void openServerJoin(server.spaceId)}>
-                {t("address.openJoin")}
-              </button>
+              {open ? (
+                <button className="ghost small" onClick={() => void closeServerJoin(server.spaceId)}>
+                  {t("address.closeJoin")}
+                </button>
+              ) : (
+                <button className="ghost small" onClick={() => void openServerJoin(server.spaceId)}>
+                  {t("address.openJoin")}
+                </button>
+              )}
             </div>
           )}
         </>
@@ -224,10 +235,10 @@ function Overview({ server }: { server: Server }) {
           <div className="server-address">
             {alias ? (
               <>
-                <span className="state ellipsis" title={alias}>
+                <span className="state ellipsis sensitive" title={alias}>
                   {alias}
                 </span>
-                <CopyButton text={alias} className="ghost icon tiny" />
+                <CopyButton text={alias} className="ghost icon tiny sensitive" />
               </>
             ) : (
               <span className="state">{t("address.noneShort")}</span>
@@ -307,6 +318,92 @@ function Overview({ server }: { server: Server }) {
           <IconDoorOut /> {t("server.leave")}
         </button>
       </div>
+    </>
+  );
+}
+
+/* ------------------------------------------------------- own server profile */
+
+/**
+ * The own name and picture on this server only. Other Matrix clients show
+ * them too: it is the per-room name of the standard membership event.
+ */
+function MyServerProfile({ server }: { server: Server }) {
+  const profiles = useServerProfiles();
+  const own = profiles[server.spaceId];
+  const myName = useStore(app, (s) => s.myName);
+  const myAvatar = useStore(app, (s) => s.myAvatar);
+  const [name, setName] = useState(own?.name ?? "");
+  const [crop, setCrop] = useState<File | null>(null);
+  const file = useRef<HTMLInputElement>(null);
+  useEffect(() => setName(own?.name ?? ""), [server.spaceId, own?.name]);
+  const avatar = own?.avatar || myAvatar;
+
+  return (
+    <>
+      <p className="sub">{t("serverProfile.intro")}</p>
+      <div className="profile-top">
+        <Avatar mxc={avatar} name={name.trim() || myName || "?"} size={72} />
+        <div className="profile-id">
+          <b className="ellipsis">{name.trim() || myName}</b>
+          <div className="state">{own ? t("serverProfile.own") : t("serverProfile.global")}</div>
+          <div className="row left tight-top">
+            <button className="ghost small" onClick={() => file.current?.click()}>
+              {t("serverProfile.picture")}
+            </button>
+            {own?.avatar && (
+              <button className="ghost small" onClick={() => void setServerProfile(server.spaceId, own.name, null)}>
+                {t("serverProfile.pictureReset")}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <input
+        ref={file}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) setCrop(f);
+          e.target.value = "";
+        }}
+      />
+      {crop && (
+        <Cropper
+          file={crop}
+          onCancel={() => setCrop(null)}
+          onDone={(f) => {
+            setCrop(null);
+            void setServerProfile(server.spaceId, own?.name ?? "", f);
+          }}
+        />
+      )}
+
+      <div className="field">
+        <label>{t("serverProfile.name")}</label>
+        <div className="with-button">
+          <input value={name} maxLength={64} placeholder={myName} onChange={(e) => setName(e.target.value)} />
+          <button
+            className="primary"
+            disabled={name.trim() === (own?.name ?? "")}
+            onClick={() => void setServerProfile(server.spaceId, name, own?.avatar || null)}
+          >
+            {t("common.save")}
+          </button>
+        </div>
+        <span className="state">{t("serverProfile.nameHint")}</span>
+      </div>
+
+      {own && (
+        <div className="row left">
+          <button className="ghost" onClick={() => void setServerProfile(server.spaceId, "", null)}>
+            {t("serverProfile.reset")}
+          </button>
+        </div>
+      )}
     </>
   );
 }
@@ -588,7 +685,7 @@ function Members({ server }: { server: Server }) {
                     {m.name}
                     {m.userId === owner && <span className="badge">{t("role.owner")}</span>}
                   </b>
-                  <div className="state ellipsis">{m.userId}</div>
+                  <div className="state ellipsis sensitive">{m.userId}</div>
                 </div>
                 <RoleSelect
                   list={roleOptions(roles)}
@@ -673,7 +770,8 @@ function Bans({ server }: { server: Server }) {
         <div key={b.userId} className="admin-item">
           <div className="admin-row">
             <div className="grow ellipsis">
-              <b className="ellipsis">{b.userId}</b>
+              <b className="ellipsis">{displayName(b.userId)}</b>
+              <div className="state ellipsis sensitive">{b.userId}</div>
               <div className="state ellipsis">{b.reason || t("bans.noReason")}</div>
             </div>
             {can.ban && (
@@ -690,30 +788,79 @@ function Bans({ server }: { server: Server }) {
 
 /* -------------------------------------------------------------- permissions */
 
+/**
+ * Rights per role, as a table. Matrix grants a right from a level up, so a
+ * right given to a role also belongs to every role above it: those cells are
+ * ticked and greyed. Taking a right away from the lowest role that holds it
+ * moves it to the next role up.
+ */
 function PermsTab({ server }: { server: Server }) {
   const can = access(server.spaceId);
   const [perms, setPerms] = useState<Perms | null>(() => serverAdmin.perms(server.spaceId));
   const saved = serverAdmin.perms(server.spaceId);
+  const roles = serverAdmin.roles(server.spaceId);
 
   if (!perms) return null;
   const changed = JSON.stringify(perms) !== JSON.stringify(saved);
+  const levels = roles.map((r) => r.level);
+  /** The lowest role that holds a right: its cell is the one that switches it. */
+  const holder = (threshold: number) => Math.min(OWNER_LEVEL, ...levels.filter((l) => l >= threshold));
+  const nextUp = (level: number) => Math.min(OWNER_LEVEL, ...levels.filter((l) => l > level));
+  // Matrix refuses to move a threshold that is, or would be, above the own level
+  const editable = (from: number, to: number) => can.roles && from <= can.level && to <= can.level;
 
   return (
     <>
       <p className="sub">{t("perms.intro")}</p>
-      <div className="admin-list">
-        {PERM_NAMES.map((p) => (
-          <div key={p.id} className="admin-item">
-            <div className="admin-row">
-              <div className="grow">
-                <b>{t(p.name)}</b>
-                <div className="state">{t(p.hint)}</div>
-              </div>
-              <RoleSelect list={permLevels(serverAdmin.roles(server.spaceId))} value={perms[p.id]} max={can.level} disabled={!can.roles} onPick={(level) => setPerms({ ...perms, [p.id]: level })} />
-            </div>
-          </div>
-        ))}
+      <div className="perm-table-wrap">
+        <table className="perm-table">
+          <thead>
+            <tr>
+              <th />
+              <th title={t("role.ownerOnly")}>{t("role.owner")}</th>
+              {roles.map((r) => (
+                <th key={r.level} style={r.color ? { color: r.color } : undefined} title={r.name}>
+                  <span className="ellipsis">{r.name}</span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {PERM_NAMES.map((p) => {
+              const threshold = perms[p.id];
+              const base = holder(threshold);
+              return (
+                <tr key={p.id}>
+                  <td className="perm-name">
+                    <b>{t(p.name)}</b>
+                    <div className="state">{t(p.hint)}</div>
+                  </td>
+                  <td>
+                    <input type="checkbox" checked disabled title={t("perms.ownerAlways")} />
+                  </td>
+                  {roles.map((r) => {
+                    const has = r.level >= threshold;
+                    const inherited = has && r.level > base;
+                    const next = has ? nextUp(r.level) : r.level;
+                    return (
+                      <td key={r.level} className={inherited ? "inherited" : ""}>
+                        <input
+                          type="checkbox"
+                          checked={has}
+                          disabled={inherited || !editable(threshold, next)}
+                          title={inherited ? t("perms.inherited") : undefined}
+                          onChange={() => setPerms({ ...perms, [p.id]: next })}
+                        />
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
+      <span className="state">{t("perms.ladder")}</span>
       {can.roles && (
         <div className="row">
           <button className="ghost" disabled={!changed} onClick={() => setPerms(saved)}>
@@ -815,9 +962,11 @@ function RolesTab({ server }: { server: Server }) {
 
 const TABS: { id: ServerTab; name: Key }[] = [
   { id: "overview", name: "server.tab.overview" },
+  { id: "me", name: "server.tab.me" },
   { id: "channels", name: "server.tab.channels" },
   { id: "members", name: "server.tab.members" },
   { id: "roles", name: "server.tab.roles" },
+  { id: "sounds", name: "server.tab.sounds" },
   { id: "bans", name: "server.tab.bans" },
   { id: "perms", name: "server.tab.perms" },
 ];
@@ -854,11 +1003,13 @@ export function ServerSettings() {
         <div className="settings-body">
           <div className="tab-pane" key={tab}>
             {tab === "overview" && <Overview server={server} />}
+            {tab === "me" && <MyServerProfile server={server} />}
             {tab === "channels" && <Channels server={server} />}
             {tab === "members" && <Members server={server} />}
             {tab === "bans" && <Bans server={server} />}
             {tab === "perms" && <PermsTab server={server} />}
             {tab === "roles" && <RolesTab server={server} />}
+            {tab === "sounds" && <SoundsTab spaceId={server.spaceId} />}
             {error && <div className="error gap-top">{error}</div>}
           </div>
         </div>

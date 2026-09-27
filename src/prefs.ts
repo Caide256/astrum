@@ -2,6 +2,7 @@ import { useSyncExternalStore } from "react";
 import { ClientEvent, type MatrixClient, type MatrixEvent } from "matrix-js-sdk";
 
 import { BRAND } from "./brand.ts";
+import { isMxc } from "./mxc.ts";
 import { LANGS, getLang, onLangChange, setLang, type Lang } from "./i18n/index.ts";
 import {
   THEMES,
@@ -16,7 +17,7 @@ import {
   type ThemeDef,
 } from "./theme.ts";
 import { setBlipVolumes } from "./voice/audio.ts";
-import { voice, type TileLook, type VoicePrefs } from "./voice/voice.ts";
+import { cleanEmoji, cleanTile as cleanVoiceTile, voice, type TileLook, type VoicePrefs } from "./voice/voice.ts";
 
 /**
  * Preferences that follow the account between installs and computers:
@@ -148,11 +149,11 @@ export function setMuted(kind: keyof Mutes, id: string, on: boolean): void {
 
 /* ----------------------------------------------------------------- sounds */
 
-/** Volumes in percent: interface sounds (calls, mute) and message notifications. */
-export type SoundPrefs = { ui: number; notify: number; notifyOn: boolean };
+/** Volumes in percent: interface sounds (calls, mute), message notifications and the soundboard. */
+export type SoundPrefs = { ui: number; notify: number; notifyOn: boolean; board: number };
 
 const SOUND_KEY = "app.sound-prefs";
-const SOUND_DEFAULTS: SoundPrefs = { ui: 70, notify: 60, notifyOn: true };
+const SOUND_DEFAULTS: SoundPrefs = { ui: 70, notify: 60, notifyOn: true, board: 60 };
 
 function cleanSound(raw: Partial<SoundPrefs> | null | undefined): SoundPrefs {
   const pct = (v: unknown, d: number) => (Number.isFinite(Number(v)) ? Math.max(0, Math.min(100, Math.round(Number(v)))) : d);
@@ -160,6 +161,7 @@ function cleanSound(raw: Partial<SoundPrefs> | null | undefined): SoundPrefs {
     ui: pct(raw?.ui, SOUND_DEFAULTS.ui),
     notify: pct(raw?.notify, SOUND_DEFAULTS.notify),
     notifyOn: typeof raw?.notifyOn === "boolean" ? raw.notifyOn : SOUND_DEFAULTS.notifyOn,
+    board: pct(raw?.board, SOUND_DEFAULTS.board),
   };
 }
 
@@ -181,6 +183,128 @@ export function setSoundPrefs(patch: Partial<SoundPrefs>): void {
   sound.set(next);
 }
 
+/* -------------------------------------------------------- server profiles */
+
+/**
+ * A name and a picture for one server only, like a server nickname in
+ * Discord. Matrix allows a different name per room: it is written into the
+ * own membership in the server's rooms. The list is kept with the account so
+ * it can be written again after the global profile changes, which resets
+ * every room.
+ */
+export type ServerProfile = { name: string; avatar: string };
+export type ServerProfiles = Record<string, ServerProfile>;
+
+const SERVER_PROFILES_KEY = "app.server-profiles";
+
+function cleanServerProfiles(raw: unknown): ServerProfiles {
+  const out: ServerProfiles = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const [space, v] of Object.entries(raw as Record<string, unknown>)) {
+    const p = v as Partial<ServerProfile> | null;
+    if (!space.startsWith("!") || !p) continue;
+    const name = typeof p.name === "string" ? p.name.trim().slice(0, 64) : "";
+    const avatar = isMxc(p.avatar) ? p.avatar : "";
+    if (name || avatar) out[space] = { name, avatar };
+  }
+  return out;
+}
+
+const serverProfiles = cell<ServerProfiles>(cleanServerProfiles(loadJson<ServerProfiles>(SERVER_PROFILES_KEY, {})));
+
+export function getServerProfiles(): ServerProfiles {
+  return serverProfiles.get();
+}
+
+export const useServerProfiles = serverProfiles.use;
+
+export const onServerProfilesChange = (cb: () => void) => serverProfiles.on(cb);
+
+/** The own name and picture on one server, or null to use the global profile there. */
+export function setServerProfilePref(spaceId: string, profile: ServerProfile | null): void {
+  const next = { ...serverProfiles.get() };
+  if (profile && (profile.name.trim() || profile.avatar)) next[spaceId] = { name: profile.name.trim(), avatar: profile.avatar };
+  else delete next[spaceId];
+  saveJson(SERVER_PROFILES_KEY, next);
+  serverProfiles.set(next);
+}
+
+/* ---------------------------------------------------------------- privacy */
+
+/**
+ * `hideIds`: user ids, homeserver domains and addresses are not shown, for
+ * screenshots. `streamer`: the same plus no notifications and no sounds for
+ * messages, for streaming the screen. Both stay on this computer.
+ */
+export type Privacy = { hideIds: boolean; streamer: boolean };
+
+const PRIVACY_KEY = "app.privacy";
+const PRIVACY_DEFAULT: Privacy = { hideIds: false, streamer: false };
+
+function cleanPrivacy(raw: Partial<Privacy> | null | undefined): Privacy {
+  return { hideIds: raw?.hideIds === true, streamer: raw?.streamer === true };
+}
+
+const privacy = cell<Privacy>(cleanPrivacy(loadJson<Partial<Privacy>>(PRIVACY_KEY, PRIVACY_DEFAULT)));
+
+function applyPrivacy(p: Privacy): void {
+  if (typeof document === "undefined") return;
+  document.documentElement.classList.toggle("streamer", p.streamer);
+  // anything marked "sensitive" (ids, domains, addresses) is hidden by the stylesheet
+  document.documentElement.classList.toggle("hide-ids", p.hideIds || p.streamer);
+}
+applyPrivacy(privacy.get());
+
+export function getPrivacy(): Privacy {
+  return privacy.get();
+}
+
+export const usePrivacy = privacy.use;
+
+export function setPrivacy(patch: Partial<Privacy>): void {
+  const next = cleanPrivacy({ ...privacy.get(), ...patch });
+  saveJson(PRIVACY_KEY, next);
+  privacy.set(next);
+  applyPrivacy(next);
+}
+
+/** Ids and domains are hidden right now: by the setting or by the streamer mode. */
+export function idsHidden(): boolean {
+  const p = privacy.get();
+  return p.hideIds || p.streamer;
+}
+
+/** A hook form of idsHidden: the component redraws when it changes. */
+export function useIdsHidden(): boolean {
+  const p = privacy.use();
+  return p.hideIds || p.streamer;
+}
+
+/* ----------------------------------------------------------- stream player */
+
+/**
+ * The small player of a watched share while another chat is open: whether it
+ * shows at all, and whether it snaps to the nearest corner when let go.
+ */
+export type PlayerPrefs = { mini: boolean; magnet: boolean };
+
+const PLAYER_KEY = "app.player";
+const PLAYER_DEFAULT: PlayerPrefs = { mini: true, magnet: true };
+
+function cleanPlayer(raw: Partial<PlayerPrefs> | null | undefined): PlayerPrefs {
+  return { mini: raw?.mini !== false, magnet: raw?.magnet !== false };
+}
+
+const player = cell<PlayerPrefs>(cleanPlayer(loadJson<Partial<PlayerPrefs>>(PLAYER_KEY, PLAYER_DEFAULT)));
+
+export const usePlayerPrefs = player.use;
+
+export function setPlayerPrefs(patch: Partial<PlayerPrefs>): void {
+  const next = cleanPlayer({ ...player.get(), ...patch });
+  saveJson(PLAYER_KEY, next);
+  player.set(next);
+}
+
 /* ------------------------------------------------------------------- sync */
 
 /* -------------------------------------------------------------- call tile */
@@ -189,10 +313,17 @@ const TILE_KEY = "app.tile";
 const TILE_DEFAULT: TileLook = { mode: "dominant", color: "#5865f2" };
 
 function cleanTile(raw: Partial<TileLook> | null | undefined): TileLook {
-  const mode = raw?.mode === "edge" || raw?.mode === "color" || raw?.mode === "dominant" ? raw.mode : TILE_DEFAULT.mode;
   const color = typeof raw?.color === "string" && /^#[0-9a-f]{6}$/i.test(raw.color) ? raw.color.toLowerCase() : TILE_DEFAULT.color;
-  return { mode, color };
+  // a picture mode without a picture falls back to the avatar color
+  const valid = cleanVoiceTile({ ...raw, color });
+  return valid ?? { mode: TILE_DEFAULT.mode, color, ...(cleanEmoji(raw?.emoji) ? { emoji: cleanEmoji(raw?.emoji) } : {}) };
 }
+
+export function getTileLook(): TileLook {
+  return tile.get();
+}
+
+export const onTileLookChange = (cb: () => void) => tile.on(cb);
 
 const tile = cell<TileLook>(cleanTile(loadJson<Partial<TileLook>>(TILE_KEY, TILE_DEFAULT)));
 // others see the tile background from the first call on
@@ -308,6 +439,7 @@ type Synced = VoicePrefs & {
   tile: TileLook;
   look: ChatLook;
   order: ChannelOrders;
+  serverProfiles: ServerProfiles;
   origin: string;
 };
 
@@ -330,6 +462,7 @@ function collect(origin: string): Synced {
     tile: tile.get(),
     look: look.get(),
     order: orders.get(),
+    serverProfiles: serverProfiles.get(),
     origin,
   };
 }
@@ -351,6 +484,7 @@ function essence(p: Partial<Synced>): string {
     p.tile ?? null,
     p.look ?? null,
     p.order ?? null,
+    p.serverProfiles ?? null,
   ]);
 }
 
@@ -383,6 +517,11 @@ function apply(remote: Partial<Synced>, all: boolean): void {
       const next = cleanOrders(remote.order);
       saveJson(ORDER_KEY, next);
       orders.set(next);
+    }
+    if (remote.serverProfiles && typeof remote.serverProfiles === "object") {
+      const next = cleanServerProfiles(remote.serverProfiles);
+      saveJson(SERVER_PROFILES_KEY, next);
+      serverProfiles.set(next);
     }
     if (remote.look && typeof remote.look === "object") {
       const next = cleanLook(remote.look);
@@ -443,6 +582,7 @@ export function startPrefsSync(c: MatrixClient): void {
     tile.on(schedule),
     look.on(schedule),
     orders.on(schedule),
+    serverProfiles.on(schedule),
   ];
 }
 

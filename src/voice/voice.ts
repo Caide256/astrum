@@ -20,6 +20,7 @@ import {
 import { BRAND } from "../brand.ts";
 import { hasAppAudio, setScreenSource, startScreenAudio } from "../desktop.ts";
 import { t } from "../i18n/index.ts";
+import { isMxc } from "../mxc.ts";
 import {
   blip,
   openMic,
@@ -52,11 +53,36 @@ import {
  */
 
 /**
- * Background of a person's tile in a call when the camera is off: a color
- * taken from the avatar (the most common one, or the one along its edge), or
- * one picked by hand. Sent to others over the data channel.
+ * A person's banner: the top of the profile card and the background of the
+ * tile in a call while the camera is off. A color taken from the avatar (the
+ * most common one, or the one along its edge), one picked by hand, or an own
+ * picture (`image`, an mxc URI); `emoji` scatters up to three emoji over it.
+ * Sent to others in a call over the data channel.
  */
-export type TileLook = { mode: "dominant" | "edge" | "color"; color: string };
+export type TileLook = { mode: "dominant" | "edge" | "color" | "image"; color: string; image?: string; emoji?: string };
+
+/** At most three emoji: the grapheme clusters of the text that are pictures. */
+export function cleanEmoji(raw: unknown): string {
+  if (typeof raw !== "string" || !raw) return "";
+  const seg = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+  return [...seg.segment(raw.slice(0, 64))]
+    .map((s) => s.segment)
+    .filter((g) => /\p{Extended_Pictographic}/u.test(g))
+    .slice(0, 3)
+    .join("");
+}
+
+/** A banner from outside (a packet, a member event, stored settings), or null if it makes no sense. */
+export function cleanTile(raw: unknown): TileLook | null {
+  const v = raw as Partial<TileLook> | null;
+  if (!v || (v.mode !== "dominant" && v.mode !== "edge" && v.mode !== "color" && v.mode !== "image")) return null;
+  const color = typeof v.color === "string" && /^#[0-9a-f]{6}$/i.test(v.color) ? v.color.toLowerCase() : "";
+  const image = isMxc(v.image) ? v.image : "";
+  if (v.mode === "color" && !color) return null;
+  if (v.mode === "image" && !image) return null;
+  const emoji = cleanEmoji(v.emoji);
+  return { mode: v.mode, color, ...(image ? { image } : {}), ...(emoji ? { emoji } : {}) };
+}
 
 /** Something the person should notice: talking while muted, or a microphone that gives nothing. */
 export type VoiceHint = "" | "muted-talk" | "mic-silent";
@@ -332,15 +358,9 @@ type Packet =
   | { t: "watch"; on: boolean }
   | { t: "kick" }
   /** A viewer cannot decode the share: the sharer should switch to VP8. */
-  | { t: "codec"; want: "vp8" };
-
-function cleanTile(raw: unknown): TileLook | null {
-  const v = raw as Partial<TileLook> | null;
-  if (!v || (v.mode !== "dominant" && v.mode !== "edge" && v.mode !== "color")) return null;
-  const color = typeof v.color === "string" && /^#[0-9a-f]{6}$/i.test(v.color) ? v.color : "";
-  if (v.mode === "color" && !color) return null;
-  return { mode: v.mode, color };
-}
+  | { t: "codec"; want: "vp8" }
+  /** A soundboard sound: everyone in the call plays the file. */
+  | { t: "sound"; url: string };
 
 /** How long a watched share may deliver nothing decodable before the viewer asks for VP8. */
 const DECODE_STALL_MS = 7000;
@@ -472,6 +492,9 @@ export class VoiceClient {
   /** Talking while muted was heard until then. */
   private mutedTalkUntil = 0;
   private silentFor = 0;
+  /** The microphone gave some sound since joining. */
+  private heard = false;
+  private dismissedHints = new Set<VoiceHint>();
   private hintTimer = 0;
   /** Connection measurements and the counters they are computed from. */
   private net: NetSample[] = [];
@@ -881,7 +904,7 @@ export class VoiceClient {
 
     const signature =
       members
-        .map((m) => `${m.id}${+m.speaking}${+m.muted}${+m.deafened}${+m.camera}${+m.screen}${m.volume}${+m.localMuted}${m.tile?.mode ?? ""}${m.tile?.color ?? ""}`)
+        .map((m) => `${m.id}${+m.speaking}${+m.muted}${+m.deafened}${+m.camera}${+m.screen}${m.volume}${+m.localMuted}${m.tile?.mode ?? ""}${m.tile?.color ?? ""}${m.tile?.image ?? ""}${m.tile?.emoji ?? ""}`)
         .join("|") +
       "//" +
       videos.map((v) => v.key).join("|") +
@@ -1074,6 +1097,20 @@ export class VoiceClient {
     this.send({ t: "state", deaf: this.state.deafened, ...(this.ownTile ? { tile: this.ownTile } : {}) }, to);
   }
 
+  /** Set by the app: plays a soundboard sound someone in the call sent. */
+  onBoardSound: ((url: string, from: string) => void) | null = null;
+  private boardLast = new Map<string, number>();
+
+  /** Play a soundboard sound for everyone in the call, the own speakers included. */
+  sendBoardSound(url: string): void {
+    if (!this.state.connected) return;
+    const now = performance.now();
+    if (now - (this.boardLast.get("") ?? 0) < 700) return;
+    this.boardLast.set("", now);
+    this.send({ t: "sound", url });
+    this.onBoardSound?.(url, "");
+  }
+
   /** The own tile background: shown to others in calls. */
   setTile(look: TileLook | null): void {
     this.ownTile = look;
@@ -1106,6 +1143,12 @@ export class VoiceClient {
       // a viewer's decoder cannot show the GPU stream: everyone gets VP8 instead
       const track = this.screenTrack;
       if (track && this.shareCodecNow === "h264" && this.state.settings.shareCodec === "auto") void this.moveToVp8(track);
+    } else if (packet.t === "sound") {
+      // a sound per person every 700 ms at most: a stuck key must not flood the call
+      const now = performance.now();
+      if (!isMxc(packet.url) || now - (this.boardLast.get(from.identity) ?? 0) < 700) return;
+      this.boardLast.set(from.identity, now);
+      this.onBoardSound?.(packet.url, from.identity);
     } else if (packet.t === "kick") {
       // the sender's identity is signed by the JWT service; its role is checked in the room
       const userId = matrixUserFromIdentity(from.identity);
@@ -1127,13 +1170,26 @@ export class VoiceClient {
     if (s.connected) {
       if (tick) {
         const raw = this.mic?.rawDb() ?? -200;
+        // Any sound at all since joining means the device works. Virtual
+        // microphones with their own noise gate give pure silence between
+        // phrases, and that is not a broken microphone.
+        if (raw >= -110) this.heard = true;
         this.silentFor = !s.muted && raw < -110 ? this.silentFor + 1 : 0;
       }
       if (!this.micTrack && !s.connecting) hint = "mic-silent";
-      else if (this.silentFor >= 8) hint = "mic-silent";
+      else if (!this.heard && this.silentFor >= 8) hint = "mic-silent";
       else if (s.muted && !s.deafened && this.mutedTalkUntil > performance.now()) hint = "muted-talk";
     }
+    if (hint && this.dismissedHints.has(hint)) hint = "";
     if (hint !== s.hint) this.patch({ hint });
+  }
+
+  /** The person closed the hint: it does not come back until the next call. */
+  dismissHint(): void {
+    const hint = this.state.hint;
+    if (!hint) return;
+    this.dismissedHints.add(hint);
+    this.patch({ hint: "" });
   }
 
   /* ------------------------------------------------------------ network stats */
@@ -2018,6 +2074,8 @@ export class VoiceClient {
     this.inBytes.clear();
     this.silentFor = 0;
     this.mutedTalkUntil = 0;
+    this.heard = false;
+    this.dismissedHints.clear();
     this.viewers.clear();
     await this.stopScreenAudio();
     await this.closeMic();

@@ -507,6 +507,35 @@ export function toHtml(blocks: Block[], resolve?: MentionResolver): string {
   return blocks.map((b) => blockHtml(b, resolve)).join("");
 }
 
+/**
+ * Mentions of a group instead of a person. "@everyone" and Matrix's own
+ * "@room" ping the whole room; "@here" pings the people online right now.
+ */
+export const GROUP_MENTIONS = ["@everyone", "@here", "@room"] as const;
+
+/** Group mentions written in the text, outside code. */
+export function groupMentions(blocks: Block[]): Set<string> {
+  const out = new Set<string>();
+  const inl = (nodes: Inline[]) => {
+    for (const n of nodes) {
+      if (n.t === "mention") {
+        const id = n.id.toLowerCase();
+        if ((GROUP_MENTIONS as readonly string[]).includes(id)) out.add(id);
+      } else if ("c" in n) inl(n.c);
+    }
+  };
+  const walk = (list: Block[]) => {
+    for (const b of list) {
+      if (b.t === "p" || b.t === "h") inl(b.c);
+      else if (b.t === "quote") walk(b.c);
+      else if (b.t === "list") b.items.forEach((it) => (inl(it.c), walk(it.sub)));
+      else if (b.t === "table") [...b.head, ...b.rows.flat()].forEach(inl);
+    }
+  };
+  walk(blocks);
+  return out;
+}
+
 /** Every @mention of the text that means a real person, as user ids. */
 export function mentionedUsers(blocks: Block[], resolve?: MentionResolver): string[] {
   const out = new Set<string>();

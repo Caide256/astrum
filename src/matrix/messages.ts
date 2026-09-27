@@ -1,4 +1,4 @@
-import type { MatrixClient, MatrixEvent, Room } from "matrix-js-sdk";
+import { Direction, EventTimeline, type MatrixClient, type MatrixEvent, type Room } from "matrix-js-sdk";
 
 import { BRAND } from "../brand.ts";
 import { formatted, mentionedUsers, parse, type MentionResolver } from "../markdown.ts";
@@ -100,10 +100,13 @@ export function mayRedact(room: Room, ev: MatrixEvent, me: string): boolean {
  * push rules notify exactly these people; a reply also pings its author, as
  * in Discord.
  */
-function mentionsOf(body: string, resolve: MentionResolver | undefined, also: string[] = []): { user_ids: string[] } {
-  const ids = new Set([...mentionedUsers(parse(body), resolve), ...also.filter(Boolean)]);
-  return { user_ids: [...ids] };
+function mentionsOf(body: string, resolve: MentionResolver | undefined, also: string[] = [], group?: GroupPing): { user_ids: string[]; room?: boolean } {
+  const ids = new Set([...mentionedUsers(parse(body), resolve), ...also.filter(Boolean), ...(group?.users ?? [])]);
+  return group?.room ? { user_ids: [...ids], room: true } : { user_ids: [...ids] };
 }
+
+/** Who a group mention pings: the whole room (m.mentions.room), or a list of people for "@here". */
+export type GroupPing = { room: boolean; users: string[] };
 
 export async function sendText(
   client: MatrixClient,
@@ -112,11 +115,12 @@ export async function sendText(
   reply: Reply | null,
   resolve?: MentionResolver,
   extra: Record<string, unknown> = {},
+  group?: GroupPing,
 ): Promise<void> {
   const body = text.trim();
   if (!body) return;
   const me = client.getUserId() ?? "";
-  const pinged = mentionsOf(body, resolve, reply && reply.sender !== me ? [reply.sender] : []);
+  const pinged = mentionsOf(body, resolve, reply && reply.sender !== me ? [reply.sender] : [], group);
   pinged.user_ids = pinged.user_ids.filter((u) => u !== me);
 
   if (!reply) {
@@ -178,12 +182,19 @@ export async function editText(
  * stand as an @mention of the same person are left alone.
  */
 export function mentionsFromHtml(body: string, content: Record<string, any>, resolve: MentionResolver): string {
-  const html = typeof content.formatted_body === "string" ? content.formatted_body : "";
+  const html = typeof content.formatted_body === "string" ? content.formatted_body.slice(0, 20_000) : "";
   if (!html.includes("matrix.to/#/@")) return body;
   let out = body;
+  let seen = 0;
   const pills = html.matchAll(/<a\s+href="https:\/\/matrix\.to\/#\/(@[^"?/]+)[^"]*"[^>]*>([\s\S]*?)<\/a>/gi);
   for (const [, rawId, rawLabel] of pills) {
-    const userId = decodeURIComponent(rawId);
+    if ((seen += 1) > 50) break;
+    let userId = "";
+    try {
+      userId = decodeURIComponent(rawId);
+    } catch {
+      continue;
+    }
     const label = rawLabel
       .replace(/<[^>]+>/g, "")
       .replace(/&lt;/g, "<")
@@ -305,6 +316,68 @@ export async function sendCheck(client: MatrixClient, roomId: string, eventId: s
 /* ----------------------------------------------------------------- search */
 
 export type Hit = { eventId: string; sender: string; body: string; ts: number };
+
+/** Lower case, and "ё" as "е": people type both. */
+function fold(text: string): string {
+  return text.toLowerCase().replace(/ё/g, "е");
+}
+
+/** Every word of the query is somewhere in the text, as a piece of a word too: "добав" finds "добавить". */
+export function matchesQuery(text: string, query: string): boolean {
+  const hay = fold(text);
+  return fold(query)
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((w) => hay.includes(w));
+}
+
+/** A hit from a message event, its latest edit taken into account; null if it does not match. */
+function hitOf(ev: MatrixEvent, query: string): Hit | null {
+  if (ev.getType() !== "m.room.message" || ev.isRedacted() || ev.isRelation("m.annotation")) return null;
+  const raw = ev.getContent();
+  // an edit found on its own stands for the message it edits
+  const rel = raw["m.relates_to"] as { rel_type?: string; event_id?: string } | undefined;
+  const target = rel?.rel_type === "m.replace" && typeof rel.event_id === "string" ? rel.event_id : "";
+  const edit = !!target;
+  const content = edit ? ((raw["m.new_content"] as Record<string, any>) ?? raw) : currentContent(ev).content;
+  const body = stripReplyFallback(String(content.body ?? ""));
+  if (!body || !matchesQuery(body, query)) return null;
+  return { eventId: target || (ev.getId() ?? ""), sender: ev.getSender() ?? "", body, ts: ev.getTs() };
+}
+
+/** Search in what the app already holds: works in encrypted rooms, where the server sees nothing. */
+export function searchLoaded(room: Room, query: string): Hit[] {
+  const out: Hit[] = [];
+  const events = room.getLiveTimeline().getEvents();
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const hit = hitOf(events[i], query);
+    if (hit && hit.eventId) out.push(hit);
+  }
+  return out;
+}
+
+/**
+ * Search further back than the loaded timeline without touching it: pages of
+ * older history are fetched and read here, encrypted ones decrypted, and
+ * dropped afterwards.
+ */
+export async function searchOlder(client: MatrixClient, room: Room, query: string, pages: number): Promise<Hit[]> {
+  const out: Hit[] = [];
+  const map = client.getEventMapper();
+  let from = room.getLiveTimeline().getPaginationToken(EventTimeline.BACKWARDS);
+  for (let i = 0; i < pages && from; i += 1) {
+    const res = await client.createMessagesRequest(room.roomId, from, 100, Direction.Backward);
+    for (const raw of res.chunk ?? []) {
+      const ev = map(raw);
+      if (ev.isEncrypted()) await client.decryptEventIfNeeded(ev).catch(() => undefined);
+      const hit = hitOf(ev, query);
+      if (hit && hit.eventId) out.push(hit);
+    }
+    if (!res.chunk?.length || !res.end || res.end === from) break;
+    from = res.end;
+  }
+  return out;
+}
 
 /** Server-side search: finds messages not loaded into the timeline yet. */
 export async function search(client: MatrixClient, roomId: string, term: string): Promise<Hit[]> {

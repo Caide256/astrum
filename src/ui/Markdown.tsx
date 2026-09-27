@@ -2,7 +2,8 @@ import { useMemo, useState, type ReactNode } from "react";
 
 import { copyToClipboard } from "../desktop.ts";
 import { t } from "../i18n/index.ts";
-import { parse, parseInline, type Block, type Inline, type Item, type MentionResolver } from "../markdown.ts";
+import { GROUP_MENTIONS, parse, parseInline, type Block, type Inline, type Item, type MentionResolver } from "../markdown.ts";
+import { idsHidden } from "../prefs.ts";
 import { IconCheck, IconCopy } from "./icons.tsx";
 
 /**
@@ -71,13 +72,20 @@ function inline(nodes: Inline[], key = "", mv?: MentionView): ReactNode[] {
     const k = `${key}${i}`;
     switch (n.t) {
       case "mention": {
+        if ((GROUP_MENTIONS as readonly string[]).includes(n.id.toLowerCase())) {
+          return (
+            <span key={k} className="mention group">
+              {n.id}
+            </span>
+          );
+        }
         const who = mv?.resolve(n.id);
         if (!who) return n.id;
         return (
           <span
             key={k}
             className={`mention ${who.userId === mv?.me ? "me" : ""}`}
-            title={who.userId}
+            title={idsHidden() ? undefined : who.userId}
             onClick={(e) => {
               e.stopPropagation();
               mv?.open(who.userId);

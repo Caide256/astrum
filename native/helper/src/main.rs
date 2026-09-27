@@ -6,9 +6,11 @@
 //!   native-helper window <hwnd>   capture only the program that owns the window
 //!   native-helper keys            global key bindings, see keys.rs
 //!   native-helper press <vk,...>  press and release keys (self-test aid)
+//!   native-helper moonlight ...   watch a Moonlight (Sunshine) stream, see moonlight/mod.rs
 
 mod audio;
 mod keys;
+mod moonlight;
 
 use std::process::ExitCode;
 
@@ -30,7 +32,8 @@ fn main() -> ExitCode {
         },
         "keys" => keys::run(),
         "press" if !arg.is_empty() => keys::press_keys(arg),
-        _ => Err("usage: native-helper exclude|include <pid> | window <hwnd> | keys | press <vk,...>".into()),
+        "moonlight" => moonlight::run(&args[2..]),
+        _ => Err("usage: native-helper exclude|include <pid> | window <hwnd> | keys | press <vk,...> | moonlight ...".into()),
     };
 
     match result {

@@ -25,7 +25,27 @@ contextBridge.exposeInMainWorld("desktop", {
   showWindow: () => ipcRenderer.invoke("app:show"),
   flashWindow: () => ipcRenderer.invoke("app:flash"),
   copyText: (text) => ipcRenderer.invoke("app:copy", text),
+  copyImage: (png) => ipcRenderer.invoke("app:copy-image", png),
+  sealSecret: (text) => ipcRenderer.invoke("app:secret-seal", text),
+  openSecret: (sealed) => ipcRenderer.invoke("app:secret-open", sealed),
   linkPreview: (url) => ipcRenderer.invoke("app:link-preview", url),
+
+  mlInfo: (host) => ipcRenderer.invoke("app:ml-info", host),
+  mlPair: (host, pin) => ipcRenderer.invoke("app:ml-pair", host, pin),
+  mlApps: (host) => ipcRenderer.invoke("app:ml-apps", host),
+  mlQuit: (host) => ipcRenderer.invoke("app:ml-quit", host),
+  mlStart: (opts) => ipcRenderer.invoke("app:ml-start", opts),
+  mlStop: () => ipcRenderer.invoke("app:ml-stop"),
+  mlIdr: () => ipcRenderer.invoke("app:ml-idr"),
+  onMlEvent: (cb) => listen("app:ml-event", cb),
+  onMlFrame: (cb) => {
+    const handler = (_e, chunk) => {
+      const copy = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+      cb(copy);
+    };
+    ipcRenderer.on("app:ml-frame", handler);
+    return () => ipcRenderer.removeListener("app:ml-frame", handler);
+  },
 
   windowAction: (action) => ipcRenderer.invoke("app:window", action),
   onWindowState: (cb) => listen("app:window-state", cb),

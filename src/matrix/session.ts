@@ -1,6 +1,7 @@
 import { AutoDiscovery, ClientEvent, SyncState, createClient, type MatrixClient } from "matrix-js-sdk";
 
 import { BRAND } from "../brand.ts";
+import { canSeal, openSecret, sealSecret } from "../desktop.ts";
 import { t } from "../i18n/index.ts";
 import { cryptoCallbacks, dropCryptoStore, startCrypto } from "./crypto.ts";
 
@@ -19,12 +20,18 @@ export type Session = {
   deviceId: string;
 };
 
+/**
+ * The sign-in. In the desktop app it is sealed by the operating system
+ * (DPAPI on Windows) and only the sealed text is stored; a page in a plain
+ * browser keeps it as is. A session stored in the open by an older version is
+ * sealed on the next start.
+ */
 const KEY = "app.session";
+const SEALED_KEY = "app.session.sealed";
 
-export function loadSession(): Session | null {
+function parse(raw: string | null): Session | null {
+  if (!raw) return null;
   try {
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return null;
     const s = JSON.parse(raw) as Session;
     return s.homeserver && s.accessToken && s.userId ? s : null;
   } catch {
@@ -32,20 +39,47 @@ export function loadSession(): Session | null {
   }
 }
 
-export function saveSession(s: Session): void {
+function read(key: string): string | null {
   try {
-    localStorage.setItem(KEY, JSON.stringify(s));
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function write(key: string, value: string | null): void {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
   } catch {
     // storage unavailable
   }
 }
 
-export function clearSession(): void {
-  try {
-    localStorage.removeItem(KEY);
-  } catch {
-    // storage unavailable
+export async function loadSession(): Promise<Session | null> {
+  const sealed = read(SEALED_KEY);
+  if (sealed) return parse(await openSecret(sealed));
+  const plain = parse(read(KEY));
+  // an older version left it in the open: seal it now
+  if (plain && canSeal) await saveSession(plain);
+  return plain;
+}
+
+export async function saveSession(s: Session): Promise<void> {
+  const json = JSON.stringify(s);
+  const sealed = canSeal ? await sealSecret(json) : null;
+  if (sealed) {
+    write(SEALED_KEY, sealed);
+    write(KEY, null);
+  } else {
+    write(KEY, json);
+    write(SEALED_KEY, null);
   }
+}
+
+export function clearSession(): void {
+  write(KEY, null);
+  write(SEALED_KEY, null);
 }
 
 /** Base URL from "example.org", "@user:example.org" or "https://matrix.example.org". */

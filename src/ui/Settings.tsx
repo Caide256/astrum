@@ -8,7 +8,6 @@ import {
   changePassword,
   copyText,
   deleteAccount,
-  muteLabel,
   doLogout,
   encryptionStatus,
   endSession,
@@ -16,6 +15,7 @@ import {
   renameSession,
   saveMyAvatar,
   saveMyName,
+  uploadBanner,
   sessions,
   startVerification,
   verifyWithRecoveryKey,
@@ -43,18 +43,20 @@ import { LANGS, fmtDateTime, setLang, t, useLang, type Key, type Lang } from "..
 import type { CryptoStatus } from "../matrix/crypto.ts";
 import type { SessionRow } from "../matrix/people.ts";
 import {
-  setMuted,
   setNotifyMode,
+  setPlayerPrefs,
+  setPrivacy,
   setSoundPrefs,
   setChatLook,
   setTileLook,
+  getTileLook,
   useChatLook,
+  usePlayerPrefs,
+  usePrivacy,
   useTileLook,
   type ChatLook,
-  useMutes,
   useNotifyMode,
   useSoundPrefs,
-  type Mutes,
   type NotifyMode,
 } from "../prefs.ts";
 import { useStore } from "../store.ts";
@@ -89,11 +91,13 @@ import {
   type MicTest,
 } from "../voice/audio.ts";
 import { CAMERA_FPS, CAMERA_HEIGHTS, voice, type DeviceInfo, type InputMode, type Limiter, type TileLook } from "../voice/voice.ts";
-import { useAvatarColor } from "../avatarColor.ts";
 import { Avatar } from "./Avatar.tsx";
+import { Banner, splitEmoji } from "./Banner.tsx";
+import { EmojiPicker } from "./EmojiPicker.tsx";
 import { Cropper } from "./Cropper.tsx";
+import { MoonlightTab } from "./Moonlight.tsx";
 import { PasswordInput, Toggle, useEscape, useLinger } from "./controls.tsx";
-import { IconBellOff, IconLogout, IconPalette, IconPlus, IconRefresh, IconTrash } from "./icons.tsx";
+import { IconLogout, IconPalette, IconPlus, IconRefresh, IconSmile, IconTrash } from "./icons.tsx";
 
 type MeterSource = { get: () => MicState; on: (cb: (s: MicState) => void) => () => void };
 
@@ -210,35 +214,102 @@ function Seg<T extends string>({ value, list, onPick, className = "" }: { value:
   );
 }
 
-/* ---------------------------------------------------------------- call tile */
+/* ------------------------------------------------------------------- banner */
 
 const TILE_MODES: { id: TileLook["mode"]; name: Key }[] = [
   { id: "dominant", name: "tile.dominant" },
   { id: "edge", name: "tile.edge" },
   { id: "color", name: "tile.color" },
+  { id: "image", name: "tile.image" },
 ];
 
-/** The own tile background in calls: from the avatar, or a color picked by hand, with a live preview. */
-function TileSection({ avatar, name }: { avatar: string; name: string }) {
+/**
+ * The own banner: the top of the profile card and the background of the tile
+ * in calls. A color from the avatar, an own color or picture, and up to three
+ * emoji over it, with a live preview.
+ */
+function BannerSection({ avatar, name }: { avatar: string; name: string }) {
   const look = useTileLook();
-  const auto = useAvatarColor(look.mode === "color" ? "" : avatar, look.mode === "color" ? null : look.mode);
-  const bg = look.mode === "color" ? look.color : auto || "var(--tile-bg)";
+  const [pickAt, setPickAt] = useState<{ left: number; top: number } | null>(null);
+  const file = useRef<HTMLInputElement>(null);
+  const emoji = splitEmoji(look.emoji ?? "");
+
+  const upload = async (f: File) => {
+    const mxc = await uploadBanner(f);
+    if (mxc) setTileLook({ mode: "image", image: mxc });
+  };
+
   return (
     <>
       <div className="section-title">{t("tile.title")}</div>
-      <div className="tile-pref">
-        <div className="tile-preview" style={{ background: bg }}>
-          <Avatar mxc={avatar} name={name || "?"} size={54} />
-        </div>
-        <div className="tile-pref-controls">
-          <Seg value={look.mode} list={TILE_MODES} onPick={(mode) => setTileLook({ mode })} />
-          {look.mode === "color" ? (
-            <ColorInput label={t("tile.pick")} value={look.color} onChange={(color) => setTileLook({ color })} />
-          ) : (
-            <span className="state">{avatar ? t("tile.autoHint") : t("tile.noAvatar")}</span>
+      <div className="banner-pref">
+        <Banner look={look} avatar={avatar} className="banner-preview">
+          <div className="banner-preview-who">
+            <Avatar mxc={avatar} name={name || "?"} size={54} />
+            <b className="ellipsis">{name}</b>
+          </div>
+        </Banner>
+        <div className="banner-controls">
+          <Seg
+            value={look.mode}
+            list={TILE_MODES}
+            onPick={(mode) => (mode === "image" && !look.image ? file.current?.click() : setTileLook({ mode }))}
+          />
+          {look.mode === "color" && <ColorInput label={t("tile.pick")} value={look.color} onChange={(color) => setTileLook({ color })} />}
+          {look.mode === "image" && (
+            <div className="row left">
+              <button className="ghost small" onClick={() => file.current?.click()}>
+                {t("tile.imageChange")}
+              </button>
+            </div>
           )}
+          {(look.mode === "dominant" || look.mode === "edge") && <span className="state">{avatar ? t("tile.autoHint") : t("tile.noAvatar")}</span>}
+          <div className="banner-emoji">
+            <span className="state">{t("tile.emoji")}</span>
+            {emoji.map((e, i) => (
+              <button
+                key={`${e}${i}`}
+                className="ghost small emoji-chip"
+                title={t("tile.emojiRemove")}
+                onClick={() => setTileLook({ emoji: emoji.filter((_, j) => j !== i).join("") })}
+              >
+                {e}
+              </button>
+            ))}
+            {emoji.length < 3 && (
+              <button
+                className="ghost small"
+                onClick={(ev) => {
+                  const r = ev.currentTarget.getBoundingClientRect();
+                  setPickAt({ left: Math.max(8, Math.min(window.innerWidth - 360, r.left)), top: Math.max(8, Math.min(window.innerHeight - 400, r.bottom + 6)) });
+                }}
+              >
+                <IconSmile /> {t("tile.emojiAdd")}
+              </button>
+            )}
+          </div>
         </div>
       </div>
+      <span className="state">{t("tile.hint")}</span>
+      <input
+        ref={file}
+        type="file"
+        accept="image/*"
+        hidden
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          e.target.value = "";
+          if (f) void upload(f);
+        }}
+      />
+      {pickAt && (
+        <EmojiPicker
+          className="floating"
+          style={{ left: pickAt.left, top: pickAt.top }}
+          onPick={(e) => setTileLook({ emoji: (getTileLook().emoji ?? "") + e })}
+          onClose={() => setPickAt(null)}
+        />
+      )}
     </>
   );
 }
@@ -303,7 +374,9 @@ function ProfileTab() {
         <Avatar mxc={myAvatar} name={myName || "?"} size={72} />
         <div className="profile-id">
           <b className="ellipsis">{myName}</b>
-          <div className="state ellipsis">{sess?.userId}</div>
+          <div className="state ellipsis sensitive" title={t("profile.idFixed")}>
+            {sess?.userId}
+          </div>
           <div className="row left tight-top">
             <button className="ghost small" onClick={() => file.current?.click()}>
               {t("profile.changePicture")}
@@ -348,9 +421,10 @@ function ProfileTab() {
           </button>
         </div>
         <span className="state">{t("profile.nameHint")}</span>
+        <span className="state">{t("profile.idFixed")}</span>
       </div>
 
-      <TileSection avatar={myAvatar} name={myName} />
+      <BannerSection avatar={myAvatar} name={myName} />
 
       <div className="section-title">{t("profile.password")}</div>
       <div className="field">
@@ -1057,12 +1131,38 @@ const DENSITIES: { id: ChatLook["density"]; name: Key }[] = [
   { id: "compact", name: "look.density.compact" },
 ];
 
+/** A few made-up messages drawn with the real message styles: every change shows at once. */
+function LookPreview() {
+  const rows = [
+    { own: false, name: "x9#Kq2·f", text: t("look.preview.one"), time: "18:02" },
+    { own: true, name: "Zr4$vL·0", text: t("look.preview.two"), time: "18:03" },
+    { own: false, name: "x9#Kq2·f", text: t("look.preview.three"), time: "18:04" },
+  ];
+  return (
+    <div className="timeline look-preview" aria-hidden>
+      {rows.map((r, i) => (
+        <div key={i} className={`msg ${r.own ? "own" : ""}`}>
+          <Avatar name={r.name} size={34} />
+          <div className="msg-body">
+            <div>
+              <span className="who cipher">{r.name}</span>
+              <span className="when">{r.time}</span>
+            </div>
+            <div className="body">{r.text}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** Message layout: kept apart from themes, a theme file never changes it. */
 function MessagesLook() {
   const look = useChatLook();
   return (
     <>
       <div className="section-title">{t("look.title")}</div>
+      <LookPreview />
       <div className="field">
         <label>{t("look.align")}</label>
         <Seg value={look.align} list={ALIGNS} onPick={(align) => setChatLook({ align })} />
@@ -1082,6 +1182,8 @@ function MessagesLook() {
 function AppearanceTab() {
   const theme = useTheme();
   const lang = useLang();
+  const player = usePlayerPrefs();
+  const priv = usePrivacy();
   const own = listOwnThemes();
   const [adding, setAdding] = useState(false);
 
@@ -1122,6 +1224,20 @@ function AppearanceTab() {
 
       <MessagesLook />
 
+      <div className="section-title">{t("player.title")}</div>
+      <Toggle checked={player.mini} onChange={(mini) => setPlayerPrefs({ mini })} title={t("player.mini")} hint={t("player.mini.hint")} />
+      <Toggle
+        checked={player.magnet}
+        disabled={!player.mini}
+        onChange={(magnet) => setPlayerPrefs({ magnet })}
+        title={t("player.magnet")}
+        hint={t("player.magnet.hint")}
+      />
+
+      <div className="section-title">{t("privacy.title")}</div>
+      <Toggle checked={priv.hideIds} onChange={(hideIds) => setPrivacy({ hideIds })} title={t("privacy.hideIds")} hint={t("privacy.hideIds.hint")} />
+      {priv.streamer && !priv.hideIds && <div className="note">{t("privacy.byStreamer")}</div>}
+
       <div className="section-title">{t("settings.language")}</div>
       <div className="field narrow">
         <select value={lang} onChange={(e) => setLang(e.target.value as Lang)}>
@@ -1144,38 +1260,6 @@ const NOTIFY_MODES: { id: NotifyMode; name: Key }[] = [
   { id: "mentions", name: "app.notify.mentions" },
   { id: "off", name: "app.notify.off" },
 ];
-
-const MUTE_KINDS: { kind: keyof Mutes; name: Key }[] = [
-  { kind: "servers", name: "mutes.servers" },
-  { kind: "rooms", name: "mutes.rooms" },
-  { kind: "users", name: "mutes.users" },
-];
-
-function MutedList() {
-  const mutes = useMutes();
-  const total = mutes.rooms.length + mutes.servers.length + mutes.users.length;
-  if (!total) return <span className="state">{t("mutes.none")}</span>;
-  return (
-    <div className="muted-list">
-      {MUTE_KINDS.map(({ kind, name }) =>
-        mutes[kind].length ? (
-          <div key={kind}>
-            <div className="state">{t(name)}</div>
-            {mutes[kind].map((id) => (
-              <div key={id} className="muted-row">
-                <IconBellOff />
-                <span className="grow ellipsis">{muteLabel(kind, id)}</span>
-                <button className="ghost small" onClick={() => setMuted(kind, id, false)}>
-                  {t("mutes.unmute")}
-                </button>
-              </div>
-            ))}
-          </div>
-        ) : null,
-      )}
-    </div>
-  );
-}
 
 function UpdatesSection() {
   const { update } = useUpdate();
@@ -1224,6 +1308,7 @@ function UpdatesSection() {
 function AppTab() {
   const [shell, setShell] = useState<ShellSettings | null>(null);
   const notify = useNotifyMode();
+  const status = useStore(app, (s) => s.statusMode);
   const sounds = useSoundPrefs();
   const spk = useSyncExternalStore(voice.subscribe, voice.getState, voice.getState).settings.spkId;
 
@@ -1240,32 +1325,8 @@ function AppTab() {
 
   return (
     <>
-      <div className="section-title">{t("app.notifications")}</div>
-      <Seg value={notify} list={NOTIFY_MODES} onPick={setNotifyMode} />
-      <span className="state">{t("app.notify.hint")}</span>
-
-      <Toggle
-        checked={sounds.notifyOn}
-        onChange={(on) => setSoundPrefs({ notifyOn: on })}
-        title={t("app.notifySound")}
-        hint={t("app.notifySound.hint")}
-      />
-      <div className="row left volume-row">
-        <Volume label={t("app.notifyVolume")} value={sounds.notify} disabled={!sounds.notifyOn} onChange={(v) => setSoundPrefs({ notify: v })} />
-        <button className="ghost small" disabled={!sounds.notifyOn} onClick={() => blip("message", spk)}>
-          {t("app.notifyTry")}
-        </button>
-        <button className="ghost small" disabled={!sounds.notifyOn} onClick={() => blip("mention", spk)}>
-          {t("app.mentionTry")}
-        </button>
-      </div>
-
-      <div className="section-title">{t("mutes.title")}</div>
-      <span className="state">{t("mutes.hint")}</span>
-      <MutedList />
-
-      {!hasShell && <div className="note gap-top">{t("app.onlyDesktop")}</div>}
-      {hasShell && !shell && <div className="state gap-top">{t("common.loading")}</div>}
+      {!hasShell && <div className="note">{t("app.onlyDesktop")}</div>}
+      {hasShell && !shell && <div className="state">{t("common.loading")}</div>}
       {shell && (
         <>
           <div className="section-title">{t("app.window")}</div>
@@ -1287,6 +1348,28 @@ function AppTab() {
           {shell.autostart && <div className="note gap-top">{t("app.autostart.portable")}</div>}
         </>
       )}
+
+      <div className="section-title">{t("app.notifications")}</div>
+      <div className="field">
+        <Seg value={notify} list={NOTIFY_MODES} onPick={setNotifyMode} />
+        <span className="state">{t("app.notify.hint")}</span>
+      </div>
+      {(status === "dnd" || status === "streamer") && <div className="note">{t("app.notify.quiet")}</div>}
+      <Toggle
+        checked={sounds.notifyOn}
+        onChange={(on) => setSoundPrefs({ notifyOn: on })}
+        title={t("app.notifySound")}
+        hint={t("app.notifySound.hint")}
+      />
+      <div className="row left volume-row">
+        <Volume label={t("app.notifyVolume")} value={sounds.notify} disabled={!sounds.notifyOn} onChange={(v) => setSoundPrefs({ notify: v })} />
+        <button className="ghost small" disabled={!sounds.notifyOn} onClick={() => blip("message", spk)}>
+          {t("app.notifyTry")}
+        </button>
+        <button className="ghost small" disabled={!sounds.notifyOn} onClick={() => blip("mention", spk)}>
+          {t("app.mentionTry")}
+        </button>
+      </div>
 
       <UpdatesSection />
     </>
@@ -1634,7 +1717,7 @@ function SessionsTab() {
               </b>
               <div className="state">
                 {r.deviceId}
-                {r.ip ? ` · ${r.ip}` : ""}
+                {r.ip && <span className="sensitive"> · {r.ip}</span>}
                 {r.seen ? ` · ${fmtDateTime(r.seen)}` : ""}
               </div>
               {asking === r.deviceId && (
@@ -1703,6 +1786,7 @@ const TABS: { id: SettingsTab; name: Key }[] = [
   { id: "keys", name: "settings.tab.keys" },
   { id: "appearance", name: "settings.tab.appearance" },
   { id: "app", name: "settings.tab.app" },
+  { id: "moonlight", name: "settings.tab.moonlight" },
   { id: "crypto", name: "settings.tab.crypto" },
   { id: "sessions", name: "settings.tab.sessions" },
 ];
@@ -1735,11 +1819,13 @@ export function Settings() {
 
         <div className="settings-body">
           <div className="tab-pane" key={tab}>
+            <h3 className="pane-title">{t(TABS.find((tb) => tb.id === tab)?.name ?? "settings.title")}</h3>
             {tab === "profile" && <ProfileTab />}
             {tab === "audio" && <AudioTab />}
             {tab === "keys" && <KeysTab />}
             {tab === "appearance" && <AppearanceTab />}
             {tab === "app" && <AppTab />}
+            {tab === "moonlight" && <MoonlightTab />}
             {tab === "crypto" && <CryptoTab />}
             {tab === "sessions" && <SessionsTab />}
             {error && tab === "audio" && <div className="error">{error}</div>}

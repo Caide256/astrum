@@ -4,7 +4,9 @@ const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const brand = require("../brand.json");
+const guard = require("./guard.cjs");
 const preview = require("./preview.cjs");
+const { publicFetch } = require("./publicfetch.cjs");
 const tray = require("./tray.cjs");
 const updater = require("./updater.cjs");
 
@@ -16,7 +18,7 @@ const updater = require("./updater.cjs");
  * explicitly: Electron's Chromium denies them by default.
  */
 
-const DEV_URL = process.env.APP_DEV_URL || "";
+const DEV_URL = guard.DEV_URL;
 const ICON = path.join(__dirname, "..", brand.logo);
 // Windows and Linux get the app's own title bar; macOS keeps its traffic lights
 const OWN_FRAME = process.platform !== "darwin";
@@ -44,19 +46,37 @@ function showWindow() {
   win.focus();
 }
 
-// microphone and camera, notifications, element full screen for shares, and copying to the clipboard
-const ALLOWED = new Set(["media", "notifications", "fullscreen", "clipboard-sanitized-write"]);
+// microphone and camera, notifications and copying to the clipboard: for the app's own page only
+const APP_ONLY = new Set(["media", "notifications", "clipboard-sanitized-write"]);
 
+/**
+ * Permissions. Element full screen is fine for anyone (a YouTube player
+ * needs it); the rest only for the top frame of the app's own page, never
+ * for an embedded player or anything else that ends up in a frame.
+ */
 function allowMedia() {
   const ses = session.defaultSession;
 
-  ses.setPermissionRequestHandler((_wc, permission, callback) => {
-    callback(ALLOWED.has(permission));
+  ses.setPermissionRequestHandler((wc, permission, callback, details) => {
+    if (permission === "fullscreen") {
+      callback(true);
+      return;
+    }
+    const url = details?.requestingUrl || wc?.getURL() || "";
+    callback(APP_ONLY.has(permission) && details?.isMainFrame !== false && guard.isAppUrl(url));
   });
 
-  ses.setPermissionCheckHandler((_wc, permission) => {
-    return ALLOWED.has(permission);
+  ses.setPermissionCheckHandler((_wc, permission, origin, details) => {
+    if (permission === "fullscreen") return true;
+    if (!APP_ONLY.has(permission)) return false;
+    if (details?.isMainFrame === false) return false;
+    if (details?.requestingUrl) return guard.isAppUrl(details.requestingUrl);
+    // some checks come without any origin at all: those are the page's own
+    return !origin || guard.isAppOrigin(origin);
   });
+
+  // USB, serial and HID devices are never offered to pages
+  ses.setDevicePermissionHandler(() => false);
 
   // without this handler getDisplayMedia fails in Electron
   ses.setDisplayMediaRequestHandler((_request, callback) => {
@@ -80,7 +100,7 @@ function allowMedia() {
 }
 
 function shareBridge() {
-  ipcMain.handle("app:screen-sources", async () => {
+  guard.handle(ipcMain, "app:screen-sources", async () => {
     const sources = await desktopCapturer.getSources({
       types: ["screen", "window"],
       thumbnailSize: { width: 320, height: 180 },
@@ -96,7 +116,7 @@ function shareBridge() {
   });
 
   // physical size and refresh rate of each monitor, for the share quality options
-  ipcMain.handle("app:displays", () =>
+  guard.handle(ipcMain, "app:displays", () =>
     electron.screen.getAllDisplays().map((d) => ({
       id: String(d.id),
       width: Math.round(d.size.width * d.scaleFactor),
@@ -106,7 +126,7 @@ function shareBridge() {
     })),
   );
 
-  ipcMain.handle("app:screen-source", (_e, id, loopback) => {
+  guard.handle(ipcMain, "app:screen-source", (_e, id, loopback) => {
     chosenSource = typeof id === "string" ? id : "";
     chosenLoopback = loopback !== false;
   });
@@ -123,6 +143,134 @@ function helperPath() {
     path.join(__dirname, "..", "native", "helper", "target", "release", "native-helper.exe"),
   ];
   return candidates.find((p) => p && fs.existsSync(p)) || "";
+}
+
+/* --------------------------------------------------------------- moonlight */
+
+/**
+ * Watching a Sunshine (Moonlight) host: the native helper pairs with it,
+ * lists its apps and receives the video. Frames come out of the helper as
+ * records ([kind u8][length u32 LE][payload]) and go to the page as they
+ * are; the page decodes them with WebCodecs. The client identity (key and
+ * certificate) lives in the profile folder.
+ */
+let mlStream = null;
+
+function mlDir() {
+  return path.join(app.getPath("userData"), "moonlight");
+}
+
+/** One helper command with a JSON answer. */
+function mlCommand(args, timeoutMs) {
+  return new Promise((resolve) => {
+    const exe = helperPath();
+    if (!exe || process.platform !== "win32") {
+      resolve({ ok: false, error: "no-helper" });
+      return;
+    }
+    const child = spawn(exe, ["moonlight", ...args], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    let out = "";
+    let err = "";
+    const timer = setTimeout(() => child.kill(), timeoutMs);
+    child.stdout.on("data", (d) => (out += d.toString()));
+    child.stderr.on("data", (d) => (err += d.toString()));
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        resolve({ ok: false, error: err.trim() || `exit ${code}` });
+        return;
+      }
+      try {
+        resolve({ ok: true, data: JSON.parse(out.trim().split(/\r?\n/).pop() || "null") });
+      } catch {
+        resolve({ ok: false, error: out.trim() || "bad answer" });
+      }
+    });
+  });
+}
+
+function stopMoonlight() {
+  const child = mlStream;
+  mlStream = null;
+  if (!child) return;
+  try {
+    child.stdin.write("stop\n");
+  } catch {
+    // already gone
+  }
+  setTimeout(() => {
+    if (child.exitCode === null) child.kill();
+  }, 3000);
+}
+
+/** A host name, IPv4 or [IPv6] address, with an optional port: nothing else reaches the helper. */
+const HOST_RE = /^(?:(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?|\[[0-9a-f:.]{2,45}\])(?::\d{1,5})?$/i;
+
+function mlHost(h) {
+  const v = String(h || "").trim();
+  return v.length <= 260 && HOST_RE.test(v) ? v : "";
+}
+
+function moonlightBridge() {
+  const bad = { ok: false, error: "bad-host" };
+  const run = (h, args, ms) => {
+    const host = mlHost(h);
+    return host ? mlCommand([args[0], mlDir(), host, ...args.slice(1)], ms) : bad;
+  };
+  guard.handle(ipcMain, "app:ml-info", (_e, h) => run(h, ["info"], 20_000));
+  // the host's owner types the PIN into Sunshine; that may take a while
+  guard.handle(ipcMain, "app:ml-pair", (_e, h, pin) => (/^\d{4}$/.test(String(pin)) ? run(h, ["pair", String(pin)], 200_000) : bad));
+  guard.handle(ipcMain, "app:ml-apps", (_e, h) => run(h, ["apps"], 20_000));
+  guard.handle(ipcMain, "app:ml-quit", (_e, h) => run(h, ["quit"], 20_000));
+
+  guard.handle(ipcMain, "app:ml-start", (event, opts) => {
+    stopMoonlight();
+    const exe = helperPath();
+    if (!exe || process.platform !== "win32") return { ok: false, error: "no-helper" };
+    const o = opts || {};
+    if (!mlHost(o.host)) return bad;
+    const num = (v, d) => String(Math.round(Number(v) || d));
+    const args = ["moonlight", "stream", mlDir(), mlHost(o.host), num(o.app, 0), num(o.width, 1920), num(o.height, 1080), num(o.fps, 60), num(o.kbps, 20000), num(o.formats, 1)];
+    const child = spawn(exe, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    mlStream = child;
+    const sender = event.sender;
+    let pending = Buffer.alloc(0);
+    let errText = "";
+
+    child.stdout.on("data", (data) => {
+      pending = pending.length ? Buffer.concat([pending, data]) : data;
+      // whole records only; a frame may arrive in several pieces
+      while (pending.length >= 5) {
+        const len = pending.readUInt32LE(1);
+        if (pending.length < 5 + len) break;
+        const kind = pending[0];
+        const payload = pending.subarray(5, 5 + len);
+        pending = pending.subarray(5 + len);
+        if (sender.isDestroyed()) continue;
+        if (kind === 1) sender.send("app:ml-frame", Buffer.from(payload));
+        else if (kind === 2) sender.send("app:ml-event", payload.toString("utf8"));
+      }
+    });
+    child.stderr.on("data", (d) => {
+      errText += d.toString();
+    });
+    child.on("exit", (code) => {
+      if (mlStream === child) mlStream = null;
+      if (!sender.isDestroyed()) {
+        sender.send("app:ml-event", JSON.stringify({ event: "ended", code: code || 0, text: errText.trim().slice(-500) }));
+      }
+    });
+    return { ok: true };
+  });
+
+  guard.handle(ipcMain, "app:ml-idr", () => {
+    try {
+      mlStream?.stdin.write("idr\n");
+    } catch {
+      // stream already ended
+    }
+  });
+  guard.handle(ipcMain, "app:ml-stop", () => stopMoonlight());
 }
 
 /* ------------------------------------------------------- screen share audio */
@@ -143,7 +291,7 @@ function stopAudioHelper() {
 }
 
 function audioBridge() {
-  ipcMain.handle("app:screen-audio-start", (event, sourceId) => {
+  guard.handle(ipcMain, "app:screen-audio-start", (event, sourceId) => {
     stopAudioHelper();
     const exe = helperPath();
     if (!exe || process.platform !== "win32") return { ok: false, error: "no-helper" };
@@ -175,7 +323,7 @@ function audioBridge() {
     return { ok: true };
   });
 
-  ipcMain.handle("app:screen-audio-stop", () => stopAudioHelper());
+  guard.handle(ipcMain, "app:screen-audio-stop", () => stopAudioHelper());
 }
 
 /* ------------------------------------------------------------------ hotkeys */
@@ -260,7 +408,7 @@ function registerShortcuts(list) {
 
 function hotkeyBridge() {
   // answers whether the native hook is used and which shortcuts the system refused
-  ipcMain.handle("app:hotkeys", (_e, list) => {
+  guard.handle(ipcMain, "app:hotkeys", (_e, list) => {
     bindings = Array.isArray(list) ? list : [];
     if (keysHelper) {
       globalShortcut.unregisterAll();
@@ -276,20 +424,50 @@ function hotkeyBridge() {
 // seconds since the last mouse or keyboard input system-wide, not just in our
 // window: someone playing with the app in the background is not away.
 // (the screen and power modules are only touched inside handlers: they are unavailable before ready)
-ipcMain.handle("app:idle-seconds", () => electron.powerMonitor.getSystemIdleTime());
+guard.handle(ipcMain, "app:idle-seconds", () => electron.powerMonitor.getSystemIdleTime());
 
 // tray, autostart, unread badge and taskbar flashing
 function shellBridge() {
-  ipcMain.handle("app:shell-settings", () => tray.publicSettings());
-  ipcMain.handle("app:set-shell-settings", (_e, patch) => tray.updateSettings(patch));
-  ipcMain.handle("app:tray-state", (_e, state) => tray.applyState(state));
-  ipcMain.handle("app:show", () => showWindow());
-  ipcMain.handle("app:flash", () => {
+  guard.handle(ipcMain, "app:shell-settings", () => tray.publicSettings());
+  guard.handle(ipcMain, "app:set-shell-settings", (_e, patch) => tray.updateSettings(patch));
+  guard.handle(ipcMain, "app:tray-state", (_e, state) => tray.applyState(state));
+  guard.handle(ipcMain, "app:show", () => showWindow());
+  guard.handle(ipcMain, "app:flash", () => {
     const win = mainWindow;
     if (win && !win.isDestroyed() && !win.isFocused()) win.flashFrame(true);
   });
-  ipcMain.handle("app:copy", (_e, text) => electron.clipboard.writeText(String(text ?? "")));
+  guard.handle(ipcMain, "app:copy", (_e, text) => electron.clipboard.writeText(String(text ?? "")));
+  guard.handle(ipcMain, "app:copy-image", (_e, png) => {
+    if (!(png instanceof Uint8Array) || png.byteLength > 64 * 1024 * 1024) throw new Error("not an image");
+    const image = electron.nativeImage.createFromBuffer(Buffer.from(png));
+    if (image.isEmpty()) throw new Error("not an image");
+    electron.clipboard.writeImage(image);
+  });
   linkPreviews();
+}
+
+/* ------------------------------------------------------------------ secrets */
+
+/**
+ * The sign-in token is kept sealed by the operating system (DPAPI on
+ * Windows), not as plain text in the profile folder: a copy of the folder,
+ * or another Windows user, gets nothing usable. The page stores the sealed
+ * text and asks for it to be opened on start.
+ */
+function secretsBridge() {
+  const { safeStorage } = electron;
+  guard.handle(ipcMain, "app:secret-seal", (_e, text) => {
+    if (typeof text !== "string" || !safeStorage.isEncryptionAvailable()) return null;
+    return safeStorage.encryptString(text).toString("base64");
+  });
+  guard.handle(ipcMain, "app:secret-open", (_e, sealed) => {
+    if (typeof sealed !== "string" || !safeStorage.isEncryptionAvailable()) return null;
+    try {
+      return safeStorage.decryptString(Buffer.from(sealed, "base64"));
+    } catch {
+      return null;
+    }
+  });
 }
 
 /* ------------------------------------------------------------ link previews */
@@ -301,10 +479,10 @@ function shellBridge() {
  */
 function linkPreviews() {
   const fetchPreview = preview.createPreviewer(
-    (url, init) => electron.net.fetch(url, init),
+    publicFetch,
     `Mozilla/5.0 (compatible; ${brand.name.replace(/[^\w.-]+/g, "")}Bot/1.0; link preview)`,
   );
-  ipcMain.handle("app:link-preview", (_e, url) => fetchPreview(String(url ?? "")).catch(() => null));
+  guard.handle(ipcMain, "app:link-preview", (_e, url) => fetchPreview(String(url ?? "")).catch(() => null));
 
   // YouTube refuses to play embedded videos without a Referer (error 153), and
   // a page loaded from a file sends none. Apps are asked to send their id.
@@ -330,7 +508,7 @@ function windowState(win) {
 
 // the page draws the title bar and its buttons; the window itself has no frame
 function frameBridge() {
-  ipcMain.handle("app:window", (e, action) => {
+  guard.handle(ipcMain, "app:window", (e, action) => {
     const win = BrowserWindow.fromWebContents(e.sender);
     if (!win || win.isDestroyed()) return null;
     if (action === "minimize") win.minimize();
@@ -396,6 +574,31 @@ function leaveCall(then) {
   setTimeout(finish, LEAVE_WAIT_MS);
   win.webContents.send("app:before-quit");
   return true;
+}
+
+/** Open a link in the browser or the mail program; any other URL scheme is ignored. */
+function openOutside(url) {
+  if (guard.isOpenableExternally(url)) void shell.openExternal(url);
+}
+
+/**
+ * Every window, the share popouts included, stays on the app's own page. A
+ * dropped file or link, or a page script, cannot navigate a window elsewhere:
+ * a foreign page there would run next to the app's bridge. Webviews are not
+ * used, and new windows are refused unless the main window allows them.
+ */
+function lockContents(contents) {
+  contents.on("will-navigate", (e, url) => {
+    if (!guard.isAppUrl(url)) e.preventDefault();
+  });
+  contents.on("will-redirect", (e, url) => {
+    if (e.isMainFrame && !guard.isAppUrl(url)) e.preventDefault();
+  });
+  contents.on("will-attach-webview", (e) => e.preventDefault());
+  contents.setWindowOpenHandler(({ url }) => {
+    openOutside(url);
+    return { action: "deny" };
+  });
 }
 
 const WEB_PREFS = {
@@ -496,7 +699,7 @@ function createWindow() {
       };
     }
     // external links open in the browser, not inside the app
-    if (/^https?:/.test(url)) void shell.openExternal(url);
+    openOutside(url);
     return { action: "deny" };
   });
 
@@ -715,14 +918,18 @@ if (!app.requestSingleInstanceLock()) {
     if (leaveCall(() => app.quit())) e.preventDefault();
   });
 
+  app.on("web-contents-created", (_e, contents) => lockContents(contents));
+
   void app.whenReady().then(() => {
     // no menu bar: Alt would toggle it and Ctrl+R would reload the page mid-call
     if (!DEV_URL) Menu.setApplicationMenu(null);
     allowMedia();
+    secretsBridge();
     shareBridge();
     audioBridge();
     hotkeyBridge();
     shellBridge();
+    moonlightBridge();
     frameBridge();
     startKeysHelper();
     createWindow();

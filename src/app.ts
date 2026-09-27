@@ -14,7 +14,7 @@ import {
 } from "matrix-js-sdk";
 import type { GeneratedSecretStorageKey } from "matrix-js-sdk/lib/crypto-api/index.js";
 
-import type { MentionResolver } from "./markdown.ts";
+import { groupMentions, parse, type MentionResolver } from "./markdown.ts";
 import { createStore } from "./store.ts";
 import * as session from "./matrix/session.ts";
 import {
@@ -39,14 +39,27 @@ import * as msg from "./matrix/messages.ts";
 import * as people from "./matrix/people.ts";
 import { configureMedia, encryptAttachment, mediaUrl, type EncryptedFile } from "./media.ts";
 import { BRAND } from "./brand.ts";
-import { copyToClipboard, fetchLinkPreview, flashWindow, idleSeconds, onBeforeQuit, showWindow, type RawPreview } from "./desktop.ts";
+import { isMxc } from "./mxc.ts";
+import { copyImageToClipboard, copyToClipboard, fetchLinkPreview, flashWindow, idleSeconds, onBeforeQuit, showWindow, type RawPreview } from "./desktop.ts";
 import { startHotkeys } from "./hotkeys.ts";
 import { compareText, t } from "./i18n/index.ts";
-import { getNotifyMode, getSoundPrefs, isMuted, startPrefsSync, stopPrefsSync } from "./prefs.ts";
+import {
+  getNotifyMode,
+  getServerProfiles,
+  getSoundPrefs,
+  getTileLook,
+  isMuted,
+  onServerProfilesChange,
+  onTileLookChange,
+  setPrivacy,
+  setServerProfilePref,
+  startPrefsSync,
+  stopPrefsSync,
+} from "./prefs.ts";
 import { setTrayUnread } from "./tray.ts";
 import { setBeforeInstall } from "./update.ts";
-import { blip } from "./voice/audio.ts";
-import { voice, type ShareOptions } from "./voice/voice.ts";
+import { blip, playBoardSound, soundLength } from "./voice/audio.ts";
+import { cleanEmoji, cleanTile, voice, type ShareOptions, type TileLook } from "./voice/voice.ts";
 
 export { mediaUrl };
 
@@ -67,7 +80,8 @@ export type Media = {
 /** A file being uploaded. */
 export type Upload = { id: string; name: string; progress: number };
 
-export type StatusMode = "auto" | "unavailable" | "offline";
+/** "streamer": do not disturb for others, and ids, domains and addresses hidden here. */
+export type StatusMode = "auto" | "unavailable" | "dnd" | "streamer" | "offline";
 
 /** `quote`: the reply quotes a piece of the message, and `body` is that piece. */
 export type ReplyPreview = { eventId: string; sender: string; senderName: string; body: string; quote?: boolean };
@@ -110,6 +124,8 @@ export type Message = {
   mentionsMe: boolean;
   previews: LinkPreview[];
   pinned: boolean;
+  /** This user may pin and unpin messages here. */
+  canPin: boolean;
   /** Color of the sender's role on this server, empty for none. */
   color: string;
 };
@@ -132,14 +148,19 @@ export type UserMenu = { userId: string; roomId: string | null; x: number; y: nu
 
 export type Lightbox = { url: string; name: string };
 
-export type SettingsTab = "profile" | "audio" | "keys" | "appearance" | "app" | "crypto" | "sessions";
+/** Right click on a picture: open, save, copy. `inViewer`: opened in the full-screen viewer itself. */
+export type ImageMenu = { url: string; name: string; x: number; y: number; inViewer: boolean };
 
-export type ServerTab = "overview" | "channels" | "members" | "roles" | "bans" | "perms";
+export type SettingsTab = "profile" | "audio" | "keys" | "appearance" | "app" | "moonlight" | "crypto" | "sessions";
+
+export type ServerTab = "overview" | "me" | "channels" | "members" | "roles" | "sounds" | "bans" | "perms";
 
 export type AppState = {
   phase: "login" | "loading" | "ready";
   error: string;
   busy: string;
+  /** A short confirmation at the bottom, gone by itself: "copied" and the like. */
+  notice: string;
   /** The sync loop cannot reach the homeserver and keeps retrying. */
   offline: boolean;
   session: session.Session | null;
@@ -176,6 +197,7 @@ export type AppState = {
   statusMode: StatusMode;
   uploads: Upload[];
   lightbox: Lightbox | null;
+  imageMenu: ImageMenu | null;
   replyTo: ReplyPreview | null;
   /** A message being edited; `media`: an attachment, only its caption changes. */
   editing: { eventId: string; body: string; media: boolean } | null;
@@ -188,6 +210,8 @@ export type AppState = {
   searchOpen: boolean;
   searchHits: msg.Hit[];
   searching: boolean;
+  /** What was searched: the words are marked in the results. */
+  searchTerm: string;
   typing: string[];
   highlight: string | null;
   /** The member list on the right is collapsed. */
@@ -233,7 +257,7 @@ function saveFlag(key: string, on: boolean): void {
 function loadStatusMode(): StatusMode {
   try {
     const v = localStorage.getItem("app.status");
-    return v === "unavailable" || v === "offline" ? v : "auto";
+    return v === "unavailable" || v === "offline" || v === "dnd" || v === "streamer" ? v : "auto";
   } catch {
     return "auto";
   }
@@ -243,6 +267,7 @@ export const app = createStore<AppState>({
   phase: "login",
   error: "",
   busy: "",
+  notice: "",
   offline: false,
   session: null,
   view: "server",
@@ -273,6 +298,7 @@ export const app = createStore<AppState>({
   statusMode: loadStatusMode(),
   uploads: [],
   lightbox: null,
+  imageMenu: null,
   replyTo: null,
   editing: null,
   myName: "",
@@ -284,6 +310,7 @@ export const app = createStore<AppState>({
   searchOpen: false,
   searchHits: [],
   searching: false,
+  searchTerm: "",
   typing: [],
   highlight: null,
   membersHidden: loadFlag("app.members-hidden"),
@@ -350,21 +377,21 @@ function lookupMember(userId: string, roomId?: string | null): { name: string; a
   for (const id of candidates) {
     const member = client?.getRoom(id)?.getMember(userId);
     if (!member) continue;
-    name = name || member.name;
+    name = name || people.plainName(member);
     avatar = avatar || member.getMxcAvatarUrl() || "";
     if (name && avatar) return { name, avatar };
   }
   for (const room of client?.getRooms() ?? []) {
     const member = room.getMember(userId);
     if (!member) continue;
-    name = name || member.name;
+    name = name || people.plainName(member);
     avatar = avatar || member.getMxcAvatarUrl() || "";
     if (name && avatar) break;
   }
 
   const user = client?.getUser(userId);
   return {
-    name: name || user?.displayName || userId.split(":")[0].replace("@", ""),
+    name: name || user?.displayName || people.localName(userId),
     avatar: avatar || user?.avatarUrl || "",
   };
 }
@@ -446,10 +473,11 @@ async function launch(s: session.Session, c: MatrixClient): Promise<void> {
   app.set({ phase: "ready" });
   restoreChannel();
   startPresence();
+  scheduleOwnMembers(8000);
 }
 
 export async function bootstrap(): Promise<void> {
-  const saved = session.loadSession();
+  const saved = await session.loadSession();
   if (!saved) {
     app.set({ phase: "login" });
     return;
@@ -487,7 +515,7 @@ async function connect(s: session.Session): Promise<boolean> {
 
 /** A fresh sign-in: store the session and start everything as on launch. */
 async function enter(s: session.Session): Promise<boolean> {
-  session.saveSession(s);
+  await session.saveSession(s);
   return connect(s);
 }
 
@@ -752,7 +780,7 @@ function unreadForTray(): number {
   let n = s.directs.filter((d) => !isMuted("users", d.userId)).reduce((sum, d) => sum + d.unread, 0) + s.invites.length;
   for (const g of s.servers) {
     for (const ch of g.channels) {
-      if (ch.kind !== "text") continue;
+      // voice channels have chats too
       if (ch.mentions > 0) n += ch.mentions;
       else if (mode === "all" && !roomMuted(ch.roomId)) n += ch.unread;
     }
@@ -884,7 +912,7 @@ function replyPreview(room: Room, eventId: string, quoted?: unknown): ReplyPrevi
     return {
       eventId,
       sender,
-      senderName: sender ? (people.isDeleted(sender) ? t("people.deleted") : room.getMember(sender)?.name || sender) : "",
+      senderName: sender ? (people.isDeleted(sender) ? t("people.deleted") : displayName(sender, room.roomId)) : "",
       body: quoted.slice(0, 500),
       quote: true,
     };
@@ -897,12 +925,27 @@ function replyPreview(room: Room, eventId: string, quoted?: unknown): ReplyPrevi
   return {
     eventId,
     sender,
-    senderName: people.isDeleted(sender) ? t("people.deleted") : room.getMember(sender)?.name || sender,
+    senderName: people.isDeleted(sender) ? t("people.deleted") : displayName(sender, room.roomId),
     body: msg.stripReplyFallback(String(content.body ?? "")).slice(0, 180),
   };
 }
 
 let messagesTimer = 0;
+
+/**
+ * The messages of the last refresh by id, with a fingerprint of their content.
+ * A message that did not change keeps its object, so its row is not drawn
+ * again: a new message or a reaction redraws one row, not the whole chat.
+ */
+let messageMemo = new Map<string, { print: string; msg: Message }>();
+
+function reuse(next: Map<string, { print: string; msg: Message }>, m: Message): Message {
+  const print = JSON.stringify(m);
+  const old = messageMemo.get(m.id);
+  const kept = old && old.print === print ? old.msg : m;
+  next.set(m.id, { print, msg: kept });
+  return kept;
+}
 
 /**
  * Re-render the timeline a moment later, in one batch. The SDK attaches
@@ -940,6 +983,8 @@ function refreshMessages(): void {
   const space = home ? client.getRoom(home.spaceId) : null;
   const roles = home ? admin.serverRoles(client, home.spaceId) : [];
   const colorOf = (userId: string) => (space ? (admin.roleAt(roles, admin.levelOf(space, userId))?.color ?? "") : "");
+  const canPin = msg.canPin(room, self);
+  const memo = new Map<string, { print: string; msg: Message }>();
 
   for (const ev of events) {
     const type = ev.getType();
@@ -959,10 +1004,10 @@ function refreshMessages(): void {
     if (!member || member.membership === "leave") people.checkDeleted(client, sender);
     const gone = people.isDeleted(sender);
 
-    messages.push({
+    const next: Message = {
       id: ev.getId() ?? String(ev.getTs()),
       sender,
-      senderName: gone ? t("people.deleted") : member?.name || sender,
+      senderName: gone ? t("people.deleted") : displayName(sender, roomId),
       avatar: gone ? "" : member?.getMxcAvatarUrl() || "",
       body: locked
         ? t("chat.locked")
@@ -985,11 +1030,15 @@ function refreshMessages(): void {
       mentionsMe: sender !== self && !locked && pingsMe(ev, content, self),
       previews: locked ? [] : previewsOf(content),
       pinned: pinSet.has(ev.getId() ?? ""),
+      canPin,
       color: colorOf(sender),
-    });
+    };
+    messages.push(next);
   }
 
-  app.set({ messages: messages.slice(-400), history: historyOf(room, events), pins });
+  const shown = messages.slice(-400).map((m) => reuse(memo, m));
+  messageMemo = memo;
+  app.set({ messages: shown, history: historyOf(room, events), pins });
 }
 
 /* ------------------------------------------------------------ link previews */
@@ -1106,7 +1155,7 @@ function previewsOf(content: Record<string, any>): LinkPreview[] {
       title: String(p["og:title"] ?? ""),
       description: String(p["og:description"] ?? ""),
       site: String(p["og:site_name"] ?? ""),
-      image: mxc.startsWith("mxc://")
+      image: isMxc(mxc)
         ? {
             mxc,
             file,
@@ -1115,7 +1164,7 @@ function previewsOf(content: Record<string, any>): LinkPreview[] {
             mime: String(p["og:image:type"] ?? "image/jpeg"),
           }
         : null,
-      youtube: embed.startsWith("youtube:") ? embed.slice(8) : "",
+      youtube: /^youtube:[\w-]{6,20}$/.test(embed) ? embed.slice(8) : "",
     });
   }
   return out;
@@ -1159,7 +1208,7 @@ function historyOf(room: Room, events: MatrixEvent[]): AppState["history"] {
 function mediaOf(content: Record<string, any>): Media | null {
   const file = content.file && typeof content.file.url === "string" ? (content.file as EncryptedFile) : null;
   const mxc = String(file?.url ?? content.url ?? "");
-  if (!mxc.startsWith("mxc://")) return null;
+  if (!isMxc(mxc)) return null;
   const msgtype = String(content.msgtype ?? "");
   const info = (content.info ?? {}) as Record<string, any>;
   const body = String(content.body ?? "");
@@ -1423,7 +1472,41 @@ export async function send(text: string): Promise<void> {
     reply ? { eventId: reply.eventId, sender: reply.sender, senderName: reply.senderName, body: reply.body, quote: reply.quote } : null,
     mentionResolver(roomId),
     previews.length ? { [PREVIEWS]: previews } : {},
+    groupPing(roomId, text),
   );
+}
+
+/** May this user ping the whole room? The room's power levels decide (notifications.room). */
+export function canPingEveryone(roomId: string | null): boolean {
+  const room = roomId ? client?.getRoom(roomId) : null;
+  if (!client || !room) return false;
+  try {
+    return room.currentState.mayTriggerNotifOfType("room", client.getUserId() ?? "");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * "@everyone" and "@room" ping the whole room through m.mentions.room, which
+ * every Matrix client understands. Matrix has no "@here": the people online
+ * right now are listed as mentioned one by one. Both need the right to ping
+ * the room; without it the words stay plain text.
+ */
+function groupPing(roomId: string, text: string): msg.GroupPing | undefined {
+  const found = groupMentions(parse(text));
+  if (!found.size || !canPingEveryone(roomId)) return undefined;
+  if (found.has("@everyone") || found.has("@room")) return { room: true, users: [] };
+  const c = client;
+  const room = c?.getRoom(roomId);
+  if (!c || !room) return undefined;
+  const self = c.getUserId();
+  const users = room
+    .getJoinedMembers()
+    .filter((m) => m.userId !== self && people.presenceOf(c, m.userId) !== "offline")
+    .map((m) => m.userId)
+    .slice(0, 100);
+  return { room: false, users };
 }
 
 let uploadLimit: Promise<number> | null = null;
@@ -1679,7 +1762,32 @@ export function openImage(url: string, name: string): void {
 }
 
 export function closeImage(): void {
-  app.set({ lightbox: null });
+  app.set({ lightbox: null, imageMenu: null });
+}
+
+export function openImageMenu(url: string, name: string, x: number, y: number, inViewer = false): void {
+  app.set({ imageMenu: { url, name, x, y, inViewer }, userMenu: null, placeMenu: null, streamMenu: null, screenMenu: null });
+}
+
+export function closeImageMenu(): void {
+  if (app.get().imageMenu) app.set({ imageMenu: null });
+}
+
+/** A file name that is safe on any system: no folders, no reserved characters. */
+export function safeFileName(name: string, fallback: string): string {
+  const clean = name
+    .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "_")
+    .replace(/^[.\s]+|[.\s]+$/g, "")
+    .slice(0, 120);
+  return clean || fallback;
+}
+
+/** Save a picture: the shell asks where, as a browser does. */
+export function saveImage(url: string, name: string): void {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = safeFileName(name, "image.png");
+  a.click();
 }
 
 /* -------------------------------------------------- reactions, search, typing */
@@ -1708,19 +1816,42 @@ export async function toggleReaction(eventId: string, key: string): Promise<void
   }
 }
 
+let searchRun = 0;
+
+/**
+ * Search the open chat. The homeserver matches whole words only and sees
+ * nothing in encrypted rooms, so the app also looks through what it has
+ * loaded and a few hundred older messages itself, matching pieces of words.
+ * Local results show at once, the rest joins them; newest first.
+ */
 export async function runSearch(term: string): Promise<void> {
   const roomId = app.get().activeChannel;
-  if (!client || !roomId || !term.trim()) {
-    app.set({ searchHits: [] });
+  const q = term.trim();
+  const room = roomId ? client?.getRoom(roomId) : null;
+  if (!client || !roomId || !room || !q) {
+    closeSearch();
     return;
   }
-  app.set({ searching: true, error: "" });
-  try {
-    app.set({ searchHits: await msg.search(client, roomId, term.trim()) });
-  } catch (e) {
-    app.set({ error: t("chat.err.search", { error: humanError(e) }), searchHits: [] });
-  }
-  app.set({ searching: false });
+  const c = client;
+  const run = ++searchRun;
+  const merge = (lists: msg.Hit[][]) => {
+    const seen = new Map<string, msg.Hit>();
+    for (const list of lists) for (const h of list) if (h.eventId && !seen.has(h.eventId)) seen.set(h.eventId, h);
+    return [...seen.values()].sort((a, b) => b.ts - a.ts);
+  };
+  const local = msg.searchLoaded(room, q);
+  app.set({ searchOpen: true, searching: true, searchTerm: q, searchHits: local, pinsOpen: false, error: "" });
+  const [older, remote] = await Promise.all([
+    msg.searchOlder(c, room, q, 8).catch(() => [] as msg.Hit[]),
+    msg.search(c, roomId, q).catch(() => [] as msg.Hit[]),
+  ]);
+  if (run !== searchRun || app.get().activeChannel !== roomId || !app.get().searchOpen) return;
+  app.set({ searchHits: merge([local, older, remote]), searching: false });
+}
+
+export function closeSearch(): void {
+  searchRun += 1;
+  if (app.get().searchOpen || app.get().searchHits.length) app.set({ searchOpen: false, searchHits: [], searching: false, searchTerm: "" });
 }
 
 /** Jump to a found message: page back through history until it is loaded, then highlight it. */
@@ -1757,7 +1888,7 @@ function refreshTyping(): void {
     ? room
         .getMembers()
         .filter((m) => m.typing && m.userId !== self)
-        .map((m) => m.name || m.userId)
+        .map((m) => displayName(m.userId, roomId))
     : [];
   app.set({ typing });
 }
@@ -2027,6 +2158,8 @@ function joinChannelInvite(roomId: string): boolean {
 function onMyMembership(room: Room, membership: string, prev: string | undefined): void {
   scheduleRooms();
   if (membership === "invite" && joinChannelInvite(room.roomId)) return;
+  // a new room of a server: it gets the server name and the banner
+  if (membership === "join" && prev !== "join") scheduleOwnMembers(3000);
   const c = client;
   if (!c || prev !== "join" || (membership !== "leave" && membership !== "ban")) return;
   const self = c.getUserId() ?? "";
@@ -2247,6 +2380,39 @@ export async function openServerJoin(spaceId: string): Promise<void> {
     app.set({ error: humanError(e) });
   }
   app.set({ busy: "" });
+}
+
+/**
+ * Back to invites only. Channels that were open to anyone become open to the
+ * server's members only, or an outsider who knows a channel's id could still
+ * walk in. Hidden channels keep their own rule.
+ */
+export async function closeServerJoin(spaceId: string): Promise<void> {
+  const c = client;
+  if (!c) return;
+  app.set({ busy: t("busy.closeJoin"), error: "" });
+  const failed: string[] = [];
+  try {
+    await c.sendStateEvent(spaceId, "m.room.join_rules" as never, { join_rule: "invite" } as never, "");
+    for (const room of admin.serverRooms(c, spaceId)) {
+      if (room.roomId === spaceId || room.getJoinRule() !== "public") continue;
+      try {
+        await c.sendStateEvent(
+          room.roomId,
+          "m.room.join_rules" as never,
+          { join_rule: "restricted", allow: [{ type: "m.room_membership", room_id: spaceId }] } as never,
+          "",
+        );
+      } catch {
+        failed.push(room.name || room.roomId);
+      }
+    }
+    bump();
+  } catch (e) {
+    app.set({ busy: "", error: humanError(e) });
+    return;
+  }
+  app.set({ busy: "", error: failed.length ? t("address.closePartial", { names: failed.join(", ") }) : "" });
 }
 
 /* ------------------------------------------------------------ people search */
@@ -2639,7 +2805,7 @@ export function openStreamMenu(identity: string, x: number, y: number): void {
 
 export function closeMenus(): void {
   const s = app.get();
-  if (s.streamMenu || s.screenMenu) app.set({ streamMenu: null, screenMenu: null });
+  if (s.streamMenu || s.screenMenu || s.imageMenu) app.set({ streamMenu: null, screenMenu: null, imageMenu: null });
 }
 
 /* ----------------------------------------------------------------- presence */
@@ -2666,13 +2832,16 @@ async function applyPresence(force: boolean): Promise<void> {
   let want: people.Presence;
   if (mode === "offline") want = "offline";
   else if (mode === "unavailable") want = "unavailable";
+  else if (mode === "dnd" || mode === "streamer") want = "dnd";
   else want = (await idleSeconds()) >= IDLE_AFTER_S ? "unavailable" : "online";
   if (!force && want === app.get().myPresence) return;
   app.set({ myPresence: want });
+  // Matrix has no "do not disturb": it is "online" with a status message
+  const presence = want === "dnd" ? "online" : want;
   try {
     // the sync presence too, or the next sync request resets it to online
-    await c.setSyncPresence(want as SetPresence);
-    await c.setPresence({ presence: want });
+    await c.setSyncPresence(presence as SetPresence);
+    await c.setPresence({ presence, status_msg: want === "dnd" ? people.DND_STATUS : "" });
   } catch {
     // presence disabled on the server: the status stays local
   }
@@ -2692,7 +2861,17 @@ if (typeof window !== "undefined") {
   for (const ev of ["pointermove", "keydown", "focus"]) window.addEventListener(ev, wake, { passive: true });
 }
 
+/** Do not disturb or the streamer mode: no notifications and no message sounds. */
+export function quietMode(): boolean {
+  const mode = app.get().statusMode;
+  return mode === "dnd" || mode === "streamer";
+}
+
+// the streamer mode lives in the status; the hiding itself is done by the privacy settings
+setPrivacy({ streamer: app.get().statusMode === "streamer" });
+
 export function setStatusMode(mode: StatusMode): void {
+  setPrivacy({ streamer: mode === "streamer" });
   try {
     localStorage.setItem("app.status", mode);
   } catch {
@@ -2785,6 +2964,21 @@ export function copyText(text: string): Promise<boolean> {
   return copyToClipboard(text);
 }
 
+let noticeTimer = 0;
+
+/** A short confirmation at the bottom of the window. */
+export function flashNotice(text: string): void {
+  window.clearTimeout(noticeTimer);
+  app.set({ notice: text });
+  noticeTimer = window.setTimeout(() => app.set({ notice: "" }), 2200);
+}
+
+/** Right click on a picture copies it, as in Discord. */
+export async function copyImage(url: string): Promise<void> {
+  if (await copyImageToClipboard(url)) flashNotice(t("chat.imageCopied"));
+  else app.set({ error: t("chat.err.imageCopy") });
+}
+
 /* --------------------------------------------------- own profile and sessions */
 
 export async function saveMyName(name: string): Promise<void> {
@@ -2794,6 +2988,8 @@ export async function saveMyName(name: string): Promise<void> {
     await people.setName(client, name);
     profileCache.clear();
     refreshMe();
+    // the homeserver has just reset the name in every room: server names and the banner go back
+    scheduleOwnMembers(300);
   } catch (e) {
     app.set({ error: humanError(e) });
   }
@@ -2808,10 +3004,285 @@ export async function saveMyAvatar(file: File | null): Promise<void> {
     else await people.clearAvatar(client);
     profileCache.clear();
     refreshMe();
+    scheduleOwnMembers(300);
   } catch (e) {
     app.set({ error: humanError(e) });
   }
   app.set({ busy: "" });
+}
+
+/* ------------------------------------ own membership: server names and banner */
+
+/**
+ * The banner travels in the own membership of each server's space, under a
+ * key of this app: everyone on the server can read it, other clients ignore
+ * it. Server names and pictures are the standard per-room display name and
+ * avatar of the membership, which every Matrix client shows.
+ */
+const BANNER_KEY = `${BRAND.appId}.banner`;
+
+let ownMembersTimer = 0;
+let ownMembersRunning = false;
+let ownMembersAgain = false;
+/** Servers whose own name was just taken away: their rooms get the global profile back. */
+const resetServers = new Set<string>();
+
+export function scheduleOwnMembers(delay = 1500): void {
+  window.clearTimeout(ownMembersTimer);
+  ownMembersTimer = window.setTimeout(() => void syncOwnMembers(), delay);
+}
+
+function isDefaultBanner(look: TileLook): boolean {
+  return look.mode === "dominant" && !look.image && !look.emoji;
+}
+
+/**
+ * Bring the own memberships in line: the server name and picture in every
+ * room of a server that has them, the banner in every space. Rooms that
+ * already match are not touched, so this is cheap to run often; rooms of
+ * servers without an own name keep whatever name they have.
+ */
+async function syncOwnMembers(): Promise<void> {
+  const c = client;
+  if (!c) return;
+  if (ownMembersRunning) {
+    ownMembersAgain = true;
+    return;
+  }
+  ownMembersRunning = true;
+  try {
+    const self = c.getUserId() ?? "";
+    let global: { displayname?: string; avatar_url?: string } = {};
+    try {
+      global = await c.getProfileInfo(self);
+    } catch {
+      return;
+    }
+    const overrides = getServerProfiles();
+    const banner = getTileLook();
+    const reset = new Set(resetServers);
+    resetServers.clear();
+    for (const server of app.get().servers) {
+      const own = overrides[server.spaceId];
+      const naming = !!own || reset.has(server.spaceId);
+      for (const room of admin.serverRooms(c, server.spaceId)) {
+        const isSpace = room.roomId === server.spaceId;
+        if (!naming && !isSpace) continue;
+        const ev = room.getMember(self)?.events.member;
+        if (!ev || room.getMyMembership() !== "join") continue;
+        const cur = ev.getContent() as Record<string, unknown>;
+        const want: Record<string, unknown> = { ...cur, membership: "join" };
+        // these belong to the join itself, not to a profile change
+        delete want.join_authorised_via_users_server;
+        delete want.reason;
+        if (naming) {
+          const name = own?.name || global.displayname;
+          const avatar = own?.avatar || global.avatar_url;
+          if (name) want.displayname = name;
+          else delete want.displayname;
+          if (avatar) want.avatar_url = avatar;
+          else delete want.avatar_url;
+        }
+        if (isSpace) {
+          if (isDefaultBanner(banner)) delete want[BANNER_KEY];
+          else want[BANNER_KEY] = banner;
+        }
+        const pick = (o: Record<string, unknown>) => JSON.stringify([o.displayname ?? null, o.avatar_url ?? null, o[BANNER_KEY] ?? null]);
+        if (pick(cur) === pick(want)) continue;
+        try {
+          await c.sendStateEvent(room.roomId, "m.room.member" as never, want as never, self);
+        } catch {
+          // no right to change it here, or the server is unreachable: the next run tries again
+        }
+      }
+    }
+  } finally {
+    ownMembersRunning = false;
+    if (ownMembersAgain) {
+      ownMembersAgain = false;
+      scheduleOwnMembers(500);
+    }
+  }
+}
+
+onTileLookChange(() => scheduleOwnMembers(2500));
+onServerProfilesChange(() => scheduleOwnMembers(800));
+
+/* --------------------------------------------------------------- soundboard */
+
+/** A sound of a server's soundboard. The file sits on the homeserver like any attachment. */
+export type Sound = { id: string; name: string; emoji: string; url: string; mime: string };
+
+const MAX_SOUNDS = 48;
+const MAX_SOUND_BYTES = 1024 * 1024;
+const MAX_SOUND_SECONDS = 7;
+
+export function serverSounds(spaceId: string | null): Sound[] {
+  const raw = spaceId ? client?.getRoom(spaceId)?.currentState.getStateEvents(admin.SOUNDS_EVENT, "")?.getContent()?.sounds : null;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((s) => s && typeof s.id === "string" && isMxc(s.url))
+    .map((s) => ({
+      id: String(s.id),
+      name: String(s.name ?? "").slice(0, 32),
+      emoji: cleanEmoji(s.emoji).slice(0, 16),
+      url: String(s.url),
+      mime: String(s.mime ?? ""),
+    }))
+    .slice(0, MAX_SOUNDS);
+}
+
+/** The server of the running call: its soundboard is the one offered. */
+export function callServerId(): string | null {
+  return serverOf(app.get().voiceChannel)?.spaceId ?? null;
+}
+
+export function canEditSounds(spaceId: string | null): boolean {
+  const room = spaceId ? client?.getRoom(spaceId) : null;
+  if (!client || !room) return false;
+  try {
+    return room.currentState.maySendStateEvent(admin.SOUNDS_EVENT, client.getUserId() ?? "");
+  } catch {
+    return false;
+  }
+}
+
+async function writeSounds(spaceId: string, list: Sound[]): Promise<void> {
+  await need().sendStateEvent(spaceId, admin.SOUNDS_EVENT as never, { sounds: list } as never, "");
+}
+
+/** Add a sound: up to 1 MB and 7 seconds, so a button press stays a short sound. */
+export async function addSound(spaceId: string, file: File, name: string, emoji: string): Promise<boolean> {
+  const c = client;
+  if (!c) return false;
+  const list = serverSounds(spaceId);
+  if (list.length >= MAX_SOUNDS) {
+    app.set({ error: t("sounds.err.full", { n: MAX_SOUNDS }) });
+    return false;
+  }
+  if (file.size > MAX_SOUND_BYTES) {
+    app.set({ error: t("sounds.err.big") });
+    return false;
+  }
+  const length = await soundLength(await file.arrayBuffer());
+  if (!length) {
+    app.set({ error: t("sounds.err.notAudio") });
+    return false;
+  }
+  if (length > MAX_SOUND_SECONDS + 0.3) {
+    app.set({ error: t("sounds.err.long", { n: MAX_SOUND_SECONDS }) });
+    return false;
+  }
+  app.set({ busy: t("busy.sound"), error: "" });
+  try {
+    const up = await c.uploadContent(file, { type: file.type || "audio/mpeg", name: file.name });
+    const sound: Sound = {
+      id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      name: (name.trim() || file.name.replace(/\.[^.]+$/, "")).slice(0, 32),
+      emoji: cleanEmoji(emoji),
+      url: up.content_uri,
+      mime: file.type,
+    };
+    await writeSounds(spaceId, [...list, sound]);
+    app.set({ busy: "" });
+    return true;
+  } catch (e) {
+    app.set({ busy: "", error: humanError(e) });
+    return false;
+  }
+}
+
+export async function removeSound(spaceId: string, id: string): Promise<void> {
+  try {
+    await writeSounds(spaceId, serverSounds(spaceId).filter((s) => s.id !== id));
+  } catch (e) {
+    app.set({ error: humanError(e) });
+  }
+}
+
+/** Play a sound for the whole call. */
+export function playSound(sound: Sound): void {
+  voice.sendBoardSound(sound.url);
+}
+
+/** Listen to a sound alone, without the call hearing it. */
+export function previewSound(sound: Sound): void {
+  playLocal(sound.url);
+}
+
+function playLocal(url: string): void {
+  void playBoardSound(url, async () => (await fetch(await mediaUrl(url))).arrayBuffer(), getSoundPrefs().board, voice.getState().settings.spkId);
+}
+
+// someone in the call pressed a sound: heard here unless the sound is off
+voice.onBoardSound = (url) => {
+  if (voice.getState().deafened) return;
+  if (!serverSounds(callServerId()).some((s) => s.url === url)) return;
+  playLocal(url);
+};
+
+/** A banner picture: large ones are scaled down to 1280 px wide first; small animations stay as they are. */
+export async function uploadBanner(file: File): Promise<string> {
+  const c = client;
+  if (!c) return "";
+  app.set({ busy: t("busy.picture"), error: "" });
+  try {
+    let blob: Blob = file;
+    if (!(file.type === "image/gif" && file.size < 4_000_000)) {
+      const bmp = await createImageBitmap(file);
+      const k = Math.min(1, 1280 / bmp.width);
+      const canvas = new OffscreenCanvas(Math.max(1, Math.round(bmp.width * k)), Math.max(1, Math.round(bmp.height * k)));
+      canvas.getContext("2d")?.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      bmp.close();
+      blob = await canvas.convertToBlob({ type: "image/webp", quality: 0.9 });
+    }
+    const up = await c.uploadContent(blob, { type: blob.type || file.type, includeFilename: false });
+    app.set({ busy: "" });
+    return up.content_uri;
+  } catch (e) {
+    app.set({ busy: "", error: humanError(e) });
+    return "";
+  }
+}
+
+/** The own name and picture on one server. An empty name and no picture mean the global profile. */
+export async function setServerProfile(spaceId: string, name: string, avatar: File | string | null): Promise<void> {
+  const c = client;
+  if (!c) return;
+  app.set({ busy: t("busy.serverProfile"), error: "" });
+  try {
+    const mxc = avatar instanceof File ? (await c.uploadContent(avatar, { type: avatar.type, name: avatar.name })).content_uri : (avatar ?? "");
+    if (!name.trim() && !mxc) resetServers.add(spaceId);
+    setServerProfilePref(spaceId, { name, avatar: mxc });
+    window.clearTimeout(ownMembersTimer);
+    await syncOwnMembers();
+    profileCache.clear();
+    bump();
+  } catch (e) {
+    app.set({ error: humanError(e) });
+  }
+  app.set({ busy: "" });
+}
+
+/**
+ * A person's banner: their own from settings, the one their app sent in the
+ * call, or the one in their membership of a shared server (this server
+ * first). Null for people whose app says nothing: the avatar color is used.
+ */
+export function bannerOf(userId: string, roomId?: string | null): TileLook | null {
+  if (!userId) return null;
+  if (userId === me()) return getTileLook();
+  const live = voice.getState().members.find((m) => m.userId === userId && m.tile)?.tile;
+  if (live) return live;
+  const c = client;
+  if (!c) return null;
+  const first = serverOf(roomId)?.spaceId;
+  const spaces = [first, ...app.get().servers.map((g) => g.spaceId).filter((id) => id !== first)].filter(Boolean) as string[];
+  for (const id of spaces) {
+    const look = cleanTile(c.getRoom(id)?.getMember(userId)?.events.member?.getContent()?.[BANNER_KEY]);
+    if (look) return look;
+  }
+  return null;
 }
 
 export function sessions(): Promise<people.SessionRow[]> {
@@ -2952,6 +3423,8 @@ function notify(event: MatrixEvent, room: Room): void {
   if (focused && room.roomId === app.get().activeChannel) return;
   const mode = getNotifyMode();
   if (mode === "off") return;
+  // do not disturb and the streamer mode keep quiet: the badges still count
+  if (quietMode()) return;
 
   const body = msg.stripReplyFallback(String(event.getContent().body ?? ""));
   const direct = app.get().directs.some((d) => d.roomId === room.roomId);
@@ -3032,7 +3505,8 @@ export function mentionResolver(roomId: string | null): MentionResolver {
   };
 }
 
-export type MentionHit = { userId: string; name: string; avatar: string; insert: string };
+/** `group`: "@everyone" or "@here" instead of a person, with a line about whom it pings. */
+export type MentionHit = { userId: string; name: string; avatar: string; insert: string; group?: string };
 
 /**
  * People to offer after "@" in the message field: the name part of the id
@@ -3045,6 +3519,12 @@ export function mentionCandidates(roomId: string | null, query: string): Mention
   if (!c || !room) return [];
   const q = query.toLowerCase();
   const self = c.getUserId();
+  const groups: MentionHit[] = canPingEveryone(roomId)
+    ? [
+        { userId: "@everyone", name: "@everyone", avatar: "", insert: "@everyone", group: t("mention.everyone") },
+        { userId: "@here", name: "@here", avatar: "", insert: "@here", group: t("mention.here") },
+      ].filter((g) => g.name.slice(1).startsWith(q))
+    : [];
   const count = new Map<string, number>();
   for (const m of room.getMembers()) count.set(localOf(m.userId), (count.get(localOf(m.userId)) ?? 0) + 1);
   return room
@@ -3052,7 +3532,7 @@ export function mentionCandidates(roomId: string | null, query: string): Mention
     .filter((m) => m.userId !== self)
     .map((m) => {
       const local = localOf(m.userId);
-      const name = (m.name || local).toLowerCase();
+      const name = (people.plainName(m) || local).toLowerCase();
       const score = !q
         ? 1
         : local.startsWith(q)
@@ -3067,14 +3547,31 @@ export function mentionCandidates(roomId: string | null, query: string): Mention
       return { m, local, score };
     })
     .filter((x) => x.score >= 0)
-    .sort((a, b) => a.score - b.score || compareText(a.m.name, b.m.name))
+    .sort((a, b) => a.score - b.score || compareText(people.plainName(a.m) || a.local, people.plainName(b.m) || b.local))
     .slice(0, 8)
-    .map(({ m, local }) => ({
+    .map<MentionHit>(({ m, local }) => ({
       userId: m.userId,
-      name: m.name || local,
+      name: people.plainName(m) || local,
       avatar: m.getMxcAvatarUrl() || "",
       insert: (count.get(local) ?? 0) > 1 ? m.userId : `@${local}`,
-    }));
+    }))
+    .concat(groups);
+}
+
+/** Everyone this account shares a room with, by name: for picking whose stream a Moonlight host is. */
+export function knownPeople(): { userId: string; name: string }[] {
+  const c = client;
+  if (!c) return [];
+  const self = c.getUserId();
+  const seen = new Map<string, string>();
+  for (const room of c.getRooms()) {
+    if (room.getMyMembership() !== "join") continue;
+    for (const m of room.getJoinedMembers()) {
+      if (m.userId !== self && !seen.has(m.userId)) seen.set(m.userId, people.plainName(m) || people.localName(m.userId));
+      if (seen.size > 800) break;
+    }
+  }
+  return [...seen.entries()].map(([userId, name]) => ({ userId, name })).sort((a, b) => compareText(a.name, b.name));
 }
 
 /** Channel members for the right column, highest role first. */
@@ -3095,7 +3592,7 @@ export function channelMembers(roomId: string | null): Member[] {
       const role = admin.roleAt(roles, power);
       return {
         userId: m.userId,
-        name: m.name || m.userId,
+        name: people.plainName(m) || people.localName(m.userId),
         avatar: m.getMxcAvatarUrl() || "",
         power,
         owner,

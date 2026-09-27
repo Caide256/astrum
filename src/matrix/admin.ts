@@ -2,6 +2,7 @@ import type { MatrixClient, Room } from "matrix-js-sdk";
 
 import { BRAND } from "../brand.ts";
 import { compareText, t, type Key } from "../i18n/index.ts";
+import { localName, plainName } from "./people.ts";
 import { MEMBER_TYPES } from "./rtc.ts";
 
 /**
@@ -292,7 +293,14 @@ export type Perms = {
   channels: number;
   server: number;
   roles: number;
+  /** Ping the whole room with @everyone or @here (notifications.room). */
+  everyone: number;
+  /** Add and remove sounds of the server's soundboard. */
+  sounds: number;
 };
+
+/** The soundboard of a server: a state event of its space. */
+export const SOUNDS_EVENT = `${BRAND.appId}.sounds`;
 
 export const PERM_NAMES: { id: keyof Perms; name: Key; hint: Key }[] = [
   { id: "channels", name: "perm.channels", hint: "perm.channels.hint" },
@@ -302,6 +310,8 @@ export const PERM_NAMES: { id: keyof Perms; name: Key; hint: Key }[] = [
   { id: "ban", name: "perm.ban", hint: "perm.ban.hint" },
   { id: "redact", name: "perm.redact", hint: "perm.redact.hint" },
   { id: "invite", name: "perm.invite", hint: "perm.invite.hint" },
+  { id: "everyone", name: "perm.everyone", hint: "perm.everyone.hint" },
+  { id: "sounds", name: "perm.sounds", hint: "perm.sounds.hint" },
 ];
 
 export function readPerms(client: MatrixClient, spaceId: string): Perms {
@@ -315,6 +325,8 @@ export function readPerms(client: MatrixClient, spaceId: string): Perms {
     channels: needed(space, "m.space.child"),
     server: needed(space, "m.room.name"),
     roles: needed(space, "m.room.power_levels"),
+    everyone: Number(pl.notifications?.room ?? 50),
+    sounds: needed(space, SOUNDS_EVENT),
   };
 }
 
@@ -334,9 +346,11 @@ export async function writePerms(client: MatrixClient, spaceId: string, perms: P
     pl.kick = perms.kick;
     pl.ban = perms.ban;
     pl.redact = perms.redact;
+    pl.notifications = { ...(pl.notifications ?? {}), room: perms.everyone };
     events["m.room.power_levels"] = perms.roles;
 
     if (isSpace) {
+      events[SOUNDS_EVENT] = perms.sounds;
       events["m.space.child"] = perms.channels;
       events["m.room.name"] = perms.server;
       events["m.room.avatar"] = perms.server;
@@ -368,7 +382,7 @@ export function serverMembers(client: MatrixClient, spaceId: string): ServerMemb
     .getJoinedMembers()
     .map((m) => ({
       userId: m.userId,
-      name: m.name || m.userId,
+      name: plainName(m) || localName(m.userId),
       avatar: m.getMxcAvatarUrl() || "",
       level: levelOf(space, m.userId),
     }))
