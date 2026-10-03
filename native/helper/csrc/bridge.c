@@ -1,9 +1,9 @@
 // Bridge between the Rust helper and moonlight-common-c.
 //
 // The library wants its own structures and plain C callbacks. This file fills
-// them in and hands Rust two simple callbacks: a whole video frame in one
-// contiguous buffer, and events (stages, errors, log lines). Audio is not
-// needed (the stream is watched, not played on this machine) and is dropped.
+// them in and hands Rust three simple callbacks: a whole video frame in one
+// contiguous buffer, an Opus audio packet as it arrived (the app decodes it),
+// and events (stages, errors, log lines, the audio format).
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -15,6 +15,7 @@
 typedef void (*ml_frame_cb)(const unsigned char* data, int length, int frame_number, int frame_type,
                             int video_format, int width, int height, unsigned long long pts_us);
 typedef void (*ml_event_cb)(int kind, int code, const char* text);
+typedef void (*ml_audio_cb)(const unsigned char* data, int length);
 
 enum {
     EV_SETUP = 1,
@@ -25,10 +26,12 @@ enum {
     EV_TERMINATED = 6,
     EV_LOG = 7,
     EV_STATUS = 8,
+    EV_AUDIO = 9,
 };
 
 static ml_frame_cb on_frame;
 static ml_event_cb on_event;
+static ml_audio_cb on_audio;
 static int cur_format;
 static int cur_width;
 static int cur_height;
@@ -77,19 +80,23 @@ static int dr_submit(PDECODE_UNIT du) {
     return DR_OK;
 }
 
+// the Opus layout of the stream goes to the app as JSON: it sets up its decoder from it
 static int ar_init(int audio_configuration, const POPUS_MULTISTREAM_CONFIGURATION opus_config, void* context, int ar_flags) {
     (void)audio_configuration;
-    (void)opus_config;
     (void)context;
     (void)ar_flags;
+    char text[200];
+    snprintf(text, sizeof(text), "{\"rate\":%d,\"channels\":%d,\"streams\":%d,\"coupled\":%d,\"frame\":%d}",
+             opus_config->sampleRate, opus_config->channelCount, opus_config->streams, opus_config->coupledStreams,
+             opus_config->samplesPerFrame);
+    on_event(EV_AUDIO, 0, text);
     return 0;
 }
 
 static void ar_nothing(void) {}
 
 static void ar_sample(char* data, int length) {
-    (void)data;
-    (void)length;
+    if (on_audio && data && length > 0) on_audio((const unsigned char*)data, length);
 }
 
 static void cl_stage_starting(int stage) { on_event(EV_STAGE_START, stage, LiGetStageName(stage)); }
@@ -123,9 +130,10 @@ const char* ml_launch_query(void) {
 int ml_start(const char* address, const char* app_version, const char* gfe_version, const char* rtsp_url,
              int server_codec_mode_support, int width, int height, int fps, int bitrate_kbps, int packet_size,
              int video_formats, const unsigned char* aes_key, const unsigned char* aes_iv,
-             ml_frame_cb frame_cb, ml_event_cb event_cb) {
+             ml_frame_cb frame_cb, ml_event_cb event_cb, ml_audio_cb audio_cb) {
     on_frame = frame_cb;
     on_event = event_cb;
+    on_audio = audio_cb;
 
     keep_address = dup_or_null(address);
     keep_app_version = dup_or_null(app_version);
@@ -174,6 +182,8 @@ int ml_start(const char* address, const char* app_version, const char* gfe_versi
     ar.stop = ar_nothing;
     ar.cleanup = ar_nothing;
     ar.decodeAndPlaySample = ar_sample;
+    // packets go straight to the pipe from the receive thread, like video
+    ar.capabilities = CAPABILITY_DIRECT_SUBMIT;
 
     CONNECTION_LISTENER_CALLBACKS cl;
     LiInitializeConnectionCallbacks(&cl);

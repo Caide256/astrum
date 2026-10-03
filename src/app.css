@@ -2885,19 +2885,272 @@ button.file-chip .state {
   font-size: 12px;
 }
 
-.media-video {
-  display: block;
+/* ----------------------------------------------------------- media player */
+
+.player {
+  position: relative;
   margin-top: 4px;
-  max-width: min(480px, 100%);
-  max-height: 360px;
-  border-radius: 10px;
+  max-width: 100%;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--pop-1);
+  border: 1px solid var(--line);
+}
+
+.player.video {
+  max-height: 420px;
+  background: #000;
+  border-color: transparent;
+}
+
+.player.video video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
   background: #000;
 }
 
-.media-audio {
+.player.video:fullscreen {
+  max-height: none;
+  border-radius: 0;
+}
+
+.player-poster {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: radial-gradient(circle at 50% 40%, #2a2d36, #101115);
+  color: #fff;
+}
+
+.player-poster:active:not(:disabled) {
+  transform: none;
+}
+
+.player-poster img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.85;
+}
+
+.player-big {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.player-poster:hover .player-big {
+  transform: scale(1.06);
+  background: var(--accent);
+}
+
+.player-big svg {
+  margin-left: 3px;
+}
+
+.player-caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 18px 12px 8px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.7));
+  text-align: left;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.player-caption small {
   display: block;
-  margin-top: 4px;
-  width: min(360px, 100%);
+  font-weight: 400;
+  opacity: 0.8;
+  font-size: 11.5px;
+}
+
+.player-ring {
+  width: 32px;
+  height: 32px;
+  transform: rotate(-90deg);
+}
+
+.player-ring circle {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.25);
+  stroke-width: 3.2;
+}
+
+.player-ring circle.done {
+  stroke: #fff;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.15s linear;
+}
+
+.player-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 16px 8px 6px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.75));
+  color: #fff;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.player.video.awake .player-bar {
+  opacity: 1;
+}
+
+.player.video.playing:not(.awake) {
+  cursor: none;
+}
+
+.player-btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+}
+
+.player-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.player.audio .player-btn:hover:not(:disabled) {
+  background: var(--bg-3);
+}
+
+.player-time {
+  flex: none;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.9;
+}
+
+/* the seek bar: the played part filled, the rest a faint track */
+.player-seek {
+  flex: 1;
+  min-width: 60px;
+  height: 4px;
+  margin: 0 4px;
+  appearance: none;
+  border-radius: 4px;
+  background: linear-gradient(to right, var(--accent) var(--part, 0%), rgba(255, 255, 255, 0.25) var(--part, 0%));
+  cursor: pointer;
+}
+
+.player.audio .player-seek {
+  background: linear-gradient(to right, var(--accent) var(--part, 0%), var(--bg-3) var(--part, 0%));
+}
+
+.player-seek::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.25);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.player:hover .player-seek::-webkit-slider-thumb {
+  opacity: 1;
+}
+
+.player-volume {
+  flex: none;
+  display: flex;
+  align-items: center;
+}
+
+.player-volume input {
+  width: 0;
+  opacity: 0;
+  transition: width 0.18s ease, opacity 0.18s ease;
+}
+
+.player-volume:hover input {
+  width: 70px;
+  opacity: 1;
+  margin-right: 4px;
+}
+
+.player.audio {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(420px, 100%);
+  padding: 8px 10px;
+}
+
+.player-round {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.player-round .player-ring {
+  width: 30px;
+  height: 30px;
+}
+
+.player-round .player-ring circle.done {
+  stroke: var(--on-accent);
+}
+
+.player-mid {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.player-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.player-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.player.audio .player-time {
+  color: var(--muted);
 }
 
 /* -------------------------------------------------------- status on avatars */
@@ -5561,11 +5814,6 @@ button.quote.fragment {
   gap: 2px;
 }
 
-.pin-tool small {
-  font-size: 11px;
-  font-weight: 600;
-}
-
 .pin-item {
   display: flex;
   align-items: flex-start;
@@ -5864,43 +6112,6 @@ button.quote.fragment {
 
 /* --------------------------------------------------------------- moonlight */
 
-.ml-host .ml-pin {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--bg-1);
-  border: 1px dashed var(--accent);
-}
-
-.ml-pin b {
-  font: 700 26px/1 Consolas, "Cascadia Mono", monospace;
-  letter-spacing: 0.25em;
-  color: var(--accent);
-}
-
-.ml-pin .spinner {
-  width: 18px;
-  height: 18px;
-  margin: 0 0 0 auto;
-  border-width: 2px;
-}
-
-.ml-pin .state {
-  font-size: 12px;
-  max-width: 260px;
-}
-
-.ml-bind,
-.ml-quality {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 10px;
-  margin-top: 8px;
-}
-
 .ml-status {
   display: flex;
   flex-direction: column;
@@ -5913,69 +6124,6 @@ button.quote.fragment {
   font-size: 13px;
   text-align: center;
   padding: 12px;
-}
-
-.ctile.moonlight video {
-  width: 100%;
-  height: 100%;
-  background: #000;
-}
-
-.ml-viewer {
-  position: fixed;
-  right: 24px;
-  bottom: 24px;
-  z-index: 60;
-  width: min(760px, calc(100vw - 48px));
-  aspect-ratio: 16 / 10;
-  display: flex;
-  flex-direction: column;
-  border-radius: 12px;
-  overflow: hidden;
-  background: #000;
-  border: 1px solid var(--line);
-  box-shadow: 0 18px 48px var(--shadow);
-  animation: pop-up 0.2s ease-out;
-  resize: both;
-}
-
-.ml-viewer-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px 6px 12px;
-  background: var(--pop-1);
-  color: var(--text);
-  font-size: 13px;
-}
-
-.ml-viewer-bar b {
-  flex: 1;
-}
-
-.ml-viewer-bar .state {
-  font-size: 11px;
-}
-
-.ml-viewer-bar .small {
-  opacity: 1;
-}
-
-.ml-viewer-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-}
-
-.ml-viewer-body video {
-  width: 100%;
-  height: 100%;
-}
-
-.ml-viewer:fullscreen {
-  border-radius: 0;
-  width: 100vw;
-  height: 100vh;
 }
 
 /* ======================================================= fixes and panels of 0.8 */
@@ -6115,8 +6263,8 @@ button.quote.fragment {
   gap: 6px 10px;
   padding: 10px 8px 10px 12px;
   border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
-  background: color-mix(in srgb, var(--warn) 12%, var(--bg-1));
+  border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--pop-1));
+  background: color-mix(in srgb, var(--warn) 12%, var(--pop-1));
   box-shadow: 0 10px 28px var(--shadow);
   font-size: 12.5px;
   line-height: 1.35;
@@ -6130,7 +6278,7 @@ button.quote.fragment {
   top: 100%;
   right: 84px;
   border: 7px solid transparent;
-  border-top-color: color-mix(in srgb, var(--warn) 55%, transparent);
+  border-top-color: color-mix(in srgb, var(--warn) 55%, var(--pop-1));
 }
 
 .me-bar > .dock-notice.mic-silent::after {
@@ -6281,8 +6429,30 @@ button.quote.fragment {
 }
 
 .unread-bar.older {
-  background: var(--bg-3);
+  background: var(--pop-2);
   color: var(--text);
+}
+
+/* the "older messages" bar is a single button: the whole strip jumps down */
+button.unread-bar {
+  padding: 0;
+  border: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.unread-bar > span {
+  padding: 6px 14px;
+  font-size: 13px;
+}
+
+button.unread-bar:hover:not(:disabled) {
+  background: var(--pop-3);
+}
+
+button.unread-bar:active:not(:disabled) {
+  transform: none;
 }
 
 .unread-bar button {
@@ -6498,23 +6668,6 @@ button.quote.fragment {
   user-select: none;
 }
 
-.streamer-chip {
-  flex: none;
-  padding: 2px 6px;
-  border: none;
-  border-radius: 5px;
-  background: #9147ff;
-  color: #fff;
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.05em;
-}
-
-.me-bar button.streamer-chip:hover:not(:disabled) {
-  background: #7d2df0;
-  color: #fff;
-}
-
 /* --------------------------------------------------------- settings layout */
 
 .pane-title {
@@ -6583,7 +6736,24 @@ button.quote.fragment {
 .banner {
   position: relative;
   overflow: hidden;
+  isolation: isolate;
   transition: background-color 0.3s ease;
+}
+
+/* the banner picture lies under everything else in its box */
+.banner-picture {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+  user-select: none;
+}
+
+.ctile.member {
+  isolation: isolate;
 }
 
 .banner-deco {
@@ -6668,6 +6838,101 @@ button.quote.fragment {
 
 .banner-preview-who .avatar {
   box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.25);
+}
+
+/* the banner editor: the profile card and a call tile side by side */
+.banner-spots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 8px;
+}
+
+.banner-spot {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.banner-spot-box {
+  position: relative;
+  border-radius: 12px;
+  touch-action: none;
+}
+
+.banner-spot-box.movable {
+  cursor: grab;
+}
+
+.banner-spot-box.movable:active {
+  cursor: grabbing;
+}
+
+.banner-preview.card {
+  width: 300px;
+  height: 88px;
+}
+
+.banner-preview.tile {
+  width: 196px;
+  height: 110px;
+  display: grid;
+  place-items: center;
+}
+
+.banner-preview .banner-preview-face {
+  position: relative;
+  z-index: 1;
+}
+
+.banner-preview-label {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  max-width: calc(100% - 12px);
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  z-index: 1;
+}
+
+.drop-over {
+  outline: 2px dashed var(--accent);
+  outline-offset: 2px;
+}
+
+.drop-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  padding: 8px;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--accent) 35%, rgba(0, 0, 0, 0.55));
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+  pointer-events: none;
+}
+
+.banner-zoom {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 2px 0 4px;
+}
+
+.banner-zoom input[type="range"] {
+  flex: 1;
+  max-width: 280px;
+}
+
+.banner-zoom .state {
+  min-width: 110px;
 }
 
 .banner-controls {
@@ -6989,7 +7254,8 @@ button.quote.fragment {
   padding: 5px;
   border-radius: 10px;
   border: 1px solid var(--line);
-  background: var(--bg-1);
+  /* solid: a see-through list over the profile card is unreadable */
+  background: var(--pop-1);
   box-shadow: 0 14px 34px var(--shadow);
   animation: drop-in 0.14s ease-out;
 }
@@ -7030,6 +7296,30 @@ button.quote.fragment {
   background: #9147ff;
 }
 
+/* streaming: a purple dot with a play mark, as on Twitch */
+.status-dot.streamer {
+  background: #9147ff;
+}
+
+.status-dot.streamer::after {
+  content: "";
+  position: absolute;
+  left: 36%;
+  top: 25%;
+  width: 40%;
+  height: 50%;
+  background: var(--bg-1);
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+}
+
+.dock .status-dot.streamer::after {
+  background: var(--bg-0);
+}
+
+.presence.streamer {
+  color: #b48cff;
+}
+
 /* ---------------------------------------------- menus over the image viewer */
 
 .menu-back.over-viewer {
@@ -7050,4 +7340,186 @@ button.quote.fragment {
 
 .profile-banner {
   border-radius: 13px 13px 0 0;
+}
+
+/* an avatar that takes a dropped picture */
+.avatar-drop {
+  position: relative;
+  flex: none;
+  border-radius: 50%;
+}
+
+.avatar-drop:has(.square-avatar) {
+  border-radius: 14px;
+}
+
+.avatar-drop .drop-veil {
+  font-size: 11px;
+}
+
+/* editing a message: its own file can be taken out, new ones added */
+.attach-card.sent {
+  outline: 1px dashed var(--line);
+}
+
+.compose-note {
+  padding: 6px 14px 0;
+  font-size: 12px;
+}
+
+.composer-send.danger {
+  background: var(--danger);
+}
+
+/* ------------------------------------------------------------- Sunshine */
+
+/* a stream through Sunshine: a yellow dot instead of the red one */
+.live-dot.sun {
+  background: #f0b232;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #f0b232 30%, transparent);
+}
+
+.ctl.live.sun,
+.dock-buttons button.live.sun {
+  color: #f0b232;
+}
+
+.share-mode {
+  align-self: flex-start;
+  margin-bottom: 10px;
+}
+
+.share-mode button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.share-mode .live-dot {
+  position: static;
+  width: 8px;
+  height: 8px;
+}
+
+.sun-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sun-net {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sun-net-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--pop-2);
+  font-size: 13px;
+}
+
+.sun-net-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.sun-net-dot.white {
+  background: var(--ok);
+}
+
+.sun-net-dot.gray {
+  background: var(--danger);
+}
+
+.sun-net-dot.unknown {
+  background: var(--warn);
+}
+
+.sun-net-dot.checking {
+  background: var(--accent);
+  animation: sun-pulse 0.9s ease-in-out infinite alternate;
+}
+
+@keyframes sun-pulse {
+  to {
+    opacity: 0.35;
+  }
+}
+
+.sun-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ml-rate {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.ml-rate b {
+  font-size: 16px;
+}
+
+/* the streamer decides who may watch: cards at the top right, clear of the call buttons */
+.sun-requests {
+  position: fixed;
+  right: 18px;
+  top: calc(var(--titlebar-h, 0px) + 64px);
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(380px, calc(100vw - 36px));
+}
+
+.sun-request {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, #f0b232 45%, var(--line));
+  background: var(--pop-1);
+  box-shadow: 0 14px 34px var(--shadow);
+  animation: pop-up 0.2s ease-out;
+}
+
+.sun-request.warn {
+  border-color: color-mix(in srgb, var(--warn) 55%, var(--line));
+}
+
+.sun-request b {
+  display: block;
+}
+
+.sun-request-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* the tile of a Sunshine stream while it connects or waits */
+.ctile .ml-status {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 14px;
+  text-align: center;
+  color: var(--text);
+  background: radial-gradient(circle at 50% 40%, color-mix(in srgb, #f0b232 10%, var(--bg-1)), var(--bg-0));
 }

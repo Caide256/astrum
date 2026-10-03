@@ -277,6 +277,39 @@ export async function openPcmFeed(): Promise<PcmFeed> {
   };
 }
 
+/** A speaker for raw PCM from elsewhere (a Moonlight stream): same ring buffer, own volume and output. */
+export type PcmPlayer = {
+  push: (chunk: ArrayBuffer) => void;
+  /** 0..2, 1 is the stream as it came. */
+  setGain: (gain: number) => void;
+  setSink: (deviceId: string) => void;
+  close: () => Promise<void>;
+};
+
+export async function openPcmPlayer(sinkId: string): Promise<PcmPlayer> {
+  const ctx = new AudioContext({ sampleRate: 48000, latencyHint: "interactive" });
+  await addWorklet(ctx, feedWorkletUrl);
+  const node = new AudioWorkletNode(ctx, "pcm-feed", { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
+  const gain = ctx.createGain();
+  node.connect(gain).connect(ctx.destination);
+  const setSink = (id: string) => {
+    const c = ctx as AudioContext & { setSinkId?: (id: string) => Promise<void> };
+    void c.setSinkId?.(id || "").catch(() => undefined);
+  };
+  if (sinkId) setSink(sinkId);
+  if (ctx.state === "suspended") void ctx.resume();
+  return {
+    push: (chunk) => node.port.postMessage(chunk, [chunk]),
+    setGain: (v) => gain.gain.setTargetAtTime(Math.max(0, Math.min(2, v)), ctx.currentTime, 0.03),
+    setSink,
+    close: async () => {
+      node.disconnect();
+      gain.disconnect();
+      await ctx.close().catch(() => undefined);
+    },
+  };
+}
+
 /* ------------------------------------------------------------- UI sounds */
 
 export type Blip =

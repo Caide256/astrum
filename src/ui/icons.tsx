@@ -99,6 +99,13 @@ export const IconPlay = (p: Props) => (
   </Svg>
 );
 
+export const IconPause = (p: Props) => (
+  <Svg {...p} stroke="none">
+    <rect fill="currentColor" x="4" y="2.8" width="2.8" height="10.4" rx="0.9" />
+    <rect fill="currentColor" x="9.2" y="2.8" width="2.8" height="10.4" rx="0.9" />
+  </Svg>
+);
+
 export const IconClip = (p: Props) => (
   <Svg {...p}>
     <path d="M12.6 7.4 7.5 12.5a3.2 3.2 0 0 1-4.5-4.5l5.6-5.6a2.1 2.1 0 1 1 3 3l-5.6 5.6a1 1 0 0 1-1.5-1.5l5.1-5.1" />
@@ -370,9 +377,14 @@ export const IconSignal = (p: Props) => (
   </Svg>
 );
 
+/** A pushpin: a round cap, a waist, a wide base and the needle, tilted as if just pressed in. */
 export const IconPin = (p: Props) => (
   <Svg {...p}>
-    <path d="M9.6 2.4 13.6 6.4 11.9 7 9.6 9.3 10 12.2 8.9 13.3 6.3 10.7 3.2 13.8M6.3 10.7 2.7 7.1 3.8 6 6.7 6.4 9 4.1Z" />
+    <g transform="rotate(38 8 8)">
+      <path d="M5.4 2.1h5.2" />
+      <path d="M6.5 2.1v4L4.5 8.4h7L9.5 6.1v-4" />
+      <path d="M8 8.4v5.5" />
+    </g>
   </Svg>
 );
 

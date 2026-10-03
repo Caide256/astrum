@@ -12,17 +12,18 @@ import {
   screenButton,
   toggleCallChat,
   toggleCamera,
+  withoutPicture,
 } from "../app.ts";
-import { ml, stopWatching } from "../moonlight.ts";
+import { useViewPrefs } from "../prefs.ts";
 import { t, tn } from "../i18n/index.ts";
 import { useStore } from "../store.ts";
 import { voice, type VoiceMember, type VoiceStream, type VoiceVideo } from "../voice/voice.ts";
 import { Avatar } from "./Avatar.tsx";
-import { EmojiDeco, useBannerStyle } from "./Banner.tsx";
+import { BannerPicture, EmojiDeco, useBannerStyle } from "./Banner.tsx";
 import { Chat } from "./Main.tsx";
 import { useLinger } from "./controls.tsx";
 import { popOut } from "./popout.ts";
-import { MoonlightPicture } from "./Moonlight.tsx";
+import { SunWatchStatus, useSunWatchInfo } from "./Moonlight.tsx";
 import { SoundboardButton } from "./Soundboard.tsx";
 import { VideoView } from "./Stage.tsx";
 import {
@@ -49,8 +50,7 @@ import {
 
 type Tile =
   | { kind: "member"; key: string; member: VoiceMember; video?: VoiceVideo }
-  | { kind: "stream"; key: string; stream: VoiceStream; video?: VoiceVideo }
-  | { kind: "moonlight"; key: string; userId: string };
+  | { kind: "stream"; key: string; stream: VoiceStream; video?: VoiceVideo };
 
 const RATIO = 16 / 9;
 const GAP = 8;
@@ -176,37 +176,11 @@ function TileView({
   const box = useRef<HTMLDivElement>(null);
   // the banner the person chose: sent by their app in the call, or read from their server membership
   const person = tile.kind === "member" ? tile.member : null;
-  const mlWatch = useStore(ml, (s) => s.watching);
-  const look = person ? (person.tile ?? bannerOf(person.userId, roomId)) : null;
+  const sunInfo = useSunWatchInfo(tile.kind === "stream" ? tile.stream.identity : "");
+  useViewPrefs();
+  // a banner sent in the call wins over the stored one; pictures of others follow the switch in settings
+  const look = person ? (person.local ? bannerOf(person.userId, roomId) : (withoutPicture(person.tile) ?? bannerOf(person.userId, roomId))) : null;
   const bannerStyle = useBannerStyle(look, person ? avatarMxc(person.userId, roomId) : "", person ? tint(person.userId || person.id) : "");
-
-  if (tile.kind === "moonlight") {
-    return (
-      <div
-        ref={box}
-        className={`ctile stream moonlight ${focused ? "focused" : ""}`}
-        style={style}
-        onClick={onFocus}
-        onDoubleClick={() => toggleFullscreen(box.current)}
-      >
-        <MoonlightPicture />
-        <div className="tile-tools" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
-          <button className="icon" title={t("call.fullscreen")} onClick={() => toggleFullscreen(box.current)}>
-            <IconFullscreen />
-          </button>
-          <button className="icon" title={t("ml.stop")} onClick={stopWatching}>
-            <IconClose />
-          </button>
-        </div>
-        <div className="ctile-label">
-          <i className="live-dot" />
-          <IconScreen />
-          <span className="ellipsis">{t("ml.title", { who: displayName(tile.userId, roomId) })}</span>
-          {mlWatch?.status === "live" && <span className="viewers">{mlWatch.height}p</span>}
-        </div>
-      </div>
-    );
-  }
 
   if (tile.kind === "stream") {
     const { stream, video } = tile;
@@ -218,6 +192,30 @@ function TileView({
           <VideoView video={video} />
           <StreamTools stream={stream} video={video} />
         </>
+      );
+    } else if (stream.sunshine && stream.watching) {
+      // connecting, waiting for the streamer to let us in, or what went wrong
+      body = (
+        <>
+          <SunWatchStatus identity={stream.identity} userId={stream.userId} />
+          <div className="tile-tools" onClick={(e) => e.stopPropagation()}>
+            <button className="icon" title={t("share.stopWatching")} onClick={() => voice.unwatch(stream.identity)}>
+              <IconClose />
+            </button>
+          </div>
+        </>
+      );
+    } else if (stream.sunshine && stream.local) {
+      body = (
+        <div className="ctile-offer">
+          <Avatar mxc={avatarMxc(stream.userId, roomId)} name={who} size={56} />
+          <span className="state">{t("sun.ownTile")}</span>
+          <div className="ctile-actions">
+            <button className="round-btn" title={t("share.settings")} onClick={(e) => (e.stopPropagation(), openShareSettings())}>
+              <IconGear size={18} />
+            </button>
+          </div>
+        </div>
       );
     } else {
       body = (
@@ -250,10 +248,11 @@ function TileView({
       >
         {body}
         <div className="ctile-label">
-          <i className="live-dot" />
+          <i className={`live-dot ${stream.sunshine ? "sun" : ""}`} title={stream.sunshine ? t("sun.dot") : undefined} />
           <IconScreen />
           <span className="ellipsis">{stream.local ? t("call.yourScreen") : who}</span>
           {stream.muted && <IconVolumeOff className="flag off" />}
+          {sunInfo && <span className="viewers">{sunInfo}</span>}
           {stream.local && <Viewers ids={stream.viewers} />}
         </div>
       </div>
@@ -282,6 +281,7 @@ function TileView({
         </>
       ) : (
         <>
+          <BannerPicture look={look} />
           <EmojiDeco emoji={look?.emoji} scale={Math.max(0.7, Math.min(1.6, (((style?.height as number) || 120) / 160)))} />
           <Avatar mxc={avatarMxc(member.userId, roomId)} name={who} size={Math.max(40, Math.min(96, ((style?.height as number) || 120) * 0.42))} />
         </>
@@ -340,11 +340,11 @@ function Controls() {
 
       <div className="ctl-group">
         <button
-          className={`ctl ${state.screen ? "live" : ""}`}
-          title={state.screen ? t("call.shareMenu") : t("call.shareScreen")}
+          className={`ctl ${state.screen ? "live" : ""} ${state.sunshine ? "live sun" : ""}`}
+          title={state.screen || state.sunshine ? t("call.shareMenu") : t("call.shareScreen")}
           onClick={(e) => screenButton(e.currentTarget)}
         >
-          {state.screen ? <IconScreen /> : <IconScreenOff />}
+          {state.screen || state.sunshine ? <IconScreen /> : <IconScreenOff />}
         </button>
       </div>
 
@@ -384,9 +384,7 @@ export function CallView() {
   const videoOf = (identity: string, screen: boolean) =>
     state.videos.find((v) => v.identity === identity && v.screen === screen);
 
-  const watching = useStore(ml, (s) => s.watching);
   const tiles: Tile[] = [
-    ...(watching ? [{ kind: "moonlight", key: "ml", userId: watching.userId } as Tile] : []),
     ...state.streams.map<Tile>((s) => ({ kind: "stream", key: `s:${s.identity}`, stream: s, video: videoOf(s.identity, true) })),
     ...state.members.map<Tile>((m) => ({ kind: "member", key: `m:${m.id}`, member: m, video: videoOf(m.id, false) })),
   ];

@@ -45,9 +45,11 @@ import { startHotkeys } from "./hotkeys.ts";
 import { compareText, t } from "./i18n/index.ts";
 import {
   getNotifyMode,
+  getNotifyPrefs,
   getServerProfiles,
   getSoundPrefs,
   getTileLook,
+  getViewPrefs,
   isMuted,
   onServerProfilesChange,
   onTileLookChange,
@@ -56,6 +58,7 @@ import {
   startPrefsSync,
   stopPrefsSync,
 } from "./prefs.ts";
+import { stopSunshineStream } from "./sunshine.ts";
 import { setTrayUnread } from "./tray.ts";
 import { setBeforeInstall } from "./update.ts";
 import { blip, playBoardSound, soundLength } from "./voice/audio.ts";
@@ -75,6 +78,10 @@ export type Media = {
   caption: string;
   w: number;
   h: number;
+  /** A still picture of a video, if the sender made one. */
+  thumb: { mxc: string; file: EncryptedFile | null; mime: string } | null;
+  /** Length of a video or a sound in milliseconds, 0 if unknown. */
+  duration: number;
 };
 
 /** A file being uploaded. */
@@ -216,6 +223,8 @@ export type AppState = {
   highlight: string | null;
   /** The member list on the right is collapsed. */
   membersHidden: boolean;
+  /** In direct chats the member list is hidden unless asked for: two people need no list. */
+  directMembers: boolean;
   /** The chat panel next to the call. */
   callChat: boolean;
   /** The tile last expanded in the call; the mini player shows it outside the call. */
@@ -314,6 +323,7 @@ export const app = createStore<AppState>({
   typing: [],
   highlight: null,
   membersHidden: loadFlag("app.members-hidden"),
+  directMembers: loadFlag("app.direct-members"),
   callChat: loadFlag("app.call-chat"),
   lastFocus: null,
   placeMenu: null,
@@ -351,10 +361,24 @@ export function me(): string {
   return client?.getUserId() ?? "";
 }
 
-export function toggleMembers(): void {
+/** The member list button: in a direct chat it has its own switch, off by default. */
+export function toggleMembers(direct = false): void {
+  if (direct) {
+    const shown = !app.get().directMembers;
+    saveFlag("app.direct-members", shown);
+    app.set({ directMembers: shown });
+    return;
+  }
   const hidden = !app.get().membersHidden;
   saveFlag("app.members-hidden", hidden);
   app.set({ membersHidden: hidden });
+}
+
+/** Whether the member list shows next to this chat. */
+export function membersShown(roomId: string | null): boolean {
+  const s = app.get();
+  const direct = !!roomId && s.directs.some((d) => d.roomId === roomId);
+  return direct ? s.directMembers : !s.membersHidden;
 }
 
 export function toggleCallChat(open = !app.get().callChat): void {
@@ -454,6 +478,31 @@ function refreshMe(): void {
   app.set({ myName: user?.displayName || displayName(id), myAvatar: user?.avatarUrl || avatarMxc(id) });
 }
 
+/**
+ * The own name and picture as the server has them. The client learns about
+ * profile changes from room events, so an account that is in no room yet (a
+ * fresh sign-up) kept showing the old picture after setting a new one.
+ */
+async function fetchMe(): Promise<void> {
+  const c = client;
+  if (!c) return;
+  const id = c.getUserId() ?? "";
+  try {
+    const p = await c.getProfileInfo(id);
+    if (client !== c) return;
+    const user = c.getUser(id);
+    if (user) {
+      if (p.displayname) user.setDisplayName(p.displayname);
+      user.setAvatarUrl(p.avatar_url || undefined);
+    }
+    profileCache.clear();
+    app.set({ myName: p.displayname || app.get().myName, myAvatar: p.avatar_url ?? "" });
+    bump();
+  } catch {
+    // the server did not answer: what the client knows stays
+  }
+}
+
 /** Everything after the client exists: sync, lists, the last opened channel. */
 async function launch(s: session.Session, c: MatrixClient): Promise<void> {
   afterConnect(s, c);
@@ -470,6 +519,7 @@ async function launch(s: session.Session, c: MatrixClient): Promise<void> {
   startPrefsSync(c);
   refreshRooms();
   refreshMe();
+  void fetchMe();
   app.set({ phase: "ready" });
   restoreChannel();
   startPresence();
@@ -550,6 +600,7 @@ export async function doRegister(
   if ((await enter(s)) && shownName.trim() && client) {
     await people.setName(client, shownName).catch(() => undefined);
     refreshMe();
+    await fetchMe();
   }
 }
 
@@ -777,12 +828,16 @@ export function roomMuted(roomId: string): boolean {
 function unreadForTray(): number {
   const s = app.get();
   const mode = getNotifyMode();
-  let n = s.directs.filter((d) => !isMuted("users", d.userId)).reduce((sum, d) => sum + d.unread, 0) + s.invites.length;
+  const voiceChats = getNotifyPrefs().voiceChats;
+  let n =
+    s.directs.filter((d) => !isMuted("users", d.userId) && !readingNow(d.roomId)).reduce((sum, d) => sum + d.unread, 0) +
+    s.invites.length;
   for (const g of s.servers) {
     for (const ch of g.channels) {
-      // voice channels have chats too
+      if (readingNow(ch.roomId)) continue;
       if (ch.mentions > 0) n += ch.mentions;
-      else if (mode === "all" && !roomMuted(ch.roomId)) n += ch.unread;
+      // voice channels have chats too; their plain messages count only when asked for
+      else if (mode === "all" && !roomMuted(ch.roomId) && (ch.kind !== "voice" || voiceChats)) n += ch.unread;
     }
   }
   return n;
@@ -806,7 +861,13 @@ export async function acceptInvite(invite: people.Invite): Promise<void> {
       await openChat(invite.roomId);
     }
   } catch (e) {
-    app.set({ busy: "", error: humanError(e) });
+    if (!people.isDeadInvite(e)) {
+      app.set({ busy: "", error: humanError(e) });
+      return;
+    }
+    // everybody left that chat: it can never be joined, so the invite goes away by itself
+    app.set({ busy: "", error: t("invite.err.dead") });
+    await declineInvite(invite, true);
   }
 }
 
@@ -827,7 +888,8 @@ export async function deleteDirect(roomId: string): Promise<void> {
   refreshDirects();
 }
 
-export async function declineInvite(invite: people.Invite): Promise<void> {
+/** `quiet`: the reason was already shown, a failed decline only hides the invite. */
+export async function declineInvite(invite: people.Invite, quiet = false): Promise<void> {
   if (!client) return;
   try {
     await people.declineInvite(client, invite.roomId);
@@ -835,7 +897,7 @@ export async function declineInvite(invite: people.Invite): Promise<void> {
     // the server could not decline it: hide it and try again on a later start
     const error = humanError(e);
     await people.hideInvite(client, invite).catch(() => undefined);
-    app.set({ error: t("invite.err.stuck", { error }) });
+    if (!quiet) app.set({ error: t("invite.err.stuck", { error }) });
   }
   refreshRooms();
 }
@@ -1213,6 +1275,8 @@ function mediaOf(content: Record<string, any>): Media | null {
   const info = (content.info ?? {}) as Record<string, any>;
   const body = String(content.body ?? "");
   const filename = typeof content.filename === "string" ? content.filename : "";
+  const thumbFile = info.thumbnail_file && typeof info.thumbnail_file.url === "string" ? (info.thumbnail_file as EncryptedFile) : null;
+  const thumbMxc = String(thumbFile?.url ?? info.thumbnail_url ?? "");
   return {
     mxc,
     file,
@@ -1223,6 +1287,8 @@ function mediaOf(content: Record<string, any>): Media | null {
     caption: filename && body && body !== filename ? body : "",
     w: Number(info.w ?? 0),
     h: Number(info.h ?? 0),
+    thumb: isMxc(thumbMxc) ? { mxc: thumbMxc, file: thumbFile, mime: String(info.thumbnail_info?.mimetype ?? "image/jpeg") } : null,
+    duration: Math.max(0, Number(info.duration ?? 0) || 0),
   };
 }
 
@@ -1441,24 +1507,12 @@ export async function openDirectWith(userId: string): Promise<void> {
 export async function send(text: string): Promise<void> {
   const state = app.get();
   const roomId = state.activeChannel;
-  // an attachment's caption may be cleared, so an empty edit is allowed
-  if (!client || !roomId || (!text.trim() && !state.editing?.media)) return;
+  // an edit may clear the text: a caption goes, an empty message is deleted
+  if (!client || !roomId || (!text.trim() && !state.editing)) return;
   typingNow(false);
 
   if (state.editing) {
-    const target = state.editing.eventId;
-    app.set({ editing: null });
-    const ev = client.getRoom(roomId)?.findEventById(target);
-    const current = ev ? msg.currentContent(ev).content : null;
-    if (current && msg.isMediaContent(current)) await msg.editCaption(client, roomId, target, current, text);
-    else if (text.trim()) {
-      const before = previewUrls(msg.stripReplyFallback(String(current?.body ?? "")));
-      const now = previewUrls(text);
-      const old = Array.isArray(current?.[PREVIEWS]) ? (current?.[PREVIEWS] as Record<string, any>[]) : [];
-      const kept = old.filter((p) => now.includes(String(p?.matched_url ?? "")));
-      const added = await buildPreviews(roomId, now.filter((u) => !before.includes(u)));
-      await msg.editText(client, roomId, target, text, mentionResolver(roomId), { [PREVIEWS]: [...kept, ...added] });
-    }
+    await saveEdit(text, state.editing.media, []);
     return;
   }
 
@@ -1509,6 +1563,56 @@ function groupPing(roomId: string, text: string): msg.GroupPing | undefined {
   return { room: false, users };
 }
 
+/** A text edit: the link cards follow the links that are still in the text. */
+async function editTextMessage(roomId: string, target: string, current: Record<string, any> | null, text: string): Promise<void> {
+  const c = client;
+  if (!c || !text.trim()) return;
+  const before = current && !msg.isMediaContent(current) ? previewUrls(msg.stripReplyFallback(String(current.body ?? ""))) : [];
+  const now = previewUrls(text);
+  const old = Array.isArray(current?.[PREVIEWS]) ? (current?.[PREVIEWS] as Record<string, any>[]) : [];
+  const kept = old.filter((p) => now.includes(String(p?.matched_url ?? "")));
+  const added = await buildPreviews(roomId, now.filter((u) => !before.includes(u)));
+  await msg.editText(c, roomId, target, text, mentionResolver(roomId), { [PREVIEWS]: [...kept, ...added] });
+}
+
+/**
+ * Save an edit. The attachment of the message may be removed and new files
+ * added. A Matrix message holds one file: the first new file takes the place
+ * of a removed one (or turns a text message into a file with that text as its
+ * caption), the rest follow as messages of their own. A message left with no
+ * text and no file is deleted.
+ */
+export async function saveEdit(text: string, keepMedia: boolean, files: File[]): Promise<void> {
+  const state = app.get();
+  const roomId = state.activeChannel;
+  const editing = state.editing;
+  const c = client;
+  if (!c || !roomId || !editing) return;
+  app.set({ editing: null });
+  typingNow(false);
+  const target = editing.eventId;
+  const ev = c.getRoom(roomId)?.findEventById(target);
+  const current = ev ? msg.currentContent(ev).content : null;
+  const hadMedia = !!current && msg.isMediaContent(current);
+  try {
+    if (hadMedia && keepMedia && current) {
+      await msg.editCaption(c, roomId, target, current, text);
+    } else if (files.length) {
+      const content = await buildAttachment(roomId, files[0], text.trim());
+      if (content) await msg.editToContent(c, roomId, target, content);
+      files = files.slice(1);
+    } else if (text.trim()) {
+      await editTextMessage(roomId, target, current, text);
+    } else {
+      // nothing left of the message
+      await msg.remove(c, roomId, target);
+    }
+    for (const f of files) await sendAttachment(roomId, f, "", null);
+  } catch (e) {
+    app.set({ error: humanError(e) });
+  }
+}
+
 let uploadLimit: Promise<number> | null = null;
 
 /** Maximum upload size in bytes, asked once. */
@@ -1535,6 +1639,52 @@ async function imageSize(file: File): Promise<{ w: number; h: number } | null> {
     return size;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Length, size and a still picture of a video (length only for a sound), as
+ * Element sends them: the player can show the picture and the length before
+ * anything is downloaded.
+ */
+async function mediaMeta(
+  file: File,
+  video: boolean,
+): Promise<{ duration: number; w: number; h: number; thumb: { blob: Blob; w: number; h: number } | null }> {
+  const none = { duration: 0, w: 0, h: 0, thumb: null };
+  const url = URL.createObjectURL(file);
+  const el = document.createElement(video ? "video" : "audio") as HTMLVideoElement;
+  el.muted = true;
+  el.preload = "metadata";
+  el.src = url;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      el.onloadedmetadata = () => resolve();
+      el.onerror = () => reject(new Error("no metadata"));
+      window.setTimeout(() => reject(new Error("timeout")), 8000);
+    });
+    const duration = Number.isFinite(el.duration) ? Math.round(el.duration * 1000) : 0;
+    if (!video || !el.videoWidth) return { ...none, duration };
+    const w = el.videoWidth;
+    const h = el.videoHeight;
+    // a frame a little in: the very first one is often black
+    el.currentTime = Math.min(1, (el.duration || 0) / 10);
+    await new Promise<void>((resolve) => {
+      el.onseeked = () => resolve();
+      window.setTimeout(resolve, 3000);
+    });
+    const k = Math.min(1, 800 / Math.max(w, h));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(w * k));
+    canvas.height = Math.max(1, Math.round(h * k));
+    canvas.getContext("2d")?.drawImage(el, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/jpeg", 0.82));
+    return { duration, w, h, thumb: blob ? { blob, w: canvas.width, h: canvas.height } : null };
+  } catch {
+    return none;
+  } finally {
+    el.removeAttribute("src");
+    URL.revokeObjectURL(url);
   }
 }
 
@@ -1566,6 +1716,24 @@ function mimeByName(name: string): string {
 async function sendAttachment(roomId: string, file: File, caption: string, reply: ReplyPreview | null): Promise<void> {
   const c = client;
   if (!c) return;
+  try {
+    const content = await buildAttachment(roomId, file, caption);
+    if (!content) return;
+    if (reply) content["m.relates_to"] = { "m.in_reply_to": { event_id: reply.eventId } };
+    await c.sendMessage(roomId, content as never);
+  } catch (e) {
+    app.set({ error: t("chat.err.upload", { name: file.name, error: humanError(e) }) });
+  }
+}
+
+/**
+ * Upload one file and make the message content for it, with the progress bar
+ * above the field. In an encrypted room the file (and the still picture of a
+ * video) is encrypted here first. Errors are thrown to the caller.
+ */
+async function buildAttachment(roomId: string, file: File, caption: string): Promise<Record<string, unknown> | null> {
+  const c = client;
+  if (!c) return null;
   const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   app.set({ uploads: [...app.get().uploads, { id, name: file.name, progress: 0 }] });
   try {
@@ -1578,9 +1746,32 @@ async function sendAttachment(roomId: string, file: File, caption: string, reply
           ? "m.audio"
           : "m.file";
     const info: Record<string, unknown> = { mimetype: mime, size: file.size };
+    const encrypted = !!c.getRoom(roomId)?.hasEncryptionStateEvent();
     if (kind === "m.image") {
       const dims = await imageSize(file);
       if (dims) Object.assign(info, dims);
+    } else if (kind === "m.video" || kind === "m.audio") {
+      const meta = await mediaMeta(file, kind === "m.video");
+      if (meta.duration) info.duration = meta.duration;
+      if (meta.w && meta.h) Object.assign(info, { w: meta.w, h: meta.h });
+      if (meta.thumb) {
+        // the still picture goes the same way as the file: encrypted in encrypted rooms
+        try {
+          const t = meta.thumb;
+          const thumbInfo = { w: t.w, h: t.h, mimetype: "image/jpeg", size: t.blob.size };
+          if (encrypted) {
+            const { data, file: enc } = await encryptAttachment(await t.blob.arrayBuffer());
+            const up = await c.uploadContent(new Blob([data]), { type: "application/octet-stream", includeFilename: false });
+            info.thumbnail_file = { ...enc, url: up.content_uri, mimetype: "image/jpeg" };
+          } else {
+            const up = await c.uploadContent(t.blob, { type: "image/jpeg", includeFilename: false });
+            info.thumbnail_url = up.content_uri;
+          }
+          info.thumbnail_info = thumbInfo;
+        } catch {
+          // the video goes without a still picture
+        }
+      }
     }
     const progressHandler = (p: { loaded: number; total: number }) =>
       setUpload(id, { progress: p.total ? p.loaded / p.total : 0 });
@@ -1588,7 +1779,7 @@ async function sendAttachment(roomId: string, file: File, caption: string, reply
     const content: Record<string, unknown> = { msgtype: kind, body: caption || file.name, info };
     if (caption) content.filename = file.name;
 
-    if (c.getRoom(roomId)?.hasEncryptionStateEvent()) {
+    if (encrypted) {
       const { data, file: enc } = await encryptAttachment(await file.arrayBuffer());
       const up = await c.uploadContent(new Blob([data]), {
         type: "application/octet-stream",
@@ -1600,10 +1791,7 @@ async function sendAttachment(roomId: string, file: File, caption: string, reply
       const up = await c.uploadContent(file, { type: mime, name: file.name, progressHandler });
       content.url = up.content_uri;
     }
-    if (reply) content["m.relates_to"] = { "m.in_reply_to": { event_id: reply.eventId } };
-    await c.sendMessage(roomId, content as never);
-  } catch (e) {
-    app.set({ error: t("chat.err.upload", { name: file.name, error: humanError(e) }) });
+    return content;
   } finally {
     setUpload(id, null);
   }
@@ -1617,7 +1805,11 @@ export async function sendMessage(text: string, files: File[]): Promise<void> {
   const state = app.get();
   const roomId = state.activeChannel;
   if (!client || !roomId) return;
-  if (state.editing || !files.length) {
+  if (state.editing) {
+    await saveEdit(text, state.editing.media, files);
+    return;
+  }
+  if (!files.length) {
     await send(text);
     return;
   }
@@ -1907,6 +2099,8 @@ export function typingNow(active: boolean): void {
 }
 
 let reading = false;
+/** Something arrived while a receipt was on the way: one more goes after it. */
+let readAgain = false;
 
 /**
  * Whether the open chat shows its newest messages. Scrolled up, new messages
@@ -1923,15 +2117,30 @@ export function setChatAtBottom(at: boolean): void {
 function readActive(): void {
   const roomId = app.get().activeChannel;
   const room = roomId ? client?.getRoom(roomId) : null;
-  if (!client || !room || reading || document.hidden || !chatAtBottom) return;
+  if (!client || !room || document.hidden || !chatAtBottom) return;
+  if (reading) {
+    // a burst of messages: the receipt for the last one must still go out
+    readAgain = true;
+    return;
+  }
   reading = true;
+  readAgain = false;
   void msg
     .markRead(client, room)
     .catch(() => undefined)
     .finally(() => {
       reading = false;
       scheduleRooms();
+      if (readAgain) {
+        readAgain = false;
+        readActive();
+      }
     });
+}
+
+/** The open chat is being read right now: its badge counts nowhere. */
+export function readingNow(roomId: string): boolean {
+  return roomId === app.get().activeChannel && chatAtBottom && !document.hidden && !app.get().callView;
 }
 
 // back to the window: whatever arrived meanwhile in the open chat is read
@@ -2739,6 +2948,10 @@ export async function pickCamera(deviceId: string): Promise<void> {
 export async function toggleScreen(): Promise<void> {
   const state = voice.getState();
   if (!state.connected) return;
+  if (state.sunshine) {
+    await stopSunshineStream();
+    return;
+  }
   if (state.screen) {
     await voice.stopScreen();
     return;
@@ -2750,7 +2963,7 @@ export async function toggleScreen(): Promise<void> {
 export function screenButton(el: HTMLElement): void {
   const state = voice.getState();
   if (!state.connected) return;
-  if (!state.screen) {
+  if (!state.screen && !state.sunshine) {
     app.set({ screenPickerOpen: true, screenMenu: null });
     return;
   }
@@ -2765,7 +2978,8 @@ export function openShareSettings(): void {
 
 export async function stopShare(): Promise<void> {
   app.set({ screenMenu: null, screenPickerOpen: false });
-  await voice.stopScreen();
+  if (voice.getState().sunshine) await stopSunshineStream();
+  else await voice.stopScreen();
 }
 
 /**
@@ -2774,6 +2988,8 @@ export async function stopShare(): Promise<void> {
  * interrupting viewers. A null source lets the browser ask (development only).
  */
 export async function shareSource(sourceId: string | null, opts: ShareOptions, pickNew = false): Promise<void> {
+  // one stream at a time: an own Sunshine stream ends before the call server takes over
+  if (voice.getState().sunshine) await stopSunshineStream();
   const state = voice.getState();
   app.set({ screenPickerOpen: false });
   void voice.applySettings({ shareAudio: opts.audio, shareHeight: opts.height, shareFps: opts.fps });
@@ -2832,16 +3048,18 @@ async function applyPresence(force: boolean): Promise<void> {
   let want: people.Presence;
   if (mode === "offline") want = "offline";
   else if (mode === "unavailable") want = "unavailable";
-  else if (mode === "dnd" || mode === "streamer") want = "dnd";
+  else if (mode === "dnd") want = "dnd";
+  else if (mode === "streamer") want = "streamer";
   else want = (await idleSeconds()) >= IDLE_AFTER_S ? "unavailable" : "online";
   if (!force && want === app.get().myPresence) return;
   app.set({ myPresence: want });
-  // Matrix has no "do not disturb": it is "online" with a status message
-  const presence = want === "dnd" ? "online" : want;
+  // Matrix has neither "do not disturb" nor a streamer mode: both are "online" with a status message
+  const presence = want === "dnd" || want === "streamer" ? "online" : want;
+  const statusMsg = want === "dnd" ? people.DND_STATUS : want === "streamer" ? people.STREAMER_STATUS : "";
   try {
     // the sync presence too, or the next sync request resets it to online
     await c.setSyncPresence(presence as SetPresence);
-    await c.setPresence({ presence, status_msg: want === "dnd" ? people.DND_STATUS : "" });
+    await c.setPresence({ presence, status_msg: statusMsg });
   } catch {
     // presence disabled on the server: the status stays local
   }
@@ -2988,6 +3206,7 @@ export async function saveMyName(name: string): Promise<void> {
     await people.setName(client, name);
     profileCache.clear();
     refreshMe();
+    await fetchMe();
     // the homeserver has just reset the name in every room: server names and the banner go back
     scheduleOwnMembers(300);
   } catch (e) {
@@ -3004,6 +3223,7 @@ export async function saveMyAvatar(file: File | null): Promise<void> {
     else await people.clearAvatar(client);
     profileCache.clear();
     refreshMe();
+    await fetchMe();
     scheduleOwnMembers(300);
   } catch (e) {
     app.set({ error: humanError(e) });
@@ -3221,7 +3441,7 @@ voice.onBoardSound = (url) => {
   playLocal(url);
 };
 
-/** A banner picture: large ones are scaled down to 1280 px wide first; small animations stay as they are. */
+/** A banner picture: large ones are scaled down to 1920 px wide first; small animations stay as they are. */
 export async function uploadBanner(file: File): Promise<string> {
   const c = client;
   if (!c) return "";
@@ -3230,7 +3450,7 @@ export async function uploadBanner(file: File): Promise<string> {
     let blob: Blob = file;
     if (!(file.type === "image/gif" && file.size < 4_000_000)) {
       const bmp = await createImageBitmap(file);
-      const k = Math.min(1, 1280 / bmp.width);
+      const k = Math.min(1, 1920 / bmp.width);
       const canvas = new OffscreenCanvas(Math.max(1, Math.round(bmp.width * k)), Math.max(1, Math.round(bmp.height * k)));
       canvas.getContext("2d")?.drawImage(bmp, 0, 0, canvas.width, canvas.height);
       bmp.close();
@@ -3272,6 +3492,10 @@ export async function setServerProfile(spaceId: string, name: string, avatar: Fi
 export function bannerOf(userId: string, roomId?: string | null): TileLook | null {
   if (!userId) return null;
   if (userId === me()) return getTileLook();
+  return withoutPicture(theirBanner(userId, roomId));
+}
+
+function theirBanner(userId: string, roomId?: string | null): TileLook | null {
   const live = voice.getState().members.find((m) => m.userId === userId && m.tile)?.tile;
   if (live) return live;
   const c = client;
@@ -3283,6 +3507,12 @@ export function bannerOf(userId: string, roomId?: string | null): TileLook | nul
     if (look) return look;
   }
   return null;
+}
+
+/** Pictures of other people's banners can be turned off: the avatar color stands in, the emoji stay. */
+export function withoutPicture(look: TileLook | null): TileLook | null {
+  if (!look || look.mode !== "image" || getViewPrefs().bannerImages) return look;
+  return { mode: "dominant", color: look.color, ...(look.emoji ? { emoji: look.emoji } : {}) };
 }
 
 export function sessions(): Promise<people.SessionRow[]> {
@@ -3432,6 +3662,8 @@ function notify(event: MatrixEvent, room: Room): void {
   if (isMuted("users", sender)) return;
   if (!mention && roomMuted(room.roomId)) return;
   if (mode === "mentions" && !direct && !mention) return;
+  // the chat of a voice channel is talk next to the call: silent unless asked for, mentions aside
+  if (!mention && !getNotifyPrefs().voiceChats && isVoiceChat(room.roomId)) return;
 
   const sounds = getSoundPrefs();
   if (sounds.notifyOn) blip(direct || mention ? "mention" : "message", voice.getState().settings.spkId);
@@ -3458,6 +3690,10 @@ function notify(event: MatrixEvent, room: Room): void {
   } catch {
     // notifications blocked by the system
   }
+}
+
+function isVoiceChat(roomId: string): boolean {
+  return !!serverOf(roomId)?.channels.some((c) => c.roomId === roomId && c.kind === "voice");
 }
 
 /** Open a chat wherever it is: in direct messages or on one of the servers. */

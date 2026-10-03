@@ -5,18 +5,22 @@ import {
   cancelCompose,
   editLastOwn,
   maxUpload,
+  mediaUrl,
   mentionCandidates,
   prefetchPreviews,
+  saveEdit,
   sendMessage,
   typingNow,
+  type Media,
   type MentionHit,
 } from "../app.ts";
+import { encryptedMediaUrl } from "../media.ts";
 import { t } from "../i18n/index.ts";
 import { useStore } from "../store.ts";
 import { Avatar } from "./Avatar.tsx";
 import { EmojiPicker } from "./EmojiPicker.tsx";
 import { FormatBar, applyFormat, formatForKey, type FormatId } from "./FormatBar.tsx";
-import { IconClose, IconFile, IconFormat, IconPlus, IconSend, IconSmile } from "./icons.tsx";
+import { IconClose, IconFile, IconFormat, IconPlus, IconSend, IconSmile, IconTrash } from "./icons.tsx";
 
 /**
  * Message field.
@@ -94,6 +98,40 @@ function isEditable(el: Element | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (el as HTMLElement).isContentEditable;
 }
 
+/** The file a message being edited already has: it can be taken out of the message. */
+function SentAttachment({ media, onRemove }: { media: Media; onRemove: () => void }) {
+  const [preview, setPreview] = useState("");
+  useEffect(() => {
+    if (media.kind !== "image" && !media.thumb) return;
+    let alive = true;
+    const src = media.kind === "image" ? media : null;
+    const th = media.thumb;
+    const load = src
+      ? src.file
+        ? encryptedMediaUrl(src.file, src.mime)
+        : mediaUrl(src.mxc)
+      : th
+        ? th.file
+          ? encryptedMediaUrl(th.file, th.mime)
+          : mediaUrl(th.mxc)
+        : Promise.resolve("");
+    void load.then((u) => alive && setPreview(u));
+    return () => {
+      alive = false;
+    };
+  }, [media.mxc]);
+  return (
+    <div className="attach-card sent" title={media.name}>
+      <div className="attach-thumb">{preview ? <img src={preview} alt="" /> : <IconFile size={34} />}</div>
+      <div className="attach-name ellipsis">{media.name}</div>
+      <div className="attach-size">{humanSize(media.size)}</div>
+      <button type="button" className="attach-remove" title={t("composer.removeSent")} onClick={onRemove}>
+        <IconClose />
+      </button>
+    </div>
+  );
+}
+
 function Attachment({ file, onRemove }: { file: File; onRemove: () => void }) {
   const [preview, setPreview] = useState("");
   const image = file.type.startsWith("image/");
@@ -124,6 +162,10 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
 
   const [text, setText] = useState(() => drafts.get(roomId)?.text ?? loadTextDrafts()[roomId] ?? "");
   const [files, setFiles] = useState<File[]>(() => drafts.get(roomId)?.files ?? []);
+  // while editing: whether the message keeps its file, and files to add; the draft's own files wait
+  const [keepMedia, setKeepMedia] = useState(true);
+  const [editFiles, setEditFiles] = useState<File[]>([]);
+  const editedMedia = useStore(app, (s) => (s.editing?.media ? (s.messages.find((m) => m.id === s.editing?.eventId)?.media ?? null) : null));
   const [emoji, setEmoji] = useState(false);
   const [formatOpen, setFormatOpen] = useState(false);
   const [selected, setSelected] = useState(false);
@@ -177,6 +219,8 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
   }, [text]);
 
   useEffect(() => {
+    setKeepMedia(true);
+    setEditFiles([]);
     if (editing) {
       setText(editing.body);
       field.current?.focus();
@@ -198,7 +242,10 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
       }
       ok.push(renamePasted(f));
     }
-    if (ok.length) setFiles((prev) => [...prev, ...ok].slice(0, 10));
+    if (ok.length) {
+      if (app.get().editing) setEditFiles((prev) => [...prev, ...ok].slice(0, 10));
+      else setFiles((prev) => [...prev, ...ok].slice(0, 10));
+    }
     field.current?.focus();
   };
 
@@ -222,18 +269,26 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // an attachment's caption may be removed, a text message cannot become empty
-  const canSend = editing ? !!text.trim() || !!editing.media : !!text.trim() || files.length > 0;
+  // an edit that leaves nothing deletes the message, so it can always be saved
+  const canSend = editing ? true : !!text.trim() || files.length > 0;
+  // an edit that removes everything: the message will be deleted
+  const editEmpties = !!editing && !text.trim() && !(editing.media && keepMedia) && !editFiles.length;
 
   const submit = () => {
     if (!canSend) return;
     const body = text;
-    const sending = editing ? [] : files;
     setText("");
-    if (!editing) setFiles([]);
     setEmoji(false);
     drafts.delete(roomId);
     saveTextDraft(roomId, "");
+    if (editing) {
+      const add = editFiles;
+      setEditFiles([]);
+      void saveEdit(body, editing.media && keepMedia, add);
+      return;
+    }
+    const sending = files;
+    setFiles([]);
     void sendMessage(body, sending);
   };
 
@@ -358,7 +413,7 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
         {(replyTo || editing) && (
           <div className="compose-bar">
             {editing ? (
-              <span className="ellipsis">{editing.media ? t("composer.editingCaption") : t("composer.editing")}</span>
+              <span className="ellipsis">{t("composer.editing")}</span>
             ) : (
               <span className="ellipsis">
                 {replyTo?.quote ? t("composer.quoteOf") : t("composer.replyTo")} <b>{replyTo?.senderName}</b>:{" "}
@@ -378,6 +433,16 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
             </button>
           </div>
         )}
+
+        {editing && ((editedMedia && keepMedia) || editFiles.length > 0) && (
+          <div className="attach-tray editing">
+            {editedMedia && keepMedia && <SentAttachment media={editedMedia} onRemove={() => setKeepMedia(false)} />}
+            {editFiles.map((f, i) => (
+              <Attachment key={`${f.name}-${f.size}-${i}`} file={f} onRemove={() => setEditFiles(editFiles.filter((_, j) => j !== i))} />
+            ))}
+          </div>
+        )}
+        {editing && editEmpties && <div className="compose-note danger-text">{t("composer.editDeletes")}</div>}
 
         {files.length > 0 && !editing && (
           <div
@@ -422,8 +487,7 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
           <button
             type="button"
             className="composer-tool attach"
-            title={t("composer.attach")}
-            disabled={!!editing}
+            title={editing ? t("composer.attachEdit") : t("composer.attach")}
             onClick={() => fileInput.current?.click()}
           >
             <IconPlus size={18} />
@@ -460,7 +524,13 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
               setMention(null);
             }}
             placeholder={
-              editing ? t("composer.placeholder.edit") : files.length ? t("composer.placeholder.caption") : t("composer.placeholder", { name: title })
+              editing
+                ? (editing.media && keepMedia) || editFiles.length
+                  ? t("composer.placeholder.caption")
+                  : t("composer.placeholder.edit")
+                : files.length
+                  ? t("composer.placeholder.caption")
+                  : t("composer.placeholder", { name: title })
             }
           />
           <button
@@ -475,9 +545,9 @@ export function Composer({ roomId, title }: { roomId: string; title: string }) {
           <button type="button" className={`composer-tool ${emoji ? "on" : ""}`} title={t("composer.emoji")} onClick={() => setEmoji(!emoji)}>
             <IconSmile size={20} />
           </button>
-          {canSend && (
-            <button type="button" className="composer-send" title={t("composer.send")} onClick={submit}>
-              <IconSend size={17} />
+          {canSend && (!editing || !!text.trim() || keepMedia || editFiles.length > 0 || editEmpties) && (
+            <button type="button" className={`composer-send ${editEmpties ? "danger" : ""}`} title={editing ? t("composer.saveEdit") : t("composer.send")} onClick={submit}>
+              {editEmpties ? <IconTrash size={16} /> : <IconSend size={17} />}
             </button>
           )}
           {emoji && <EmojiPicker className="above" onPick={insert} onClose={() => setEmoji(false)} />}

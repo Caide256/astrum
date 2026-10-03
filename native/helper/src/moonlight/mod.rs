@@ -2,21 +2,26 @@
 //!
 //! Commands (all answers are one JSON line on stdout unless noted):
 //!   moonlight info <dir> <host>                what the host is, whether we are paired
-//!   moonlight pair <dir> <host> <pin>          pair; blocks until the PIN is entered on the host
+//!   moonlight pair <dir> <host> <pin> [name]   pair; blocks until the PIN is entered on the host.
+//!                                              `name` is the device name the host shows for the
+//!                                              request, so the host's owner can tell requests apart
 //!   moonlight apps <dir> <host>                the host's apps
-//!   moonlight stream <dir> <host> <app> <w> <h> <fps> <kbps> <formats>
-//!                                              stream video to stdout in frames (see below)
+//!   moonlight stream <dir> <host> <app> <w> <h> <fps> <kbps> <formats> [host audio 0/1]
+//!                                              stream to stdout in records (see below)
 //!   moonlight quit <dir> <host>                end the running session on the host
+//!   moonlight forget <dir> <host>              drop the pinned certificate of a host
 //!
 //! `dir` keeps this client's identity: key, certificate, unique id, and the
 //! certificates of paired hosts. `host` is an address, optionally with the
-//! HTTP port (address:47989).
+//! HTTP port (address:47989), optionally prefixed with a key ("key@address"):
+//! the host's certificate is then kept under the key, so a host that changes
+//! its address (a new public IP) stays paired.
 //!
 //! Stream output: records of [kind u8][length u32 LE][payload]. Kind 1 is a
 //! video frame: [format u16 LE][flags u8, 1 = keyframe][width u16][height u16]
 //! [frame number u32][pts microseconds u64] and the Annex B bitstream. Kind 2
-//! is an event as JSON. Lines on stdin: "idr" asks for a keyframe, "stop" or
-//! the end of input ends the stream.
+//! is an event as JSON. Kind 3 is one Opus audio packet. Lines on stdin:
+//! "idr" asks for a keyframe, "stop" or the end of input ends the stream.
 
 pub mod crypto;
 mod net;
@@ -137,12 +142,15 @@ fn make_cert(key: &RsaPrivateKey) -> Result<String, String> {
     cert.to_pem(LineEnding::LF).map_err(|e| e.to_string())
 }
 
+/// "key@address" keeps the certificate under the key; a bare address under itself.
 fn host_cert_path(dir: &Path, host: &str) -> PathBuf {
-    let safe: String = host.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect();
+    let name = host.split_once('@').map(|(k, _)| k).unwrap_or(host);
+    let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '_' }).collect();
     dir.join("hosts").join(format!("{safe}.pem"))
 }
 
 fn split_host(host: &str) -> (String, u16) {
+    let host = host.split_once('@').map(|(_, a)| a).unwrap_or(host);
     // [v6]:port, v4:port or a bare address
     if let Some(rest) = host.strip_prefix('[') {
         if let Some((addr, port)) = rest.split_once("]:") {
@@ -227,8 +235,8 @@ fn aes_ecb(key: &[u8], data: &[u8], encrypt: bool) -> Vec<u8> {
     out
 }
 
-fn pair_step(addr: &str, port: u16, id: &Identity, query: &str, timeout: Duration) -> Result<String, String> {
-    let path = format!("/pair?uniqueid={}&uuid={}&devicename=roth&updateState=1&{}", id.unique_id, uuid(), query);
+fn pair_step(addr: &str, port: u16, id: &Identity, name: &str, query: &str, timeout: Duration) -> Result<String, String> {
+    let path = format!("/pair?uniqueid={}&uuid={}&devicename={}&updateState=1&{}", id.unique_id, uuid(), name, query);
     let res = http_get(addr, port, &path, timeout)?;
     xml_status(&res.body)?;
     if xml_value(&res.body, "paired").as_deref() != Some("1") {
@@ -237,9 +245,20 @@ fn pair_step(addr: &str, port: u16, id: &Identity, query: &str, timeout: Duratio
     Ok(res.body)
 }
 
+/// Device names go into a URL: letters, digits, dot, dash and underscore only.
+fn device_name(raw: &str) -> String {
+    let clean: String = raw.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_')).take(64).collect();
+    if clean.is_empty() {
+        "roth".into()
+    } else {
+        clean
+    }
+}
+
 /// The GameStream pairing handshake. The PIN is shown to the user, who enters
 /// it on the host; the first request waits for that.
-fn pair(dir: &Path, host: &str, pin: &str) -> Result<(), String> {
+fn pair(dir: &Path, host: &str, pin: &str, name: &str) -> Result<(), String> {
+    let name = device_name(name);
     let id = identity(dir)?;
     let (addr, port) = split_host(host);
     let info = host_info(dir, &id, host)?;
@@ -254,6 +273,7 @@ fn pair(dir: &Path, host: &str, pin: &str) -> Result<(), String> {
         &addr,
         port,
         &id,
+        &name,
         &format!("phrase=getservercert&salt={}&clientcert={}", hex::encode(salt), hex::encode(id.cert_pem.as_bytes())),
         Duration::from_secs(180),
     )?;
@@ -268,7 +288,7 @@ fn pair(dir: &Path, host: &str, pin: &str) -> Result<(), String> {
     let mut challenge = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut challenge);
     let enc = aes_ecb(&aes_key, &challenge, true);
-    let result = pair_step(&addr, port, &id, &format!("clientchallenge={}", hex::encode(enc)), QUICK);
+    let result = pair_step(&addr, port, &id, &name, &format!("clientchallenge={}", hex::encode(enc)), QUICK);
     let body = match result {
         Ok(b) => b,
         Err(e) => {
@@ -291,7 +311,7 @@ fn pair(dir: &Path, host: &str, pin: &str) -> Result<(), String> {
     hashed.extend_from_slice(&client_secret);
     let digest = Sha256::digest(&hashed);
     let enc = aes_ecb(&aes_key, &digest, true);
-    let body = match pair_step(&addr, port, &id, &format!("serverchallengeresp={}", hex::encode(enc)), QUICK) {
+    let body = match pair_step(&addr, port, &id, &name, &format!("serverchallengeresp={}", hex::encode(enc)), QUICK) {
         Ok(b) => b,
         Err(e) => {
             unpair(&addr, port, &id);
@@ -317,14 +337,14 @@ fn pair(dir: &Path, host: &str, pin: &str) -> Result<(), String> {
     let signer = SigningKey::<Sha256>::new(id.key.clone());
     let mut client_pairing = client_secret.to_vec();
     client_pairing.extend_from_slice(&signer.sign(&client_secret).to_vec());
-    if let Err(e) = pair_step(&addr, port, &id, &format!("clientpairingsecret={}", hex::encode(client_pairing)), QUICK) {
+    if let Err(e) = pair_step(&addr, port, &id, &name, &format!("clientpairingsecret={}", hex::encode(client_pairing)), QUICK) {
         unpair(&addr, port, &id);
         return Err(e);
     }
 
     // the last step goes over HTTPS with our certificate, which the host now trusts
     let server_der = server.to_der().map_err(|e| e.to_string())?;
-    let path = format!("/pair?uniqueid={}&uuid={}&devicename=roth&updateState=1&phrase=pairchallenge", id.unique_id, uuid());
+    let path = format!("/pair?uniqueid={}&uuid={}&devicename={}&updateState=1&phrase=pairchallenge", id.unique_id, uuid(), name);
     let res = https_get(&addr, info.https_port, &path, &id.cert_der, &id.key_pkcs8, &server_der, QUICK)?;
     xml_status(&res.body)?;
     if xml_value(&res.body, "paired").as_deref() != Some("1") {
@@ -378,6 +398,7 @@ fn quit(dir: &Path, host: &str) -> Result<(), String> {
 
 type FrameCb = extern "C" fn(*const c_uchar, c_int, c_int, c_int, c_int, c_int, c_int, c_ulonglong);
 type EventCb = extern "C" fn(c_int, c_int, *const c_char);
+type AudioCb = extern "C" fn(*const c_uchar, c_int);
 
 extern "C" {
     fn ml_launch_query() -> *const c_char;
@@ -398,6 +419,7 @@ extern "C" {
         aes_iv: *const c_uchar,
         frame_cb: FrameCb,
         event_cb: EventCb,
+        audio_cb: AudioCb,
     ) -> c_int;
     fn ml_stop();
     fn ml_request_idr();
@@ -437,6 +459,13 @@ extern "C" fn on_frame(data: *const c_uchar, length: c_int, number: c_int, frame
     emit(1, &payload);
 }
 
+extern "C" fn on_audio(data: *const c_uchar, length: c_int) {
+    if data.is_null() || length <= 0 {
+        return;
+    }
+    emit(3, unsafe { std::slice::from_raw_parts(data, length as usize) });
+}
+
 extern "C" fn on_event(kind: c_int, code: c_int, text: *const c_char) {
     let text = if text.is_null() { String::new() } else { unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy().trim_end().to_string() };
     let name = match kind {
@@ -448,6 +477,7 @@ extern "C" fn on_event(kind: c_int, code: c_int, text: *const c_char) {
         6 => "terminated",
         7 => "log",
         8 => "status",
+        9 => "audio",
         _ => "other",
     };
     emit_event(format!("{{\"event\":\"{name}\",\"code\":{code},\"text\":{}}}", json_str(&text)));
@@ -461,7 +491,7 @@ extern "C" fn on_event(kind: c_int, code: c_int, text: *const c_char) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn stream(dir: &Path, host: &str, app: i64, width: i32, height: i32, fps: i32, kbps: i32, formats: i32) -> Result<(), String> {
+fn stream(dir: &Path, host: &str, app: i64, width: i32, height: i32, fps: i32, kbps: i32, formats: i32, host_audio: bool) -> Result<(), String> {
     let id = identity(dir)?;
     let (addr, _) = split_host(host);
     let info = host_info(dir, &id, host)?;
@@ -480,10 +510,12 @@ fn stream(dir: &Path, host: &str, app: i64, width: i32, height: i32, fps: i32, k
     let verb = if info.current_game != 0 { "resume" } else { "launch" };
     let extra = unsafe { std::ffi::CStr::from_ptr(ml_launch_query()) }.to_string_lossy().into_owned();
     let path = format!(
-        "/{verb}?uniqueid={}&uuid={}&appid={app}&mode={width}x{height}x{fps}&additionalStates=1&sops=0&rikey={}&rikeyid={rikeyid}&localAudioPlayMode=0&surroundAudioInfo=196610&remoteControllersBitmap=0&gcmap=0{extra}",
+        "/{verb}?uniqueid={}&uuid={}&appid={app}&mode={width}x{height}x{fps}&additionalStates=1&sops=0&rikey={}&rikeyid={rikeyid}&localAudioPlayMode={}&surroundAudioInfo=196610&remoteControllersBitmap=0&gcmap=0{extra}",
         id.unique_id,
         uuid(),
         hex::encode(rikey),
+        // the streamer keeps hearing the own sound unless the viewer asks otherwise
+        if host_audio { 1 } else { 0 },
     );
     let res = https_get(&addr, info.https_port, &path, &id.cert_der, &id.key_pkcs8, &server, Duration::from_secs(30))?;
     xml_status(&res.body)?;
@@ -513,6 +545,7 @@ fn stream(dir: &Path, host: &str, app: i64, width: i32, height: i32, fps: i32, k
             iv.as_ptr(),
             on_frame,
             on_event,
+            on_audio,
         )
     };
     if rc != 0 {
@@ -561,7 +594,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             if pin.len() != 4 || !pin.chars().all(|c| c.is_ascii_digit()) {
                 return Err("the PIN must be 4 digits".into());
             }
-            pair(&dir, &host, &pin)?;
+            pair(&dir, &host, &pin, args.get(4).map(String::as_str).unwrap_or(""))?;
             println!("{{\"paired\":true}}");
             Ok(())
         }
@@ -574,6 +607,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
             println!("{{\"quit\":true}}");
             Ok(())
         }
+        "forget" => {
+            let _ = fs::remove_file(host_cert_path(&dir, &host));
+            println!("{{\"forgot\":true}}");
+            Ok(())
+        }
         "stream" => stream(
             &dir,
             &host,
@@ -583,6 +621,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             num(6, 60) as i32,
             num(7, 20_000) as i32,
             num(8, 1) as i32,
+            num(9, 1) != 0,
         ),
         _ => Err(format!("unknown moonlight command {cmd}")),
     }
@@ -591,6 +630,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyed_hosts() {
+        assert_eq!(split_host("u-12ab@203.0.113.7:49989"), ("203.0.113.7".to_string(), 49989));
+        let dir = Path::new("x");
+        assert_eq!(host_cert_path(dir, "u-12ab@203.0.113.7:49989"), dir.join("hosts").join("u-12ab.pem"));
+        assert_eq!(device_name("astrum-1f2e!x"), "astrum-1f2ex");
+        assert_eq!(device_name(""), "roth");
+    }
 
     #[test]
     fn host_and_port() {

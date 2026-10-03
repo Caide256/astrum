@@ -26,8 +26,6 @@ import { voice } from "../voice/voice.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Banner } from "./Banner.tsx";
 import { useEscape, useLinger } from "./controls.tsx";
-import { useMoonlightFor } from "./Moonlight.tsx";
-import { startWatching } from "../moonlight.ts";
 import {
   IconBell,
   IconBellOff,
@@ -35,7 +33,6 @@ import {
   IconChevron,
   IconCopy,
   IconDoorOut,
-  IconScreen,
   IconShield,
   IconSpeaker,
   IconTrash,
@@ -47,6 +44,7 @@ const PRESENCE_NAME: Record<string, Key> = {
   online: "presence.online",
   unavailable: "presence.away",
   dnd: "presence.dnd",
+  streamer: "presence.streamer",
   offline: "presence.offline",
 };
 
@@ -225,24 +223,6 @@ function ModerationRows({ userId }: { userId: string }) {
 
 /* --------------------------------------------------------- right-click menu */
 
-/** A person tied to a Moonlight host: their stream is one click away. */
-function MoonlightRow({ userId }: { userId: string }) {
-  const tied = useMoonlightFor(userId);
-  if (!tied) return null;
-  return (
-    <button
-      className="menu-item"
-      onClick={() => {
-        closeUserMenu();
-        void startWatching(userId);
-      }}
-    >
-      <IconScreen />
-      <span>{t("ml.watch")}</span>
-    </button>
-  );
-}
-
 /** In the same call: a moderator can make the person leave it. */
 function VoiceKickRow({ userId }: { userId: string }) {
   const state = useSyncExternalStore(voice.subscribe, voice.getState, voice.getState);
@@ -345,7 +325,6 @@ export function UserMenu() {
           </button>
         )}
 
-        {!own && <MoonlightRow userId={menu.userId} />}
 
         {!own && menu.voice && <VolumeRow userId={menu.userId} />}
         {!own && menu.voice && <VoiceKickRow userId={menu.userId} />}

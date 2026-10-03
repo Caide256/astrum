@@ -110,6 +110,33 @@ export function setNotifyMode(mode: NotifyMode): void {
 
 export const useNotifyMode = notify.use;
 
+/**
+ * Smaller notification choices. `voiceChats`: plain messages in the chats of
+ * voice channels make a sound and a popup too; off by default, those chats
+ * are mostly talk next to the call. Mentions there notify either way.
+ */
+export type NotifyPrefs = { voiceChats: boolean };
+
+const NOTIFY_PREFS_KEY = "app.notify-prefs";
+
+function cleanNotifyPrefs(raw: Partial<NotifyPrefs> | null | undefined): NotifyPrefs {
+  return { voiceChats: raw?.voiceChats === true };
+}
+
+const notifyPrefs = cell<NotifyPrefs>(cleanNotifyPrefs(loadJson<Partial<NotifyPrefs>>(NOTIFY_PREFS_KEY, { voiceChats: false })));
+
+export function getNotifyPrefs(): NotifyPrefs {
+  return notifyPrefs.get();
+}
+
+export const useNotifyPrefs = notifyPrefs.use;
+
+export function setNotifyPrefs(patch: Partial<NotifyPrefs>): void {
+  const next = cleanNotifyPrefs({ ...notifyPrefs.get(), ...patch });
+  saveJson(NOTIFY_PREFS_KEY, next);
+  notifyPrefs.set(next);
+}
+
 /* ------------------------------------------------------------------ mutes */
 
 /** Chats, servers and people whose messages make no notification and no sound. */
@@ -340,6 +367,67 @@ export function setTileLook(patch: Partial<TileLook>): void {
   voice.setTile(next);
 }
 
+/* ------------------------------------------------------------- view prefs */
+
+/** `bannerImages`: other people's banner pictures are shown; off, their banners use the avatar color. */
+export type ViewPrefs = { bannerImages: boolean };
+
+const VIEW_KEY = "app.view";
+
+function cleanView(raw: Partial<ViewPrefs> | null | undefined): ViewPrefs {
+  return { bannerImages: raw?.bannerImages !== false };
+}
+
+const view = cell<ViewPrefs>(cleanView(loadJson<Partial<ViewPrefs>>(VIEW_KEY, { bannerImages: true })));
+
+export function getViewPrefs(): ViewPrefs {
+  return view.get();
+}
+
+export const useViewPrefs = view.use;
+
+export function setViewPrefs(patch: Partial<ViewPrefs>): void {
+  const next = cleanView({ ...view.get(), ...patch });
+  saveJson(VIEW_KEY, next);
+  view.set(next);
+}
+
+/* --------------------------------------------------------------- ui scale */
+
+/**
+ * The size of the whole interface in percent, like the zoom of a browser.
+ * It depends on the monitor, so it stays on this computer.
+ */
+export const UI_SCALES = [75, 80, 90, 100, 110, 125, 150];
+const SCALE_KEY = "app.ui-scale";
+
+function cleanScale(raw: unknown): number {
+  const n = Math.round(Number(raw));
+  return UI_SCALES.includes(n) ? n : 100;
+}
+
+const scale = cell<number>(cleanScale(typeof localStorage !== "undefined" ? localStorage.getItem(SCALE_KEY) : 100));
+
+function applyScale(n: number): void {
+  const bridge = (globalThis as unknown as { desktop?: { setZoom?: (f: number) => void } }).desktop;
+  if (bridge?.setZoom) bridge.setZoom(n / 100);
+  else if (typeof document !== "undefined") (document.documentElement.style as unknown as { zoom: string }).zoom = n === 100 ? "" : String(n / 100);
+}
+applyScale(scale.get());
+
+export const useUiScale = scale.use;
+
+export function setUiScale(n: number): void {
+  const next = cleanScale(n);
+  try {
+    localStorage.setItem(SCALE_KEY, String(next));
+  } catch {
+    // kept until restart
+  }
+  scale.set(next);
+  applyScale(next);
+}
+
 /* ------------------------------------------------------------ chat look */
 
 /**
@@ -440,6 +528,8 @@ type Synced = VoicePrefs & {
   look: ChatLook;
   order: ChannelOrders;
   serverProfiles: ServerProfiles;
+  notifyMore: NotifyPrefs;
+  view: ViewPrefs;
   origin: string;
 };
 
@@ -463,6 +553,8 @@ function collect(origin: string): Synced {
     look: look.get(),
     order: orders.get(),
     serverProfiles: serverProfiles.get(),
+    notifyMore: notifyPrefs.get(),
+    view: view.get(),
     origin,
   };
 }
@@ -485,6 +577,8 @@ function essence(p: Partial<Synced>): string {
     p.look ?? null,
     p.order ?? null,
     p.serverProfiles ?? null,
+    p.notifyMore ?? null,
+    p.view ?? null,
   ]);
 }
 
@@ -528,6 +622,16 @@ function apply(remote: Partial<Synced>, all: boolean): void {
       saveJson(LOOK_KEY, next);
       look.set(next);
       applyLook(next);
+    }
+    if (remote.view && typeof remote.view === "object") {
+      const next = cleanView(remote.view);
+      saveJson(VIEW_KEY, next);
+      view.set(next);
+    }
+    if (remote.notifyMore && typeof remote.notifyMore === "object") {
+      const next = cleanNotifyPrefs(remote.notifyMore);
+      saveJson(NOTIFY_PREFS_KEY, next);
+      notifyPrefs.set(next);
     }
     if (remote.tile && typeof remote.tile === "object") {
       const next = cleanTile(remote.tile);
@@ -583,6 +687,8 @@ export function startPrefsSync(c: MatrixClient): void {
     look.on(schedule),
     orders.on(schedule),
     serverProfiles.on(schedule),
+    notifyPrefs.on(schedule),
+    view.on(schedule),
   ];
 }
 

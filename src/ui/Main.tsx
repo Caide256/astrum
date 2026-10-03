@@ -65,7 +65,6 @@ import {
   selectChannel,
   selectServer,
   setChatAtBottom,
-  setStatusMode,
   startQuote,
   togglePin,
   canPinHere,
@@ -78,6 +77,7 @@ import {
   toggleCamera,
   toggleCheck,
   toggleMembers,
+  membersShown,
   toggleReaction,
   type LinkPreview,
   type PinnedItem,
@@ -87,7 +87,7 @@ import {
 import { fmtDateTime, fmtTime, t, tn } from "../i18n/index.ts";
 import { encryptedMediaUrl } from "../media.ts";
 import type { UserHit } from "../matrix/people.ts";
-import { hasOwnOrder, idsHidden, isMuted, setChannelOrder, setMuted, useChannelOrders, useMutes, usePrivacy } from "../prefs.ts";
+import { hasOwnOrder, idsHidden, isMuted, setChannelOrder, setMuted, useChannelOrders, useMutes } from "../prefs.ts";
 import type { Channel, Server } from "../matrix/servers.ts";
 import { useStore } from "../store.ts";
 import { voice, type NetSample, type NetStats, type VoiceMember } from "../voice/voice.ts";
@@ -101,8 +101,9 @@ import { Guard } from "./Guard.tsx";
 import { Lightbox } from "./Lightbox.tsx";
 import { InlineMarkdown, Markdown } from "./Markdown.tsx";
 import { ScreenMenu, StreamMenu, StreamPeek, peekEnter, peekLeave } from "./Menus.tsx";
+import { AudioPlayer, VideoPlayer } from "./MediaPlayer.tsx";
 import { MiniStream } from "./MiniStream.tsx";
-import { MoonlightViewer } from "./Moonlight.tsx";
+import { SunRequests } from "./Moonlight.tsx";
 import { SoundboardButton } from "./Soundboard.tsx";
 import { ProfileCard, UserMenu } from "./Profile.tsx";
 import { ServerSettings } from "./ServerSettings.tsx";
@@ -183,7 +184,7 @@ function PersonRow({
   flags: VoiceMember | undefined;
   size?: number;
 }) {
-  const live = !!flags?.screen;
+  const live = !!flags?.screen || !!flags?.sunshine;
   return (
     <div
       className={`occupant clickable ${flags?.speaking ? "speaking" : ""}`}
@@ -211,10 +212,11 @@ function PersonRow({
       ) : (
         flags?.muted && <IconMicOff className="flag off" />
       )}
-      {(flags?.camera || flags?.screen) && (
+      {(flags?.camera || flags?.screen || flags?.sunshine) && (
         <span className="live-dots">
           {flags.camera && <i className="cam-dot" title={t("call.cameraOn")} />}
           {flags.screen && <i className="live-dot" title={t("call.sharing")} />}
+          {flags.sunshine && <i className="live-dot sun" title={t("sun.dot")} />}
         </span>
       )}
     </div>
@@ -229,9 +231,14 @@ function ServerBar() {
   const view = useStore(app, (s) => s.view);
   const directs = useStore(app, (s) => s.directs);
   const invites = useStore(app, (s) => s.invites);
+  const activeChannel = useStore(app, (s) => s.activeChannel);
+  const callView = useStore(app, (s) => s.callView);
   useMutes();
 
-  const unread = directs.filter((d) => !isMuted("users", d.userId)).reduce((sum, d) => sum + d.unread, 0) + invites.length;
+  // the chat open on screen is being read: its messages count nowhere else
+  const shown = (roomId: string) => roomId === activeChannel && !callView;
+  const unread =
+    directs.filter((d) => !isMuted("users", d.userId) && !shown(d.roomId)).reduce((sum, d) => sum + d.unread, 0) + invites.length;
 
   return (
     <nav className="servers">
@@ -244,8 +251,8 @@ function ServerBar() {
       {servers.map((g: Server) => {
         const on = view === "server" && g.spaceId === active;
         const muted = isMuted("servers", g.spaceId);
-        const mentions = g.channels.reduce((n, c) => n + c.mentions, 0);
-        const fresh = !muted && g.channels.some((c) => c.unread > 0 && !roomMuted(c.roomId));
+        const mentions = g.channels.reduce((n, c) => n + (shown(c.roomId) ? 0 : c.mentions), 0);
+        const fresh = !muted && g.channels.some((c) => c.unread > 0 && !roomMuted(c.roomId) && !shown(c.roomId));
         return (
           // the pill on the left: short for unread, taller on hover, long for the open server
           <div key={g.spaceId} className={`server-item ${on ? "active" : ""} ${fresh ? "unread" : ""} ${muted ? "muted" : ""}`}>
@@ -439,7 +446,7 @@ function DirectList() {
                 <Avatar mxc={d.avatar} name={d.name} size={24} status={presenceOf(d.userId)} />
                 <span className="ellipsis">{d.name}</span>
                 {isMuted("users", d.userId) && <IconBellOff className="mute-mark" />}
-                {d.unread > 0 && <span className="count">{d.unread}</span>}
+                {d.unread > 0 && d.roomId !== activeChannel && <span className="count">{d.unread}</span>}
               </button>
             </div>
           ))}
@@ -766,7 +773,6 @@ function VoiceDock() {
   const myName = useStore(app, (s) => s.myName);
   const myAvatar = useStore(app, (s) => s.myAvatar);
   const myPresence = useStore(app, (s) => s.myPresence);
-  const priv = usePrivacy();
 
   const channelName = servers.flatMap((g) => g.channels).find((c) => c.roomId === voiceChannel)?.name;
   const ptt = state.settings.inputMode === "ptt";
@@ -801,11 +807,11 @@ function VoiceDock() {
               {state.camera ? <IconVideo /> : <IconVideoOff />}
             </button>
             <button
-              className={`icon ${state.screen ? "live" : ""}`}
-              title={state.screen ? t("call.shareMenu") : t("call.shareScreen")}
+              className={`icon ${state.screen ? "live" : ""} ${state.sunshine ? "live sun" : ""}`}
+              title={state.screen || state.sunshine ? t("call.shareMenu") : t("call.shareScreen")}
               onClick={(e) => screenButton(e.currentTarget)}
             >
-              {state.screen ? <IconScreen /> : <IconScreenOff />}
+              {state.screen || state.sunshine ? <IconScreen /> : <IconScreenOff />}
             </button>
             <SoundboardButton className="icon" />
             <button className="icon hangup" title={t("call.leave")} onClick={() => void leaveVoice()}>
@@ -846,11 +852,6 @@ function VoiceDock() {
           {myName}
           {ptt && !state.muted && <small>{t("dock.ptt")}</small>}
         </span>
-        {priv.streamer && (
-          <button className="streamer-chip" title={t("streamer.off")} onClick={() => setStatusMode("auto")}>
-            {t("streamer.chip")}
-          </button>
-        )}
 
         <button
           className={`icon ${state.muted ? "on" : ""} ${hint === "muted-talk" ? "attention" : ""}`}
@@ -1066,7 +1067,7 @@ async function downloadMedia(media: Media): Promise<void> {
 function previewMedia(p: LinkPreview): Media | null {
   const img = p.image;
   if (!img) return null;
-  return { mxc: img.mxc, file: img.file, kind: "image", name: p.title || p.site, mime: img.mime, size: 0, caption: "", w: img.w, h: img.h };
+  return { mxc: img.mxc, file: img.file, kind: "image", name: p.title || p.site, mime: img.mime, size: 0, caption: "", w: img.w, h: img.h, thumb: null, duration: 0 };
 }
 
 /**
@@ -1128,10 +1129,9 @@ function LinkCard({ preview, onRemove }: { preview: LinkPreview; onRemove?: () =
   );
 }
 
-/** Images load at once, video and audio only on click: they can be heavy. */
+/** Images load at once; video and sound get the player, which downloads only on play. */
 function MessageMedia({ media }: { media: Media }) {
-  const [load, setLoad] = useState(media.kind === "image");
-  const url = useMediaSrc(media, load);
+  const url = useMediaSrc(media, media.kind === "image");
 
   // reserve the image size up front so the timeline does not jump while it loads
   const box =
@@ -1151,22 +1151,8 @@ function MessageMedia({ media }: { media: Media }) {
     );
   }
 
-  if (media.kind === "video" || media.kind === "audio") {
-    if (!load || !url) {
-      return (
-        <button className="media-play" onClick={() => setLoad(true)} disabled={load}>
-          <IconPlay size={18} />
-          <span className="ellipsis">{media.name}</span>
-          <span className="state">{load ? t("common.loading") : humanSize(media.size)}</span>
-        </button>
-      );
-    }
-    return media.kind === "video" ? (
-      <video className="media-video" src={url} controls autoPlay />
-    ) : (
-      <audio className="media-audio" src={url} controls autoPlay />
-    );
-  }
+  if (media.kind === "video") return <VideoPlayer media={media} />;
+  if (media.kind === "audio") return <AudioPlayer media={media} />;
 
   return (
     <>
@@ -1528,6 +1514,7 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
   const highlight = useStore(app, (s) => s.highlight);
   const searchOpen = useStore(app, (s) => s.searchOpen);
   const membersHidden = useStore(app, (s) => s.membersHidden);
+  const directMembers = useStore(app, (s) => s.directMembers);
   const history = useStore(app, (s) => s.history);
   const unreadFrom = useStore(app, (s) => s.unreadFrom);
   const pinsOpen = useStore(app, (s) => s.pinsOpen);
@@ -1543,13 +1530,13 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
   const stick = useRef(true);
   // the place to return to, applied once the chat's messages are drawn
   const restore = useRef<ScrollMark | null>(null);
-  const markFrame = useRef(0);
 
   const direct = directs.find((d) => d.roomId === activeChannel);
   const channel =
     servers.flatMap((g) => g.channels).find((c) => c.roomId === activeChannel) ?? loose.find((c) => c.roomId === activeChannel);
   const title = direct?.name ?? channel?.name ?? activeChannel ?? "";
   const voiceHere = channel?.kind === "voice";
+  const membersOn = direct ? directMembers : !membersHidden;
 
   const follow = (on: boolean) => {
     stick.current = on;
@@ -1581,9 +1568,14 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
     el.scrollTop += node.getBoundingClientRect().top - el.getBoundingClientRect().top - mark.offset;
   }, [messages, activeChannel]);
 
+  // "to the newest" counts at once: leaving the chat mid-animation must not
+  // leave a mark somewhere in the middle. A long way is jumped, a short one glides.
   const toBottom = () => {
     stick.current = true;
-    bottom.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+    if (activeChannel) scrollMarks.set(activeChannel, { bottom: true });
+    const el = scroller.current;
+    const far = !!el && el.scrollHeight - el.scrollTop - el.clientHeight > el.clientHeight * 2;
+    bottom.current?.scrollIntoView({ block: "end", behavior: far ? "instant" : "smooth" });
   };
 
   // new messages from others since the chat was opened (or since scrolling away)
@@ -1631,14 +1623,9 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
       setAtBottom(at);
       setChatAtBottom(at);
     }
-    // where the chat stands is noted once a frame, not on every scroll event
-    if (activeChannel && !markFrame.current) {
-      const roomId = activeChannel;
-      markFrame.current = requestAnimationFrame(() => {
-        markFrame.current = 0;
-        if (scroller.current && app.get().activeChannel === roomId) markScroll(roomId, scroller.current);
-      });
-    }
+    // where the chat stands is noted right away: Chromium fires scroll at most
+    // once a frame, and a mark left for a later frame could miss the last move
+    if (activeChannel && app.get().activeChannel === activeChannel) markScroll(activeChannel, el);
     if (el.scrollTop < 80) {
       const before = el.scrollHeight;
       void loadMore().then((got) => {
@@ -1649,8 +1636,6 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
       });
     }
   };
-
-  useEffect(() => () => cancelAnimationFrame(markFrame.current), []);
 
   // an own message goes out: scroll down even if history was being read
   useEffect(() => {
@@ -1714,17 +1699,16 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
             <MuteBell roomId={activeChannel} userId={direct?.userId ?? ""} />
             <button
               className={`ghost icon head-tool pin-tool ${pinsOpen ? "on-soft" : ""}`}
-              title={t("pins.title")}
+              title={pins.length ? tn("pins.titleCount", pins.length) : t("pins.title")}
               onClick={() => app.set({ pinsOpen: !pinsOpen })}
             >
               <IconPin />
-              {pins.length > 0 && <small>{pins.length}</small>}
             </button>
             <HeadSearch roomId={activeChannel} />
             <button
-              className={`ghost icon head-tool ${membersHidden ? "" : "on-soft"}`}
-              title={membersHidden ? t("chat.showMembers") : t("chat.hideMembers")}
-              onClick={toggleMembers}
+              className={`ghost icon head-tool ${membersOn ? "on-soft" : ""}`}
+              title={membersOn ? t("chat.hideMembers") : t("chat.showMembers")}
+              onClick={() => toggleMembers(!!direct)}
             >
               <IconUsers />
             </button>
@@ -1744,14 +1728,13 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
           </div>
         ) : (
           !atBottom && (
-            <div className="unread-bar older">
-              <button className="unread-jump" onClick={toBottom}>
-                {t("chat.olderShown")}
-              </button>
-              <button className="unread-act" onClick={toBottom}>
+            // one button across the whole bar: both halves did the same anyway
+            <button className="unread-bar older" onClick={toBottom}>
+              <span className="unread-jump">{t("chat.olderShown")}</span>
+              <span className="unread-act">
                 {t("chat.toBottom")} ↓
-              </button>
-            </div>
+              </span>
+            </button>
           )
         )}
 
@@ -2394,7 +2377,10 @@ export function Main() {
   const activeChannel = useStore(app, (s) => s.activeChannel);
   const callView = useStore(app, (s) => s.callView);
   const voiceChannel = useStore(app, (s) => s.voiceChannel);
-  const membersHidden = useStore(app, (s) => s.membersHidden);
+  // the list is read through membersShown(); these only redraw the screen when it changes
+  useStore(app, (s) => s.membersHidden);
+  useStore(app, (s) => s.directMembers);
+  useStore(app, (s) => s.directs);
   // the call takes the place of the chat and the member list; the left columns stay
   const inCall = callView && !!voiceChannel && activeChannel === voiceChannel;
 
@@ -2420,12 +2406,12 @@ export function Main() {
         ) : (
           <>
             <Chat />
-            {!membersHidden && <Members />}
+            {membersShown(activeChannel) && <Members />}
           </>
         )}
       </div>
       <MiniStream />
-      <MoonlightViewer hidden={inCall} />
+      <SunRequests />
       <StreamPeek />
       <Toast />
       <OfflineBar />

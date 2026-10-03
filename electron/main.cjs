@@ -7,6 +7,7 @@ const brand = require("../brand.json");
 const guard = require("./guard.cjs");
 const preview = require("./preview.cjs");
 const { publicFetch } = require("./publicfetch.cjs");
+const sunshine = require("./sunshine.cjs");
 const tray = require("./tray.cjs");
 const updater = require("./updater.cjs");
 
@@ -160,6 +161,9 @@ function mlDir() {
   return path.join(app.getPath("userData"), "moonlight");
 }
 
+/** The pairing waiting for the streamer: dropped when the viewer gives up. */
+let mlPairing = null;
+
 /** One helper command with a JSON answer. */
 function mlCommand(args, timeoutMs) {
   return new Promise((resolve) => {
@@ -169,6 +173,7 @@ function mlCommand(args, timeoutMs) {
       return;
     }
     const child = spawn(exe, ["moonlight", ...args], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    if (args[0] === "pair") mlPairing = child;
     let out = "";
     let err = "";
     const timer = setTimeout(() => child.kill(), timeoutMs);
@@ -176,6 +181,7 @@ function mlCommand(args, timeoutMs) {
     child.stderr.on("data", (d) => (err += d.toString()));
     child.on("exit", (code) => {
       clearTimeout(timer);
+      if (mlPairing === child) mlPairing = null;
       if (code !== 0) {
         resolve({ ok: false, error: err.trim() || `exit ${code}` });
         return;
@@ -203,8 +209,14 @@ function stopMoonlight() {
   }, 3000);
 }
 
-/** A host name, IPv4 or [IPv6] address, with an optional port: nothing else reaches the helper. */
-const HOST_RE = /^(?:(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?|\[[0-9a-f:.]{2,45}\])(?::\d{1,5})?$/i;
+/**
+ * A host name, IPv4 or [IPv6] address, with an optional port, and optionally a
+ * key the host's certificate is kept under ("key@address"): nothing else
+ * reaches the helper.
+ */
+const HOST_RE = /^(?:[A-Za-z0-9_-]{1,64}@)?(?:(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?|\[[0-9a-f:.]{2,45}\])(?::\d{1,5})?$/i;
+/** The device name a pairing request carries: the streamer's app matches requests by it. */
+const DEVICE_RE = /^[A-Za-z0-9._-]{1,64}$/;
 
 function mlHost(h) {
   const v = String(h || "").trim();
@@ -218,8 +230,14 @@ function moonlightBridge() {
     return host ? mlCommand([args[0], mlDir(), host, ...args.slice(1)], ms) : bad;
   };
   guard.handle(ipcMain, "app:ml-info", (_e, h) => run(h, ["info"], 20_000));
-  // the host's owner types the PIN into Sunshine; that may take a while
-  guard.handle(ipcMain, "app:ml-pair", (_e, h, pin) => (/^\d{4}$/.test(String(pin)) ? run(h, ["pair", String(pin)], 200_000) : bad));
+  // the streamer lets the request in on the other side; that may take a while
+  guard.handle(ipcMain, "app:ml-pair", (_e, h, pin, name) => {
+    if (!/^\d{4}$/.test(String(pin))) return bad;
+    const device = DEVICE_RE.test(String(name ?? "")) ? [String(name)] : [];
+    return run(h, ["pair", String(pin), ...device], 200_000);
+  });
+  guard.handle(ipcMain, "app:ml-forget", (_e, h) => run(h, ["forget"], 10_000));
+  guard.handle(ipcMain, "app:ml-cancel", () => mlPairing?.kill());
   guard.handle(ipcMain, "app:ml-apps", (_e, h) => run(h, ["apps"], 20_000));
   guard.handle(ipcMain, "app:ml-quit", (_e, h) => run(h, ["quit"], 20_000));
 
@@ -230,7 +248,20 @@ function moonlightBridge() {
     const o = opts || {};
     if (!mlHost(o.host)) return bad;
     const num = (v, d) => String(Math.round(Number(v) || d));
-    const args = ["moonlight", "stream", mlDir(), mlHost(o.host), num(o.app, 0), num(o.width, 1920), num(o.height, 1080), num(o.fps, 60), num(o.kbps, 20000), num(o.formats, 1)];
+    const args = [
+      "moonlight",
+      "stream",
+      mlDir(),
+      mlHost(o.host),
+      num(o.app, 0),
+      num(o.width, 1920),
+      num(o.height, 1080),
+      num(o.fps, 60),
+      num(o.kbps, 20000),
+      num(o.formats, 1),
+      // the streamer keeps hearing the own sound
+      o.hostAudio === false ? "0" : "1",
+    ];
     const child = spawn(exe, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     mlStream = child;
     const sender = event.sender;
@@ -249,6 +280,7 @@ function moonlightBridge() {
         if (sender.isDestroyed()) continue;
         if (kind === 1) sender.send("app:ml-frame", Buffer.from(payload));
         else if (kind === 2) sender.send("app:ml-event", payload.toString("utf8"));
+        else if (kind === 3) sender.send("app:ml-audio", Buffer.from(payload));
       }
     });
     child.stderr.on("data", (d) => {
@@ -606,9 +638,74 @@ const WEB_PREFS = {
   contextIsolation: true,
   nodeIntegration: false,
   sandbox: true,
-  spellcheck: false,
+  // the checker is there; whether it underlines anything is a setting (see spellBridge)
+  spellcheck: true,
   backgroundThrottling: false,
 };
+
+/* ----------------------------------------------------------- spell checking */
+
+/**
+ * Red underlines under misspelled words, Russian and English at once, on when
+ * the user turns it on. Right click on such a word offers the fixes; any text
+ * field gets cut, copy and paste. Menu captions come from the page, in its
+ * language.
+ */
+let menuLabels = {
+  cut: "Cut",
+  copy: "Copy",
+  paste: "Paste",
+  selectAll: "Select all",
+  addWord: "Add to dictionary",
+  noFixes: "No suggestions",
+};
+
+function applySpellcheck(on) {
+  const ses = session.defaultSession;
+  ses.setSpellCheckerEnabled(!!on);
+  if (!on) return;
+  const have = ses.availableSpellCheckerLanguages || [];
+  const want = ["ru", "en-US"].filter((l) => !have.length || have.includes(l));
+  try {
+    if (want.length) ses.setSpellCheckerLanguages(want);
+  } catch {
+    // a language the system does not offer: the rest still works
+  }
+}
+
+function spellBridge() {
+  tray.setSpellcheckHandler(applySpellcheck);
+  applySpellcheck(tray.loadSettings().spellcheck);
+  guard.handle(ipcMain, "app:menu-labels", (_e, labels) => {
+    if (!labels || typeof labels !== "object") return;
+    for (const key of Object.keys(menuLabels)) {
+      if (typeof labels[key] === "string" && labels[key].length < 80) menuLabels[key] = labels[key];
+    }
+  });
+}
+
+function editMenu(contents, params) {
+  if (!params.isEditable && !params.selectionText) return;
+  const items = [];
+  if (params.misspelledWord) {
+    const fixes = (params.dictionarySuggestions || []).slice(0, 6);
+    for (const fix of fixes) items.push({ label: fix, click: () => contents.replaceMisspelling(fix) });
+    if (!fixes.length) items.push({ label: menuLabels.noFixes, enabled: false });
+    items.push({
+      label: menuLabels.addWord,
+      click: () => contents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
+    });
+    items.push({ type: "separator" });
+  }
+  const can = params.editFlags || {};
+  if (params.isEditable) items.push({ label: menuLabels.cut, role: "cut", enabled: !!can.canCut });
+  items.push({ label: menuLabels.copy, role: "copy", enabled: !!can.canCopy });
+  if (params.isEditable) {
+    items.push({ label: menuLabels.paste, role: "paste", enabled: !!can.canPaste });
+    items.push({ type: "separator" }, { label: menuLabels.selectAll, role: "selectAll" });
+  }
+  Menu.buildFromTemplate(items).popup({ window: BrowserWindow.fromWebContents(contents) ?? undefined });
+}
 
 /* ------------------------------------------------------------- window state */
 
@@ -678,6 +775,8 @@ function createWindow() {
     if (leaveCall(() => !win.isDestroyed() && win.close())) e.preventDefault();
   });
   win.on("focus", () => win.flashFrame(false));
+  // right click in a text field: fixes for a misspelled word, cut, copy, paste
+  win.webContents.on("context-menu", (_e, params) => editMenu(win.webContents, params));
 
   win.webContents.setWindowOpenHandler(({ url, frameName }) => {
     // a separate screen share window: a blank page filled by the app itself.
@@ -924,12 +1023,22 @@ if (!app.requestSingleInstanceLock()) {
     // no menu bar: Alt would toggle it and Ctrl+R would reload the page mid-call
     if (!DEV_URL) Menu.setApplicationMenu(null);
     allowMedia();
+    spellBridge();
     secretsBridge();
     shareBridge();
     audioBridge();
     hotkeyBridge();
     shellBridge();
     moonlightBridge();
+    sunshine.init({
+      handle: guard.handle,
+      ipcMain,
+      helperPath,
+      send: (event) => {
+        const win = mainWindow;
+        if (win && !win.isDestroyed()) win.webContents.send("app:sun-event", event);
+      },
+    });
     frameBridge();
     startKeysHelper();
     createWindow();
@@ -965,6 +1074,9 @@ if (!app.requestSingleInstanceLock()) {
   app.on("will-quit", () => {
     globalShortcut.unregisterAll();
     stopAudioHelper();
+    // the helper stops Sunshine cleanly on its own once the app is gone
+    void sunshine.stop();
+    stopMoonlight();
     if (keysHelper) {
       const child = keysHelper;
       keysHelper = null;

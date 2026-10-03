@@ -16,6 +16,9 @@ let token = "";
 
 const cache = new Map<string, string>();
 const inflight = new Map<string, Promise<string>>();
+/** When a download last failed: tried again only after a pause, never remembered for good. */
+const failedAt = new Map<string, number>();
+const RETRY_MS = 15_000;
 
 export function configureMedia(c: MatrixClient | null, accessToken: string): void {
   client = c;
@@ -25,6 +28,7 @@ export function configureMedia(c: MatrixClient | null, accessToken: string): voi
   }
   cache.clear();
   inflight.clear();
+  failedAt.clear();
 }
 
 function keyOf(mxc: string, size: number): string {
@@ -44,6 +48,44 @@ export function peekMedia(mxc: string, size = 0): string {
   return cache.get(keyOf(mxc, size)) ?? "";
 }
 
+async function fetchBlob(http: string, authed: boolean): Promise<Blob | null> {
+  try {
+    const res = await fetch(http, authed ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
+    if (!res.ok) return null;
+    const blob = new Blob([await res.arrayBuffer()], { type: safeMime(res.headers.get("content-type") ?? "") });
+    return blob.size ? blob : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Download with the token, then without it (older servers); a thumbnail the
+ * server cannot make yet falls back to the file itself. A failure is not
+ * remembered as a broken link: a picture whose first request failed (a
+ * moment after upload, a network hiccup) loads on the next try.
+ */
+async function download(mxc: string, size: number): Promise<string> {
+  const tries: [number, boolean][] = size
+    ? [
+        [size, true],
+        [size, false],
+        [0, true],
+        [0, false],
+      ]
+    : [
+        [0, true],
+        [0, false],
+      ];
+  for (const [sz, authed] of tries) {
+    const http = httpOf(mxc, sz, authed);
+    if (!http) continue;
+    const blob = await fetchBlob(http, authed);
+    if (blob) return URL.createObjectURL(blob);
+  }
+  return "";
+}
+
 export function mediaUrl(mxc: string, size = 0): Promise<string> {
   if (!isMxc(mxc) || !client) return Promise.resolve("");
 
@@ -53,21 +95,18 @@ export function mediaUrl(mxc: string, size = 0): Promise<string> {
 
   const running = inflight.get(key);
   if (running) return running;
+  if ((failedAt.get(key) ?? 0) > Date.now() - RETRY_MS) return Promise.resolve("");
 
   const task = (async () => {
-    const http = httpOf(mxc, size, true);
-    if (!http) return "";
     try {
-      const res = await fetch(http, { headers: { Authorization: `Bearer ${token}` } });
-      if (!res.ok) throw new Error(String(res.status));
-      const url = URL.createObjectURL(new Blob([await res.arrayBuffer()], { type: safeMime(res.headers.get("content-type") ?? "") }));
-      cache.set(key, url);
+      const url = await download(mxc, size);
+      if (url) {
+        cache.set(key, url);
+        failedAt.delete(key);
+      } else {
+        failedAt.set(key, Date.now());
+      }
       return url;
-    } catch {
-      // older servers serve media without authorization
-      const legacy = httpOf(mxc, size, false);
-      if (legacy) cache.set(key, legacy);
-      return legacy;
     } finally {
       inflight.delete(key);
     }
@@ -169,4 +208,72 @@ export function encryptedMediaUrl(file: EncryptedFile, mime: string): Promise<st
   })();
   inflight.set(key, task);
   return task;
+}
+
+/* --------------------------------------------------------- attachments */
+
+/**
+ * A whole attachment for the player: downloaded with progress, decrypted in
+ * encrypted rooms, cached like other media. `onProgress` gets 0..1 while the
+ * size is known.
+ */
+export function attachmentUrl(
+  mxc: string,
+  file: EncryptedFile | null,
+  mime: string,
+  onProgress?: (part: number) => void,
+): Promise<string> {
+  const url = file?.url ?? mxc;
+  if (!client || !isMxc(url)) return Promise.resolve("");
+  const key = file ? `enc:${file.url}` : mxc;
+  const ready = cache.get(key);
+  if (ready) return Promise.resolve(ready);
+  const running = inflight.get(key);
+  if (running) return running;
+
+  const task = (async () => {
+    try {
+      const get = async (authed: boolean): Promise<ArrayBuffer | null> => {
+        const http = httpOf(url, 0, authed);
+        if (!http) return null;
+        const res = await fetch(http, authed ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
+        if (!res.ok || !res.body) return null;
+        const total = Number(res.headers.get("content-length") ?? 0);
+        const reader = res.body.getReader();
+        const parts: Uint8Array[] = [];
+        let have = 0;
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          parts.push(value);
+          have += value.byteLength;
+          if (total) onProgress?.(Math.min(1, have / total));
+        }
+        const out = new Uint8Array(have);
+        let at = 0;
+        for (const p of parts) {
+          out.set(p, at);
+          at += p.byteLength;
+        }
+        return out.buffer;
+      };
+      const data = (await get(true).catch(() => null)) ?? (await get(false).catch(() => null));
+      if (!data) return "";
+      const plain = file ? await decryptAttachment(data, file) : data;
+      const blobUrl = URL.createObjectURL(new Blob([plain], { type: safeMime(mime || file?.mimetype || "") }));
+      cache.set(key, blobUrl);
+      return blobUrl;
+    } catch {
+      return "";
+    } finally {
+      inflight.delete(key);
+    }
+  })();
+  inflight.set(key, task);
+  return task;
+}
+
+/** An attachment that is already downloaded, so the player starts without a spinner. */
+export function peekAttachment(mxc: string, file: EncryptedFile | null): string {
+  return cache.get(file ? `enc:${file.url}` : mxc) ?? "";
 }

@@ -18,7 +18,7 @@ const ICON = path.join(__dirname, "..", brand.logo);
 
 /* ----------------------------------------------------------- shell settings */
 
-const DEFAULTS = { closeToTray: true, autostart: false, trayHintShown: false, background: "", window: null };
+const DEFAULTS = { closeToTray: true, autostart: false, trayHintShown: false, background: "", window: null, spellcheck: false };
 let settings = null;
 
 function settingsFile() {
@@ -72,12 +72,17 @@ function publicSettings() {
     autostart: settings.autostart,
     autostartAvailable: electron.app.isPackaged,
     background: settings.background,
+    spellcheck: !!settings.spellcheck,
   };
 }
 
 function updateSettings(patch) {
   loadSettings();
   if (typeof patch?.closeToTray === "boolean") settings.closeToTray = patch.closeToTray;
+  if (typeof patch?.spellcheck === "boolean") {
+    settings.spellcheck = patch.spellcheck;
+    onSpellcheck(settings.spellcheck);
+  }
   if (typeof patch?.background === "string" && /^#[0-9a-f]{6}$/i.test(patch.background)) settings.background = patch.background;
   if (patch?.window && typeof patch.window === "object") {
     const w = patch.window;
@@ -91,6 +96,13 @@ function updateSettings(patch) {
   }
   saveSettings();
   return publicSettings();
+}
+
+// the main process applies the spell checker; set by main.cjs
+let onSpellcheck = () => undefined;
+
+function setSpellcheckHandler(fn) {
+  onSpellcheck = fn;
 }
 
 /* -------------------------------------------------------------- tray images */
@@ -202,4 +214,5 @@ module.exports = {
   createTray,
   applyState,
   hintOnce,
+  setSpellcheckHandler,
 };

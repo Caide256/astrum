@@ -5,6 +5,92 @@ GitHub uses the same two sections, and the app shows the one of its language in
 the update window. Mentions like `@everyone` always go in backticks: GitHub takes
 a bare mention for a GitHub user and lists that user as a contributor of the release.
 
+## 0.9.0
+
+<details>
+<summary>English</summary>
+
+### New
+- **Streams through Sunshine**, right from Astrum: your screen goes to viewers directly from your PC and is encoded by the video card, so the quality is limited only by your upload. Pick "Through Sunshine" in the share dialog.
+  - Sunshine is downloaded on the first such stream (the official LizardByte build, about 38 MB, checked by its checksum), started with the stream and stopped with it.
+  - It needs a public IP. The app checks the network itself and opens the ports on the router over UPnP. If the ports are forwarded by hand, there is "My IP is public, the ports are forwarded by hand" and an address for viewers (an IP or a domain).
+  - Each viewer asks once, and you allow or decline in a card. Access can be taken back in the "Streams" tab.
+  - Sunshine streams look and work like regular ones (tile, mini player, separate window), with a yellow dot instead of the red one.
+  - The sound of the PC goes along, from the output device you pick. The monitor, the encoder and a bitrate cap per viewer are in the "Streams" tab.
+  - With a gray IP the regular share through the call works as before.
+- **Moonlight plays the stream sound.**
+- **Media player** for videos and audio in chats: downloads when you press play, shows the progress, one volume for all players, only one plays at a time.
+- **Streamer mode** is a full status with its own purple dot.
+- **Background editor**: zoom and move the picture, with previews of the profile card and the call tile.
+- Pictures can be dropped onto the avatar, the profile background and the server icon.
+- A message with attachments can be edited: take files out or add new ones.
+- A green dot on the tray icon while you are in a call.
+- Settings:
+  - "Underline spelling mistakes" (Russian and English, fixes on right click);
+  - "Interface scale";
+  - "Pictures on other people's backgrounds";
+  - "Notifications from voice channel chats", off by default; mentions of you notify anyway.
+
+### Changed
+- The "Streams" tab: only how streams look for you (size "As the source" or smaller, frame rate, codec). The bitrate is set automatically. A list of connected Sunshine hosts.
+- "Watch via Moonlight" in the person's menu is gone: a Sunshine stream is watched like any other.
+- The member list is hidden in direct chats until you open it.
+- "You are looking at older messages" and "Jump to the newest" are one button.
+- A new pin icon, without a counter.
+- The status list and the microphone hint are no longer see-through.
+
+### Fixed
+- Accepting an invite to a direct chat failed with "Can't join remote room because no servers are in the room" and the invite stayed. Now the inviter's server is asked; an invite to a room nobody is left in is declined or hidden.
+- A chat left scrolled to the bottom opens at the bottom.
+- Unread marks clear right after reading, and the open chat is not counted as unread.
+- JPG avatars. Pictures that failed to load once are tried again instead of staying blank until a restart.
+
+Sunshine (GPLv3, LizardByte) is not packed into Astrum: it is downloaded from its GitHub releases when needed.
+
+</details>
+
+<details>
+<summary>Русский</summary>
+
+### Новое
+- **Стримы через Sunshine** прямо из Astrum: экран идёт зрителям напрямую с твоего компьютера, кодирует видеокарта, качество упирается только в исходящий канал. В окне демонстрации выбери «Через Sunshine».
+  - Sunshine скачивается при первом таком стриме (официальная сборка LizardByte, около 38 МБ, сверяется по контрольной сумме), запускается вместе со стримом и вместе с ним останавливается.
+  - Нужен белый IP. Программа сама проверяет сеть и открывает порты на роутере по UPnP. Если порты проброшены вручную, есть «У меня белый IP, порты проброшены вручную» и адрес для зрителей (IP или домен).
+  - Каждый зритель спрашивает один раз, ты разрешаешь или отклоняешь в карточке. Доступ можно забрать во вкладке «Стримы».
+  - Стримы через Sunshine выглядят и работают как обычные (плитка, мини-плеер, отдельное окно), только точка жёлтая, а не красная.
+  - Звук компьютера идёт вместе с картинкой, с выбранного устройства вывода. Монитор, кодировщик и предел битрейта на зрителя во вкладке «Стримы».
+  - С серым IP обычная демонстрация через звонок работает как раньше.
+- **Moonlight играет звук стрима.**
+- **Медиаплеер** для видео и аудио в чатах: скачивает по нажатию на «Воспроизвести» и показывает прогресс, одна громкость на все плееры, играет только один за раз.
+- **Режим стримера** теперь полноценный статус со своей фиолетовой точкой.
+- **Редактор фона**: картинку можно увеличить и сдвинуть, видно, как она ляжет в карточку профиля и в плитку звонка.
+- Картинку можно перетащить прямо на аватарку, фон профиля и иконку сервера.
+- Сообщение с вложениями можно редактировать: убрать файлы или добавить новые.
+- Зелёная точка на иконке в трее, пока ты в звонке.
+- Настройки:
+  - «Подчёркивать ошибки» (русский и английский, исправления по правой кнопке);
+  - «Масштаб интерфейса»;
+  - «Картинки на фонах других»;
+  - «Уведомления из чатов войсов», по умолчанию выключено; упоминания тебя приходят всё равно.
+
+### Изменено
+- Вкладка «Стримы»: только то, как стримы выглядят у тебя (размер «Как у источника» или меньше, частота, кодек). Битрейт выставляется сам. Список подключённых Sunshine.
+- Пункта «Смотреть через Moonlight» в меню человека больше нет: стрим через Sunshine смотрится как любой другой.
+- В личных чатах список участников скрыт, пока его не открыть.
+- «Ты смотришь старые сообщения» и «К последним» теперь одна кнопка.
+- Новая иконка закрепов, без счётчика.
+- Список статусов и подсказка про микрофон больше не просвечивают.
+
+### Исправлено
+- Приглашение в личный чат не принималось с ошибкой «Can't join remote room because no servers are in the room» и продолжало висеть. Теперь спрашивается сервер пригласившего, а приглашение в комнату, где никого не осталось, отклоняется или прячется.
+- Чат, пролистанный до конца, открывается внизу.
+- Отметки непрочитанного снимаются сразу после прочтения, открытый чат не считается непрочитанным.
+- Аватарки в JPG. Картинки, которые один раз не загрузились, загружаются снова, а не висят пустыми до перезапуска.
+
+Sunshine (GPLv3, LizardByte) не упакован в Astrum: он скачивается с его релизов на GitHub, когда нужен.
+
+</details>
+
 ## 0.8.1
 
 <details>

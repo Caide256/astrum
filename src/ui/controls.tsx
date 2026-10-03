@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
 
 import { t } from "../i18n/index.ts";
 import { IconEye, IconEyeOff } from "./icons.tsx";
@@ -144,4 +144,51 @@ export function useEscape(active: boolean, onClose: () => void): void {
       if (at >= 0) escapeStack.splice(at, 1);
     };
   }, [active]);
+}
+
+/**
+ * A place an image can be dropped on: an avatar, a banner, a server icon.
+ * Returns the handlers for the element and whether a file is over it now.
+ * Only the first image of the drop is taken; anything else is ignored.
+ */
+export function useImageDrop(onImage: (file: File) => void, enabled = true): {
+  over: boolean;
+  bind: {
+    onDragEnter: (e: DragEvent) => void;
+    onDragOver: (e: DragEvent) => void;
+    onDragLeave: (e: DragEvent) => void;
+    onDrop: (e: DragEvent) => void;
+  };
+} {
+  const [over, setOver] = useState(false);
+  const hasFiles = (e: DragEvent) => enabled && Array.from(e.dataTransfer.types).includes("Files");
+  return {
+    over,
+    bind: {
+      onDragEnter: (e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setOver(true);
+      },
+      onDragOver: (e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "copy";
+        if (!over) setOver(true);
+      },
+      onDragLeave: (e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver(false);
+      },
+      onDrop: (e) => {
+        if (!hasFiles(e)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setOver(false);
+        const file = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith("image/"));
+        if (file) onImage(file);
+      },
+    },
+  };
 }

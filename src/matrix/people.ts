@@ -134,7 +134,9 @@ export async function setName(client: MatrixClient, name: string): Promise<void>
 }
 
 export async function setAvatar(client: MatrixClient, file: File): Promise<string> {
-  const upload = await client.uploadContent(file, { type: file.type, name: file.name });
+  // a file without a type (dragged from some places) is stored as bytes and the server makes no thumbnails of it
+  const type = file.type || (/\.jpe?g$/i.test(file.name) ? "image/jpeg" : /\.webp$/i.test(file.name) ? "image/webp" : "image/png");
+  const upload = await client.uploadContent(file, { type, name: file.name });
   await client.setAvatarUrl(upload.content_uri);
   return upload.content_uri;
 }
@@ -264,18 +266,24 @@ export function localName(userId: string): string {
 
 /* --------------------------------------------------------------- presence */
 
-export type Presence = "online" | "unavailable" | "dnd" | "offline";
+export type Presence = "online" | "unavailable" | "dnd" | "streamer" | "offline";
 
 /**
- * "Do not disturb" has no presence state of its own in Matrix: it travels as
- * the status message next to "online", which other clients show as text.
+ * "Do not disturb" and the streamer mode have no presence state of their own
+ * in Matrix: they travel as the status message next to "online", which other
+ * clients show as text.
  */
 export const DND_STATUS = "dnd";
+export const STREAMER_STATUS = "streamer";
 
 export function presenceOf(client: MatrixClient, userId: string): Presence {
   const user = client.getUser(userId);
   const p = user?.presence;
-  if ((p === "online" || p === "unavailable") && (user?.presenceStatusMsg ?? "").trim().toLowerCase() === DND_STATUS) return "dnd";
+  if (p === "online" || p === "unavailable") {
+    const msg = (user?.presenceStatusMsg ?? "").trim().toLowerCase();
+    if (msg === DND_STATUS) return "dnd";
+    if (msg === STREAMER_STATUS) return "streamer";
+  }
   if (p === "online") return "online";
   if (p === "unavailable") return "unavailable";
   return "offline";
@@ -322,9 +330,32 @@ export function listInvites(client: MatrixClient): Invite[] {
     });
 }
 
+/**
+ * Servers to join a room through: the inviter's and the one that created the
+ * room. Without them a homeserver that has nobody left in the room cannot
+ * find it and answers "no servers that are in the room have been provided".
+ */
+function viaFor(roomId: string, inviter: string): string[] {
+  const out = new Set<string>();
+  const domain = (id: string) => id.split(":").slice(1).join(":");
+  if (inviter) out.add(domain(inviter));
+  if (domain(roomId)) out.add(domain(roomId));
+  return [...out].filter(Boolean);
+}
+
+/** The room behind an invite is gone: everybody left, so nobody can let us in. */
+export function isDeadInvite(e: unknown): boolean {
+  const err = e as { errcode?: string; httpStatus?: number; message?: string };
+  const text = String(err?.message ?? e);
+  return (
+    /no servers that are in the room|not in the room|unknown room|room not found|no known servers/i.test(text) ||
+    (err?.httpStatus === 404 && err?.errcode !== "M_UNRECOGNIZED")
+  );
+}
+
 /** Accept an invite. A direct chat is also added to m.direct, or it would not be listed. */
 export async function acceptInvite(client: MatrixClient, invite: Invite): Promise<void> {
-  await client.joinRoom(invite.roomId);
+  await client.joinRoom(invite.roomId, { viaServers: viaFor(invite.roomId, invite.inviter) });
   if (!invite.direct || !invite.inviter) return;
   const map = directMap(client);
   const list = new Set(map[invite.inviter] ?? []);

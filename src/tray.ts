@@ -1,18 +1,19 @@
 import { BRAND } from "./brand.ts";
-import { hasShell, pushTrayState } from "./desktop.ts";
+import { hasShell, pushTrayState, setMenuLabels } from "./desktop.ts";
 import { getLang, onLangChange, t, tn } from "./i18n/index.ts";
 import { voice } from "./voice/voice.ts";
 
 /**
  * Tray and taskbar icons. A red badge with a crossed-out microphone means
- * muted, crossed-out headphones means deafened, a red dot means unread
- * messages or invites. The images are drawn here on a canvas with the same
+ * muted, crossed-out headphones means deafened, a green dot means in a call,
+ * a red dot means unread messages or invites. The images are drawn here on a canvas with the same
  * glyphs as the interface and handed to the main process as PNG.
  */
 
 type Look = { inCall: boolean; muted: boolean; deafened: boolean; unread: number };
 
 const RED = "#ed4245";
+const GREEN = "#23a55a";
 const RING = "#121317";
 
 let base: HTMLImageElement | null = null;
@@ -97,6 +98,21 @@ function isOff(look: Look): boolean {
   return look.muted || look.deafened;
 }
 
+/** In a call and heard: a green dot at the bottom right, where the mute badge goes otherwise. */
+function callDot(ctx: CanvasRenderingContext2D, size: number): void {
+  const r = size * 0.22;
+  const cx = size - r;
+  const cy = size - r;
+  ctx.fillStyle = RING;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r + Math.max(1, size * 0.05), 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = GREEN;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+}
+
 function draw(img: HTMLImageElement, size: number, look: Look): string {
   const canvas = document.createElement("canvas");
   canvas.width = size;
@@ -107,6 +123,7 @@ function draw(img: HTMLImageElement, size: number, look: Look): string {
   ctx.drawImage(img, 0, 0, size, size);
   if (look.unread && !isOff(look)) dot(ctx, size, false);
   if (isOff(look)) badge(ctx, size, look, false);
+  else if (look.inCall) callDot(ctx, size);
   return canvas.toDataURL("image/png");
 }
 
@@ -171,6 +188,21 @@ export function setTrayUnread(count: number): void {
   void update();
 }
 
+function pushMenuLabels(): void {
+  setMenuLabels({
+    cut: t("menu.cut"),
+    copy: t("menu.copy"),
+    paste: t("menu.paste"),
+    selectAll: t("menu.selectAll"),
+    addWord: t("menu.addWord"),
+    noFixes: t("menu.noFixes"),
+  });
+}
+
 voice.subscribe(() => void update());
-onLangChange(() => void update());
+onLangChange(() => {
+  void update();
+  pushMenuLabels();
+});
 void update();
+pushMenuLabels();

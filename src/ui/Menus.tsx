@@ -150,7 +150,26 @@ function shareLine(): string {
 export function ScreenMenu() {
   const menu = useStore(app, (s) => s.screenMenu);
   const state = useSyncExternalStore(voice.subscribe, voice.getState, voice.getState);
-  if (!menu || !state.screen) return null;
+  if (!menu || (!state.screen && !state.sunshine)) return null;
+
+  if (state.sunshine) {
+    // the own stream goes through Sunshine: its settings live in the share dialog and in settings
+    return (
+      <Floating x={menu.x} y={menu.y} place="above" onClose={closeMenus} className="share-menu">
+        <div className="menu-head ellipsis">
+          <i className="live-dot sun" /> {t("sun.running")}
+        </div>
+        <button className="menu-item" onClick={openShareSettings}>
+          <IconGear />
+          <span>{t("share.settings")}</span>
+        </button>
+        <button className="menu-item danger" onClick={() => void stopShare()}>
+          <IconScreenOff />
+          <span>{t("share.stop")}</span>
+        </button>
+      </Floating>
+    );
+  }
 
   return (
     <Floating x={menu.x} y={menu.y} place="above" onClose={closeMenus} className="share-menu">
@@ -334,10 +353,16 @@ export function StreamPeek() {
       onMouseLeave={peekLeave}
     >
       <div className="peek-title ellipsis">
-        <i className="live-dot" />
+        <i className={`live-dot ${stream.sunshine ? "sun" : ""}`} />
         {who}
       </div>
-      <div className="peek-video">{track ? <TrackView track={track} /> : <div className="state">{t("share.loadingPreview")}</div>}</div>
+      <div className="peek-video">
+        {track ? (
+          <TrackView track={track} />
+        ) : (
+          <div className="state">{stream.sunshine ? t("sun.peek") : t("share.loadingPreview")}</div>
+        )}
+      </div>
       {stream.local ? (
         <button
           className="primary peek-action"

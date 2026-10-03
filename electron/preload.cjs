@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webFrame } = require("electron");
 
 /**
  * Thin bridge to the main process: only what a page cannot do itself, such
@@ -29,15 +29,41 @@ contextBridge.exposeInMainWorld("desktop", {
   sealSecret: (text) => ipcRenderer.invoke("app:secret-seal", text),
   openSecret: (sealed) => ipcRenderer.invoke("app:secret-open", sealed),
   linkPreview: (url) => ipcRenderer.invoke("app:link-preview", url),
+  // the size of the whole interface; a page zoom keeps every layout in proportion
+  setZoom: (factor) => {
+    const f = Number(factor);
+    if (f >= 0.5 && f <= 2) webFrame.setZoomFactor(f);
+  },
+  setMenuLabels: (labels) => ipcRenderer.invoke("app:menu-labels", labels),
 
   mlInfo: (host) => ipcRenderer.invoke("app:ml-info", host),
-  mlPair: (host, pin) => ipcRenderer.invoke("app:ml-pair", host, pin),
+  mlPair: (host, pin, name) => ipcRenderer.invoke("app:ml-pair", host, pin, name),
+  mlForget: (host) => ipcRenderer.invoke("app:ml-forget", host),
+  mlCancel: () => ipcRenderer.invoke("app:ml-cancel"),
   mlApps: (host) => ipcRenderer.invoke("app:ml-apps", host),
   mlQuit: (host) => ipcRenderer.invoke("app:ml-quit", host),
   mlStart: (opts) => ipcRenderer.invoke("app:ml-start", opts),
   mlStop: () => ipcRenderer.invoke("app:ml-stop"),
   mlIdr: () => ipcRenderer.invoke("app:ml-idr"),
   onMlEvent: (cb) => listen("app:ml-event", cb),
+  onMlAudio: (cb) => {
+    const handler = (_e, chunk) => cb(chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength));
+    ipcRenderer.on("app:ml-audio", handler);
+    return () => ipcRenderer.removeListener("app:ml-audio", handler);
+  },
+
+  sunStatus: () => ipcRenderer.invoke("app:sun-status"),
+  sunInstall: () => ipcRenderer.invoke("app:sun-install"),
+  sunStart: (settings) => ipcRenderer.invoke("app:sun-start", settings),
+  sunStop: () => ipcRenderer.invoke("app:sun-stop"),
+  sunDevices: () => ipcRenderer.invoke("app:sun-devices"),
+  sunApprove: (id, pin, name) => ipcRenderer.invoke("app:sun-approve", id, pin, name),
+  sunDeny: (id) => ipcRenderer.invoke("app:sun-deny", id),
+  sunClients: () => ipcRenderer.invoke("app:sun-clients"),
+  sunUnpair: (uuid) => ipcRenderer.invoke("app:sun-unpair", uuid),
+  onSunEvent: (cb) => listen("app:sun-event", cb),
+  netCheck: () => ipcRenderer.invoke("app:net-check"),
+  resolvePublic: (name) => ipcRenderer.invoke("app:resolve-public", name),
   onMlFrame: (cb) => {
     const handler = (_e, chunk) => {
       const copy = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);

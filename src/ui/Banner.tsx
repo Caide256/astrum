@@ -27,18 +27,37 @@ export function splitEmoji(text: string): string[] {
   return [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)].map((s) => s.segment);
 }
 
-/** Inline style of a banner. `fallback` shows while the avatar color or the picture loads, and for no banner at all. */
+/**
+ * Inline style of a banner. `fallback` shows while the avatar color loads, for
+ * no banner at all, and under a picture: the picture itself is a separate
+ * layer (BannerPicture), so it can be enlarged around a chosen point.
+ */
 export function useBannerStyle(look: TileLook | null, avatar: string, fallback: string): CSSProperties {
   const auto = look?.mode === "dominant" || look?.mode === "edge";
   const color = useAvatarColor(auto ? avatar : "", auto ? (look?.mode as "dominant" | "edge") : null);
-  const picture = useMxc(look?.mode === "image" ? (look.image ?? "") : "");
-  if (look?.mode === "image") {
-    return picture
-      ? { backgroundColor: fallback, backgroundImage: `url("${picture}")`, backgroundSize: "cover", backgroundPosition: "center" }
-      : { background: fallback };
-  }
+  if (look?.mode === "image") return { background: fallback };
   if (look?.mode === "color") return { background: look.color || fallback };
   return { background: color || fallback };
+}
+
+/**
+ * The picture of a banner, filling its box. The same zoom and point give the
+ * same framing in boxes of any shape: the profile card, a call tile.
+ */
+export function BannerPicture({ look }: { look: TileLook | null }) {
+  const url = useMxc(look?.mode === "image" ? (look.image ?? "") : "");
+  if (!url || look?.mode !== "image") return null;
+  const zoom = look.zoom ?? 1;
+  const at = `${look.x ?? 50}% ${look.y ?? 50}%`;
+  return (
+    <img
+      className="banner-picture"
+      src={url}
+      alt=""
+      draggable={false}
+      style={{ objectPosition: at, transformOrigin: at, transform: zoom !== 1 ? `scale(${zoom})` : undefined }}
+    />
+  );
 }
 
 /** The emoji of a banner, spread over its whole area. */
@@ -78,6 +97,7 @@ export function Banner({
   const style = useBannerStyle(look, avatar, "var(--bg-3)");
   return (
     <div className={`banner ${className}`} style={style}>
+      <BannerPicture look={look} />
       <EmojiDeco emoji={look?.emoji} />
       {children}
     </div>

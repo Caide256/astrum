@@ -13,7 +13,9 @@ import {
 import { t } from "../i18n/index.ts";
 import { useStore } from "../store.ts";
 import { voice, type ShareCodec, type VoiceVideo } from "../voice/voice.ts";
+import { hasSunshine, sun } from "../sunshine.ts";
 import { IconRefresh } from "./icons.tsx";
+import { SunsharePane } from "./Moonlight.tsx";
 import { useEscape, useLinger } from "./controls.tsx";
 
 /** Any video track: attached to the element, detached on unmount. */
@@ -83,6 +85,9 @@ export function ScreenPicker() {
   const [audio, setAudio] = useState(true);
   const [height, setHeight] = useState(1080);
   const [fps, setFps] = useState(60);
+  // through the call server, or straight from this computer through Sunshine
+  const [mode, setMode] = useState<"call" | "sunshine">("call");
+  const sunLive = useStore(sun, (s) => s.live);
   const { shown, closing } = useLinger(open);
   const close = () => app.set({ screenPickerOpen: false });
   useEscape(open, close);
@@ -104,6 +109,7 @@ export function ScreenPicker() {
     setFps(s.share?.fps ?? s.settings.shareFps);
     setPicked(current);
     setTab(current.startsWith("window:") ? "window" : "screen");
+    setMode(s.sunshine ? "sunshine" : "call");
     load();
     void getDisplays().then(setDisplays);
   }, [open]);
@@ -148,117 +154,134 @@ export function ScreenPicker() {
   return (
     <div className={`modal-back ${closing ? "closing" : ""}`} onClick={close}>
       <div className="modal wide share-modal" onClick={(e) => e.stopPropagation()}>
-        <h2>{live ? t("share.settings") : t("share.title")}</h2>
+        <h2>{live || sunLive ? t("share.settings") : t("share.title")}</h2>
 
-        {hasOwnScreenPicker ? (
-          <>
-            <div className="tabs">
-              <button className={tab === "screen" ? "on" : "ghost"} onClick={() => setTab("screen")}>
-                {t("share.tab.screens")}
-              </button>
-              <button className={tab === "window" ? "on" : "ghost"} onClick={() => setTab("window")}>
-                {t("share.tab.windows")}
-              </button>
-              <button className="ghost small push-right" onClick={load}>
-                <IconRefresh /> {t("common.refresh")}
-              </button>
-            </div>
-
-            {loading && sources.length === 0 && <div className="state">{t("share.loading")}</div>}
-            {!loading && list.length === 0 && <div className="state">{t("share.empty")}</div>}
-
-            <div className="sources">
-              {list.map((s) => (
-                <button
-                  key={s.id}
-                  className={`source ${picked === s.id ? "picked" : ""}`}
-                  title={t("share.doubleClick")}
-                  onClick={() => setPicked(s.id)}
-                  onDoubleClick={() => apply(s.id)}
-                >
-                  {s.thumbnail ? <img src={s.thumbnail} alt="" /> : <div className="source-blank" />}
-                  <span className="ellipsis">
-                    {live && s.id === state.share?.sourceId && <i className="live-dot" />}
-                    {s.name}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </>
-        ) : (
-          <p className="sub">{live ? t("share.browser.live") : t("share.browser.start")}</p>
+        {hasSunshine && (
+          <div className="seg share-mode">
+            <button className={mode === "call" ? "on" : ""} onClick={() => setMode("call")}>
+              <i className="live-dot" /> {t("share.mode.call")}
+            </button>
+            <button className={mode === "sunshine" ? "on" : ""} onClick={() => setMode("sunshine")}>
+              <i className="live-dot sun" /> {t("share.mode.sunshine")}
+            </button>
+          </div>
         )}
 
-        <div className="share-quality">
-          <div className="quality-row">
-            <span className="quality-label">{t("share.resolution")}</span>
-            <div className="seg">
-              <button className={effHeight === 0 ? "on" : ""} onClick={() => setHeight(0)}>
-                {t("share.native", { h: nativeH })}
+        {mode === "sunshine" ? (
+          <SunsharePane onStarted={close} onClose={close} />
+        ) : (
+          <>
+            {hasOwnScreenPicker ? (
+              <>
+                <div className="tabs">
+                  <button className={tab === "screen" ? "on" : "ghost"} onClick={() => setTab("screen")}>
+                    {t("share.tab.screens")}
+                  </button>
+                  <button className={tab === "window" ? "on" : "ghost"} onClick={() => setTab("window")}>
+                    {t("share.tab.windows")}
+                  </button>
+                  <button className="ghost small push-right" onClick={load}>
+                    <IconRefresh /> {t("common.refresh")}
+                  </button>
+                </div>
+
+                {loading && sources.length === 0 && <div className="state">{t("share.loading")}</div>}
+                {!loading && list.length === 0 && <div className="state">{t("share.empty")}</div>}
+
+                <div className="sources">
+                  {list.map((s) => (
+                    <button
+                      key={s.id}
+                      className={`source ${picked === s.id ? "picked" : ""}`}
+                      title={t("share.doubleClick")}
+                      onClick={() => setPicked(s.id)}
+                      onDoubleClick={() => apply(s.id)}
+                    >
+                      {s.thumbnail ? <img src={s.thumbnail} alt="" /> : <div className="source-blank" />}
+                      <span className="ellipsis">
+                        {live && s.id === state.share?.sourceId && <i className="live-dot" />}
+                        {s.name}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <p className="sub">{live ? t("share.browser.live") : t("share.browser.start")}</p>
+            )}
+
+            <div className="share-quality">
+              <div className="quality-row">
+                <span className="quality-label">{t("share.resolution")}</span>
+                <div className="seg">
+                  <button className={effHeight === 0 ? "on" : ""} onClick={() => setHeight(0)}>
+                    {t("share.native", { h: nativeH })}
+                  </button>
+                  {heights.map((h) => (
+                    <button key={h} className={effHeight === h ? "on" : ""} onClick={() => setHeight(h)}>
+                      {h}p
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="quality-row">
+                <span className="quality-label">{t("share.fps")}</span>
+                <div className="seg">
+                  {fpsList.map((f) => (
+                    <button key={f} className={effFps === f ? "on" : ""} onClick={() => setFps(f)}>
+                      {f}
+                      {f === hz && hz > 60 ? ` · ${t("share.monitorRate")}` : ""}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="state">
+                {t("share.uplink", { rate: uplink(effHeight || nativeH, effFps, aspect) })}
+                {tab === "screen" && effFps > 30 && hasOwnScreenPicker ? ` ${t("share.screenSlow")}` : ""}
+              </div>
+            </div>
+
+            <div className="quality-row codec-row">
+              <span className="quality-label">{t("share.codec")}</span>
+              <select
+                value={state.settings.shareCodec}
+                onChange={(e) => void voice.applySettings({ shareCodec: e.target.value as ShareCodec })}
+              >
+                <option value="auto">{t("share.codec.auto")}</option>
+                <option value="h264">{t("share.codec.gpu")}</option>
+                <option value="vp8">{t("share.codec.cpu")}</option>
+              </select>
+            </div>
+            <span className="state">{t("share.codec.hint")}</span>
+
+            <label className="check share-audio">
+              <input type="checkbox" checked={audio} onChange={() => setAudio(!audio)} />
+              <span>
+                <b>{t("share.audio")}</b>
+                <span className="state">{hint}</span>
+              </span>
+            </label>
+
+            <div className="row">
+              {live && (
+                <button className="danger push-left" onClick={() => void stopShare()}>
+                  {t("share.stop")}
+                </button>
+              )}
+              {live && !hasOwnScreenPicker && (
+                <button className="ghost" onClick={() => apply(null, true)}>
+                  {t("share.switchWindow")}
+                </button>
+              )}
+              <button className="ghost" onClick={close}>
+                {t("common.cancel")}
               </button>
-              {heights.map((h) => (
-                <button key={h} className={effHeight === h ? "on" : ""} onClick={() => setHeight(h)}>
-                  {h}p
-                </button>
-              ))}
+              <button className="primary" disabled={!canStart} onClick={() => apply(picked || null)}>
+                {live ? t("share.apply") : t("share.start")}
+              </button>
             </div>
-          </div>
-          <div className="quality-row">
-            <span className="quality-label">{t("share.fps")}</span>
-            <div className="seg">
-              {fpsList.map((f) => (
-                <button key={f} className={effFps === f ? "on" : ""} onClick={() => setFps(f)}>
-                  {f}
-                  {f === hz && hz > 60 ? ` · ${t("share.monitorRate")}` : ""}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="state">
-            {t("share.uplink", { rate: uplink(effHeight || nativeH, effFps, aspect) })}
-            {tab === "screen" && effFps > 30 && hasOwnScreenPicker ? ` ${t("share.screenSlow")}` : ""}
-          </div>
-        </div>
-
-        <div className="quality-row codec-row">
-          <span className="quality-label">{t("share.codec")}</span>
-          <select
-            value={state.settings.shareCodec}
-            onChange={(e) => void voice.applySettings({ shareCodec: e.target.value as ShareCodec })}
-          >
-            <option value="auto">{t("share.codec.auto")}</option>
-            <option value="h264">{t("share.codec.gpu")}</option>
-            <option value="vp8">{t("share.codec.cpu")}</option>
-          </select>
-        </div>
-        <span className="state">{t("share.codec.hint")}</span>
-
-        <label className="check share-audio">
-          <input type="checkbox" checked={audio} onChange={() => setAudio(!audio)} />
-          <span>
-            <b>{t("share.audio")}</b>
-            <span className="state">{hint}</span>
-          </span>
-        </label>
-
-        <div className="row">
-          {live && (
-            <button className="danger push-left" onClick={() => void stopShare()}>
-              {t("share.stop")}
-            </button>
-          )}
-          {live && !hasOwnScreenPicker && (
-            <button className="ghost" onClick={() => apply(null, true)}>
-              {t("share.switchWindow")}
-            </button>
-          )}
-          <button className="ghost" onClick={close}>
-            {t("common.cancel")}
-          </button>
-          <button className="primary" disabled={!canStart} onClick={() => apply(picked || null)}>
-            {live ? t("share.apply") : t("share.start")}
-          </button>
-        </div>
+          </>
+        )}
       </div>
     </div>
   );

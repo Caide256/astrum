@@ -24,7 +24,7 @@ import { GUESSES } from "../matrix/discovery.ts";
 import { compareChannels, type BrowseChannel, type Channel, type Server } from "../matrix/servers.ts";
 import { useServerProfiles } from "../prefs.ts";
 import { useStore } from "../store.ts";
-import { Avatar } from "./Avatar.tsx";
+import { Avatar, AvatarDrop } from "./Avatar.tsx";
 import { Cropper } from "./Cropper.tsx";
 import { SoundsTab } from "./Soundboard.tsx";
 import { useEscape, useLinger } from "./controls.tsx";
@@ -229,7 +229,7 @@ function Overview({ server }: { server: Server }) {
   return (
     <>
       <div className="profile-top">
-        <Avatar mxc={server.avatar} name={server.name} size={72} className="square-avatar" />
+        <AvatarDrop mxc={server.avatar} name={server.name} size={72} className="square-avatar" enabled={can.server} onFile={setCrop} />
         <div className="profile-id">
           <b className="ellipsis">{server.name}</b>
           <div className="server-address">
@@ -343,7 +343,7 @@ function MyServerProfile({ server }: { server: Server }) {
     <>
       <p className="sub">{t("serverProfile.intro")}</p>
       <div className="profile-top">
-        <Avatar mxc={avatar} name={name.trim() || myName || "?"} size={72} />
+        <AvatarDrop mxc={avatar} name={name.trim() || myName || "?"} size={72} onFile={setCrop} />
         <div className="profile-id">
           <b className="ellipsis">{name.trim() || myName}</b>
           <div className="state">{own ? t("serverProfile.own") : t("serverProfile.global")}</div>

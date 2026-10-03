@@ -43,7 +43,14 @@ import { LANGS, fmtDateTime, setLang, t, useLang, type Key, type Lang } from "..
 import type { CryptoStatus } from "../matrix/crypto.ts";
 import type { SessionRow } from "../matrix/people.ts";
 import {
+  UI_SCALES,
   setNotifyMode,
+  setNotifyPrefs,
+  setUiScale,
+  setViewPrefs,
+  useNotifyPrefs,
+  useUiScale,
+  useViewPrefs,
   setPlayerPrefs,
   setPrivacy,
   setSoundPrefs,
@@ -91,12 +98,12 @@ import {
   type MicTest,
 } from "../voice/audio.ts";
 import { CAMERA_FPS, CAMERA_HEIGHTS, voice, type DeviceInfo, type InputMode, type Limiter, type TileLook } from "../voice/voice.ts";
-import { Avatar } from "./Avatar.tsx";
+import { Avatar, AvatarDrop } from "./Avatar.tsx";
 import { Banner, splitEmoji } from "./Banner.tsx";
 import { EmojiPicker } from "./EmojiPicker.tsx";
 import { Cropper } from "./Cropper.tsx";
 import { MoonlightTab } from "./Moonlight.tsx";
-import { PasswordInput, Toggle, useEscape, useLinger } from "./controls.tsx";
+import { PasswordInput, Toggle, useEscape, useImageDrop, useLinger } from "./controls.tsx";
 import { IconLogout, IconPalette, IconPlus, IconRefresh, IconSmile, IconTrash } from "./icons.tsx";
 
 type MeterSource = { get: () => MicState; on: (cb: (s: MicState) => void) => () => void };
@@ -223,71 +230,187 @@ const TILE_MODES: { id: TileLook["mode"]; name: Key }[] = [
   { id: "image", name: "tile.image" },
 ];
 
+type Frame = { zoom: number; x: number; y: number };
+
+function frameOf(look: TileLook): Frame {
+  return { zoom: look.zoom ?? 1, x: look.x ?? 50, y: look.y ?? 50 };
+}
+
+/**
+ * The own banner in one of the places it shows: the profile card or a call
+ * tile. With a picture, dragging moves it and the wheel enlarges it; a
+ * picture dropped from the explorer becomes the new banner.
+ */
+function BannerSpot({
+  look,
+  avatar,
+  name,
+  kind,
+  onFrame,
+  onCommit,
+  onFile,
+}: {
+  look: TileLook;
+  avatar: string;
+  name: string;
+  kind: "card" | "tile";
+  onFrame: (f: Frame) => void;
+  onCommit: () => void;
+  onFile: (f: File) => void;
+}) {
+  const drag = useRef<{ x: number; y: number; from: Frame; w: number; h: number } | null>(null);
+  const drop = useImageDrop(onFile);
+  const movable = look.mode === "image";
+  const frame = frameOf(look);
+  const wheelTimer = useRef(0);
+
+  return (
+    <div className={`banner-spot ${kind}`}>
+      <span className="state">{kind === "card" ? t("tile.where.card") : t("tile.where.tile")}</span>
+      <div
+        className={`banner-spot-box ${movable ? "movable" : ""} ${drop.over ? "drop-over" : ""}`}
+        {...drop.bind}
+        onPointerDown={(e) => {
+          if (!movable || e.button !== 0) return;
+          e.currentTarget.setPointerCapture(e.pointerId);
+          const r = e.currentTarget.getBoundingClientRect();
+          drag.current = { x: e.clientX, y: e.clientY, from: frame, w: r.width, h: r.height };
+        }}
+        onPointerMove={(e) => {
+          const d = drag.current;
+          if (!d) return;
+          // the picture follows the mouse: the point in view moves the other way
+          const k = 100 / d.from.zoom;
+          onFrame({
+            zoom: d.from.zoom,
+            x: Math.max(0, Math.min(100, d.from.x - ((e.clientX - d.x) / d.w) * k)),
+            y: Math.max(0, Math.min(100, d.from.y - ((e.clientY - d.y) / d.h) * k)),
+          });
+        }}
+        onPointerUp={() => {
+          if (!drag.current) return;
+          drag.current = null;
+          onCommit();
+        }}
+        onWheel={(e) => {
+          if (!movable) return;
+          const zoom = Math.max(1, Math.min(4, frame.zoom * (e.deltaY < 0 ? 1.08 : 1 / 1.08)));
+          onFrame({ ...frame, zoom });
+          window.clearTimeout(wheelTimer.current);
+          wheelTimer.current = window.setTimeout(onCommit, 350);
+        }}
+      >
+        {kind === "card" ? (
+          <Banner look={look} avatar={avatar} className="banner-preview card">
+            <div className="banner-preview-who">
+              <Avatar mxc={avatar} name={name || "?"} size={46} />
+              <b className="ellipsis">{name}</b>
+            </div>
+          </Banner>
+        ) : (
+          <Banner look={look} avatar={avatar} className="banner-preview tile">
+            <Avatar mxc={avatar} name={name || "?"} size={48} className="banner-preview-face" />
+            <span className="banner-preview-label ellipsis">{name}</span>
+          </Banner>
+        )}
+        {drop.over && <div className="drop-veil">{t("tile.dropHere")}</div>}
+      </div>
+    </div>
+  );
+}
+
 /**
  * The own banner: the top of the profile card and the background of the tile
  * in calls. A color from the avatar, an own color or picture, and up to three
- * emoji over it, with a live preview.
+ * emoji over it. Both places are previewed side by side; a picture can be
+ * moved and enlarged right there, and the framing is the same everywhere.
  */
 function BannerSection({ avatar, name }: { avatar: string; name: string }) {
   const look = useTileLook();
   const [pickAt, setPickAt] = useState<{ left: number; top: number } | null>(null);
+  // the framing while it is being dragged; it goes out to others when let go
+  const [draft, setDraft] = useState<Frame | null>(null);
   const file = useRef<HTMLInputElement>(null);
   const emoji = splitEmoji(look.emoji ?? "");
+  const shown: TileLook = draft ? { ...look, ...draft } : look;
+  const frame = frameOf(shown);
+  const latest = useRef(shown);
+  latest.current = shown;
 
   const upload = async (f: File) => {
     const mxc = await uploadBanner(f);
-    if (mxc) setTileLook({ mode: "image", image: mxc });
+    if (mxc) setTileLook({ mode: "image", image: mxc, zoom: 1, x: 50, y: 50 });
+  };
+  const commit = () => {
+    const f = frameOf(latest.current);
+    setTileLook(f);
+    setDraft(null);
   };
 
   return (
     <>
       <div className="section-title">{t("tile.title")}</div>
-      <div className="banner-pref">
-        <Banner look={look} avatar={avatar} className="banner-preview">
-          <div className="banner-preview-who">
-            <Avatar mxc={avatar} name={name || "?"} size={54} />
-            <b className="ellipsis">{name}</b>
-          </div>
-        </Banner>
-        <div className="banner-controls">
-          <Seg
-            value={look.mode}
-            list={TILE_MODES}
-            onPick={(mode) => (mode === "image" && !look.image ? file.current?.click() : setTileLook({ mode }))}
+      <div className="banner-spots">
+        <BannerSpot look={shown} avatar={avatar} name={name} kind="card" onFrame={setDraft} onCommit={commit} onFile={(f) => void upload(f)} />
+        <BannerSpot look={shown} avatar={avatar} name={name} kind="tile" onFrame={setDraft} onCommit={commit} onFile={(f) => void upload(f)} />
+      </div>
+      {shown.mode === "image" && (
+        <div className="banner-zoom">
+          <span className="state">{t("tile.zoom", { n: Math.round(frame.zoom * 100) })}</span>
+          <input
+            type="range"
+            min={1}
+            max={4}
+            step={0.01}
+            value={frame.zoom}
+            onChange={(e) => setDraft({ ...frame, zoom: Number(e.target.value) })}
+            onPointerUp={commit}
+            onKeyUp={commit}
           />
-          {look.mode === "color" && <ColorInput label={t("tile.pick")} value={look.color} onChange={(color) => setTileLook({ color })} />}
-          {look.mode === "image" && (
-            <div className="row left">
-              <button className="ghost small" onClick={() => file.current?.click()}>
-                {t("tile.imageChange")}
-              </button>
-            </div>
-          )}
-          {(look.mode === "dominant" || look.mode === "edge") && <span className="state">{avatar ? t("tile.autoHint") : t("tile.noAvatar")}</span>}
-          <div className="banner-emoji">
-            <span className="state">{t("tile.emoji")}</span>
-            {emoji.map((e, i) => (
-              <button
-                key={`${e}${i}`}
-                className="ghost small emoji-chip"
-                title={t("tile.emojiRemove")}
-                onClick={() => setTileLook({ emoji: emoji.filter((_, j) => j !== i).join("") })}
-              >
-                {e}
-              </button>
-            ))}
-            {emoji.length < 3 && (
-              <button
-                className="ghost small"
-                onClick={(ev) => {
-                  const r = ev.currentTarget.getBoundingClientRect();
-                  setPickAt({ left: Math.max(8, Math.min(window.innerWidth - 360, r.left)), top: Math.max(8, Math.min(window.innerHeight - 400, r.bottom + 6)) });
-                }}
-              >
-                <IconSmile /> {t("tile.emojiAdd")}
-              </button>
-            )}
+          <button className="ghost small" disabled={frame.zoom === 1 && frame.x === 50 && frame.y === 50} onClick={() => setTileLook({ zoom: 1, x: 50, y: 50 })}>
+            {t("tile.reset")}
+          </button>
+        </div>
+      )}
+      <span className="state">{shown.mode === "image" ? t("tile.moveHint") : t("tile.dropHint")}</span>
+      <div className="banner-controls">
+        <Seg
+          value={look.mode}
+          list={TILE_MODES}
+          onPick={(mode) => (mode === "image" && !look.image ? file.current?.click() : setTileLook({ mode }))}
+        />
+        {look.mode === "color" && <ColorInput label={t("tile.pick")} value={look.color} onChange={(color) => setTileLook({ color })} />}
+        {look.mode === "image" && (
+          <div className="row left">
+            <button className="ghost small" onClick={() => file.current?.click()}>
+              {t("tile.imageChange")}
+            </button>
           </div>
+        )}
+        {(look.mode === "dominant" || look.mode === "edge") && <span className="state">{avatar ? t("tile.autoHint") : t("tile.noAvatar")}</span>}
+        <div className="banner-emoji">
+          <span className="state">{t("tile.emoji")}</span>
+          {emoji.map((e, i) => (
+            <button
+              key={`${e}${i}`}
+              className="ghost small emoji-chip"
+              title={t("tile.emojiRemove")}
+              onClick={() => setTileLook({ emoji: emoji.filter((_, j) => j !== i).join("") })}
+            >
+              {e}
+            </button>
+          ))}
+          {emoji.length < 3 && (
+            <button
+              className="ghost small"
+              onClick={(ev) => {
+                const r = ev.currentTarget.getBoundingClientRect();
+                setPickAt({ left: Math.max(8, Math.min(window.innerWidth - 360, r.left)), top: Math.max(8, Math.min(window.innerHeight - 400, r.bottom + 6)) });
+              }}
+            >
+              <IconSmile /> {t("tile.emojiAdd")}
+            </button>
+          )}
         </div>
       </div>
       <span className="state">{t("tile.hint")}</span>
@@ -371,7 +494,7 @@ function ProfileTab() {
   return (
     <>
       <div className="profile-top">
-        <Avatar mxc={myAvatar} name={myName || "?"} size={72} />
+        <AvatarDrop mxc={myAvatar} name={myName || "?"} size={72} onFile={setCrop} />
         <div className="profile-id">
           <b className="ellipsis">{myName}</b>
           <div className="state ellipsis sensitive" title={t("profile.idFixed")}>
@@ -1184,6 +1307,8 @@ function AppearanceTab() {
   const lang = useLang();
   const player = usePlayerPrefs();
   const priv = usePrivacy();
+  const viewPrefs = useViewPrefs();
+  const scale = useUiScale();
   const own = listOwnThemes();
   const [adding, setAdding] = useState(false);
 
@@ -1232,6 +1357,26 @@ function AppearanceTab() {
         onChange={(magnet) => setPlayerPrefs({ magnet })}
         title={t("player.magnet")}
         hint={t("player.magnet.hint")}
+      />
+
+      <div className="section-title">{t("appearance.scale")}</div>
+      <div className="field">
+        <div className="seg scale-seg">
+          {UI_SCALES.map((n) => (
+            <button key={n} className={scale === n ? "on" : ""} onClick={() => setUiScale(n)}>
+              {n}%
+            </button>
+          ))}
+        </div>
+        <span className="state">{t("appearance.scale.hint")}</span>
+      </div>
+
+      <div className="section-title">{t("appearance.others")}</div>
+      <Toggle
+        checked={viewPrefs.bannerImages}
+        onChange={(bannerImages) => setViewPrefs({ bannerImages })}
+        title={t("appearance.bannerImages")}
+        hint={t("appearance.bannerImages.hint")}
       />
 
       <div className="section-title">{t("privacy.title")}</div>
@@ -1308,6 +1453,7 @@ function UpdatesSection() {
 function AppTab() {
   const [shell, setShell] = useState<ShellSettings | null>(null);
   const notify = useNotifyMode();
+  const more = useNotifyPrefs();
   const status = useStore(app, (s) => s.statusMode);
   const sounds = useSoundPrefs();
   const spk = useSyncExternalStore(voice.subscribe, voice.getState, voice.getState).settings.spkId;
@@ -1346,6 +1492,14 @@ function AppTab() {
             hint={shell.autostartAvailable ? t("app.autostart.hint") : t("app.autostart.unavailable")}
           />
           {shell.autostart && <div className="note gap-top">{t("app.autostart.portable")}</div>}
+
+          <div className="section-title">{t("app.typing")}</div>
+          <Toggle
+            checked={!!shell.spellcheck}
+            onChange={(v) => set({ spellcheck: v })}
+            title={t("app.spellcheck")}
+            hint={t("app.spellcheck.hint")}
+          />
         </>
       )}
 
@@ -1355,6 +1509,13 @@ function AppTab() {
         <span className="state">{t("app.notify.hint")}</span>
       </div>
       {(status === "dnd" || status === "streamer") && <div className="note">{t("app.notify.quiet")}</div>}
+      <Toggle
+        checked={more.voiceChats}
+        disabled={notify === "off"}
+        onChange={(voiceChats) => setNotifyPrefs({ voiceChats })}
+        title={t("app.notifyVoiceChats")}
+        hint={t("app.notifyVoiceChats.hint")}
+      />
       <Toggle
         checked={sounds.notifyOn}
         onChange={(on) => setSoundPrefs({ notifyOn: on })}
@@ -1798,11 +1959,17 @@ export function Settings() {
 
   const { shown, closing } = useLinger(open);
   const close = () => app.set({ settingsOpen: false });
+  const body = useRef<HTMLDivElement>(null);
   useEscape(open, close);
 
   useEffect(() => {
     if (open) void voice.unlockDevices();
   }, [open]);
+
+  // another tab starts at its top, not where the last one was scrolled to
+  useEffect(() => {
+    if (body.current) body.current.scrollTop = 0;
+  }, [tab]);
 
   if (!shown) return null;
 
@@ -1817,7 +1984,7 @@ export function Settings() {
           ))}
         </div>
 
-        <div className="settings-body">
+        <div className="settings-body" ref={body}>
           <div className="tab-pane" key={tab}>
             <h3 className="pane-title">{t(TABS.find((tb) => tb.id === tab)?.name ?? "settings.title")}</h3>
             {tab === "profile" && <ProfileTab />}

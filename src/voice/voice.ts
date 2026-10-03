@@ -59,7 +59,16 @@ import {
  * picture (`image`, an mxc URI); `emoji` scatters up to three emoji over it.
  * Sent to others in a call over the data channel.
  */
-export type TileLook = { mode: "dominant" | "edge" | "color" | "image"; color: string; image?: string; emoji?: string };
+export type TileLook = {
+  mode: "dominant" | "edge" | "color" | "image";
+  color: string;
+  image?: string;
+  emoji?: string;
+  /** For a picture: how much it is enlarged (1 fills the area) and the point kept in view, in percent. */
+  zoom?: number;
+  x?: number;
+  y?: number;
+};
 
 /** At most three emoji: the grapheme clusters of the text that are pictures. */
 export function cleanEmoji(raw: unknown): string {
@@ -81,7 +90,45 @@ export function cleanTile(raw: unknown): TileLook | null {
   if (v.mode === "color" && !color) return null;
   if (v.mode === "image" && !image) return null;
   const emoji = cleanEmoji(v.emoji);
-  return { mode: v.mode, color, ...(image ? { image } : {}), ...(emoji ? { emoji } : {}) };
+  const num = (n: unknown, lo: number, hi: number, d: number) => {
+    const f = Number(n);
+    return Number.isFinite(f) ? Math.max(lo, Math.min(hi, Math.round(f * 100) / 100)) : d;
+  };
+  const frame =
+    v.mode === "image" ? { zoom: num(v.zoom, 1, 4, 1), x: num(v.x, 0, 100, 50), y: num(v.y, 0, 100, 50) } : {};
+  const plain = v.mode === "image" && frame.zoom === 1 && frame.x === 50 && frame.y === 50;
+  return { mode: v.mode, color, ...(image ? { image } : {}), ...(emoji ? { emoji } : {}), ...(plain ? {} : frame) };
+}
+
+/**
+ * A screen stream through Sunshine, as the streamer's app announces it in the
+ * call: where to connect (public address first, then local ones for people
+ * on the same network), Sunshine's base port, the picture size and rate, and
+ * the id of that Sunshine (a new one means pairing again).
+ */
+export type SunInfo = { addrs: string[]; port: number; w: number; h: number; fps: number; uid: string };
+
+/** A Sunshine announcement from outside, or null if it makes no sense. */
+export function cleanSun(raw: unknown): SunInfo | null {
+  const v = raw as Partial<SunInfo> | null;
+  if (!v || typeof v !== "object" || !Array.isArray(v.addrs)) return null;
+  const addrs = v.addrs
+    .filter((a): a is string => typeof a === "string" && /^(?:\d{1,3}\.){3}\d{1,3}$|^[0-9a-f:]{2,39}$/i.test(a))
+    .slice(0, 6);
+  const port = Math.round(Number(v.port));
+  const num = (n: unknown, lo: number, hi: number, d: number) => {
+    const f = Math.round(Number(n));
+    return Number.isFinite(f) && f >= lo && f <= hi ? f : d;
+  };
+  if (!addrs.length || !(port >= 1024 && port <= 65000)) return null;
+  return {
+    addrs,
+    port,
+    w: num(v.w, 320, 7680, 1920),
+    h: num(v.h, 240, 4320, 1080),
+    fps: num(v.fps, 10, 360, 60),
+    uid: typeof v.uid === "string" ? v.uid.replace(/[^A-Za-z0-9-]/g, "").slice(0, 64) : "",
+  };
 }
 
 /** Something the person should notice: talking while muted, or a microphone that gives nothing. */
@@ -116,6 +163,8 @@ export type VoiceMember = {
   local: boolean;
   camera: boolean;
   screen: boolean;
+  /** Streams through Sunshine (a yellow dot instead of the red one). */
+  sunshine: boolean;
   volume: number;
   localMuted: boolean;
 };
@@ -142,6 +191,8 @@ export type VoiceStream = {
   muted: boolean;
   /** For the own share: who is watching it (identities). */
   viewers: string[];
+  /** Comes through Sunshine and is watched with Moonlight, not through the call server. */
+  sunshine: boolean;
 };
 
 export type DeviceInfo = { id: string; label: string };
@@ -259,6 +310,8 @@ export type VoiceState = {
   deafened: boolean;
   camera: boolean;
   screen: boolean;
+  /** The own screen goes out through Sunshine right now. */
+  sunshine: boolean;
   members: VoiceMember[];
   videos: VoiceVideo[];
   streams: VoiceStream[];
@@ -354,13 +407,24 @@ function cameraPlan(height: number, fps: number): { main: VideoPreset } {
 
 /** Packets between clients of this app over the LiveKit data channel. */
 type Packet =
-  | { t: "state"; deaf: boolean; tile?: TileLook }
+  | { t: "state"; deaf: boolean; tile?: TileLook; sun?: SunInfo | null }
   | { t: "watch"; on: boolean }
   | { t: "kick" }
   /** A viewer cannot decode the share: the sharer should switch to VP8. */
   | { t: "codec"; want: "vp8" }
   /** A soundboard sound: everyone in the call plays the file. */
-  | { t: "sound"; url: string };
+  | { t: "sound"; url: string }
+  | SunPacket;
+
+/**
+ * Sunshine pairing between a viewer and the streamer: the viewer asks with the
+ * device name its pairing request carries and the PIN; the streamer answers
+ * whether it was let in; a viewer that could not reach Sunshine says so.
+ */
+export type SunPacket =
+  | { t: "sun-pair"; name: string; pin: string }
+  | { t: "sun-answer"; name: string; ok: boolean }
+  | { t: "sun-fail"; reason: string };
 
 /** How long a watched share may deliver nothing decodable before the viewer asks for VP8. */
 const DECODE_STALL_MS = 7000;
@@ -430,6 +494,7 @@ function blank(): Omit<VoiceState, "devices" | "settings" | "muted" | "deafened"
     connecting: false,
     camera: false,
     screen: false,
+    sunshine: false,
     members: [],
     videos: [],
     streams: [],
@@ -489,6 +554,11 @@ export class VoiceClient {
   /** Tile looks of others, from their state packets, and the own one. */
   private remoteTile = new Map<string, TileLook>();
   private ownTile: TileLook | null = null;
+  /** Sunshine streams of others and the own one, from state packets. */
+  private remoteSun = new Map<string, SunInfo>();
+  private ownSun: SunInfo | null = null;
+  /** The Moonlight picture of a watched Sunshine stream, set by moonlight.ts. */
+  private sunVideo: { identity: string; track: LocalVideoTrack } | null = null;
   /** Talking while muted was heard until then. */
   private mutedTalkUntil = 0;
   private silentFor = 0;
@@ -766,6 +836,7 @@ export class VoiceClient {
     this.watching.add(identity);
     this.applyPolicy();
     if (!was) this.send({ t: "watch", on: true }, identity);
+    if (!was && this.remoteSun.has(identity) && !this.hasLiveShare(identity)) this.onSunWatch?.(identity, true);
     this.refreshMembers(true);
   }
 
@@ -775,7 +846,15 @@ export class VoiceClient {
     this.lostAt.delete(identity);
     this.applyPolicy();
     if (was) this.send({ t: "watch", on: false }, identity);
+    if (was && this.sunVideo?.identity === identity) this.sunVideo = null;
+    if (was) this.onSunWatch?.(identity, false);
     this.refreshMembers(true);
+  }
+
+  /** The participant shares through the call server (not Sunshine). */
+  private hasLiveShare(identity: string): boolean {
+    const pub = this.room?.remoteParticipants.get(identity)?.getTrackPublication(Track.Source.ScreenShare);
+    return !!pub && !pub.isMuted;
   }
 
   isWatching(identity: string): boolean {
@@ -793,6 +872,7 @@ export class VoiceClient {
   screenTrackOf(identity: string): LocalVideoTrack | RemoteVideoTrack | null {
     const room = this.room;
     if (!room) return null;
+    if (this.sunVideo?.identity === identity) return this.sunVideo.track;
     if (identity === room.localParticipant.identity) return this.screenTrack;
     const pub = room.remoteParticipants.get(identity)?.getTrackPublication(Track.Source.ScreenShare);
     return (pub?.track as RemoteVideoTrack | undefined) ?? null;
@@ -837,6 +917,8 @@ export class VoiceClient {
       const talking = local ? this.meterState.open : !this.state.deafened && p.isSpeaking;
       const sharing = !!screen && !screen.isMuted;
       const watching = this.watching.has(p.identity);
+      // a share through the call server wins: nobody streams both ways at once
+      const sun = sharing ? null : local ? this.ownSun : (this.remoteSun.get(p.identity) ?? null);
 
       members.push({
         id: p.identity,
@@ -849,21 +931,34 @@ export class VoiceClient {
         local,
         camera: !!cam && !cam.isMuted,
         screen: sharing,
+        sunshine: !!sun,
         volume: local ? 100 : this.userVolume(userId),
         localMuted: local ? false : this.userMuted(userId),
       });
 
-      if (sharing) {
+      if (sharing || sun) {
         streams.push({
           identity: p.identity,
           userId,
           name,
           local,
           watching,
-          hasAudio: !!screenAudio,
+          hasAudio: sun ? true : !!screenAudio,
           volume: this.streamVolume(userId),
           muted: !local && this.streamMuted(userId),
           viewers: local ? [...this.viewers] : [],
+          sunshine: !!sun,
+        });
+      }
+      if (sun && watching && this.sunVideo?.identity === p.identity) {
+        videos.push({
+          key: `${p.identity}|sunshine`,
+          identity: p.identity,
+          userId,
+          name,
+          screen: true,
+          local,
+          track: this.sunVideo.track,
         });
       }
 
@@ -904,12 +999,12 @@ export class VoiceClient {
 
     const signature =
       members
-        .map((m) => `${m.id}${+m.speaking}${+m.muted}${+m.deafened}${+m.camera}${+m.screen}${m.volume}${+m.localMuted}${m.tile?.mode ?? ""}${m.tile?.color ?? ""}${m.tile?.image ?? ""}${m.tile?.emoji ?? ""}`)
+        .map((m) => `${m.id}${+m.speaking}${+m.muted}${+m.deafened}${+m.camera}${+m.screen}${+m.sunshine}${m.volume}${+m.localMuted}${m.tile?.mode ?? ""}${m.tile?.color ?? ""}${m.tile?.image ?? ""}${m.tile?.emoji ?? ""}`)
         .join("|") +
       "//" +
       videos.map((v) => v.key).join("|") +
       "//" +
-      streams.map((s) => `${s.identity}${+s.watching}${+s.hasAudio}${s.volume}${+s.muted}${s.viewers.join(",")}`).join("|");
+      streams.map((s) => `${s.identity}${+s.watching}${+s.hasAudio}${s.volume}${+s.muted}${+s.sunshine}${s.viewers.join(",")}`).join("|");
 
     if (!force && signature === this.signature) return;
     this.signature = signature;
@@ -1094,7 +1189,52 @@ export class VoiceClient {
   }
 
   private sendState(to?: string): void {
-    this.send({ t: "state", deaf: this.state.deafened, ...(this.ownTile ? { tile: this.ownTile } : {}) }, to);
+    this.send({ t: "state", deaf: this.state.deafened, ...(this.ownTile ? { tile: this.ownTile } : {}), sun: this.ownSun }, to);
+  }
+
+  /* --------------------------------------------------------------- sunshine */
+
+  /** Set by moonlight.ts: a Sunshine stream is to be watched, or not any more. */
+  onSunWatch: ((identity: string, on: boolean) => void) | null = null;
+  /** Pairing packets go to sunshine.ts (the streamer side) and moonlight.ts (the viewer side). */
+  private sunListeners = new Set<(packet: SunPacket, from: string) => void>();
+
+  onSunPacket(cb: (packet: SunPacket, from: string) => void): () => void {
+    this.sunListeners.add(cb);
+    return () => this.sunListeners.delete(cb);
+  }
+
+  /** The own Sunshine stream starts (with where to connect) or ends (null). */
+  setSunshine(info: SunInfo | null): void {
+    this.ownSun = info;
+    if (!info) this.viewers.clear();
+    this.patch({ sunshine: !!info });
+    this.sendState();
+    this.refreshMembers(true);
+  }
+
+  sunOf(identity: string): SunInfo | null {
+    if (this.room && identity === this.room.localParticipant.identity) return this.ownSun;
+    return this.remoteSun.get(identity) ?? null;
+  }
+
+  /** The picture of the Sunshine stream being watched, from moonlight.ts. */
+  setSunVideo(identity: string | null, track: LocalVideoTrack | null): void {
+    this.sunVideo = identity && track ? { identity, track } : null;
+    this.refreshMembers(true);
+  }
+
+  /** A pairing packet to one participant. */
+  sendSun(packet: SunPacket, to: string): void {
+    this.send(packet, to);
+  }
+
+  /** Identity of a participant by Matrix user id, the first device found. */
+  identityOf(userId: string): string {
+    const room = this.room;
+    if (!room) return "";
+    for (const id of room.remoteParticipants.keys()) if (matrixUserFromIdentity(id) === userId) return id;
+    return "";
   }
 
   /** Set by the app: plays a soundboard sound someone in the call sent. */
@@ -1131,9 +1271,20 @@ export class VoiceClient {
       const tile = cleanTile(packet.tile);
       if (tile) this.remoteTile.set(from.identity, tile);
       else this.remoteTile.delete(from.identity);
+      const sun = cleanSun(packet.sun);
+      const had = this.remoteSun.has(from.identity);
+      if (sun) this.remoteSun.set(from.identity, sun);
+      else this.remoteSun.delete(from.identity);
+      if (sun && !had) this.sound("streamStart");
+      if (!sun && had) {
+        this.sound("streamStop");
+        if (this.watching.has(from.identity)) this.onSunWatch?.(from.identity, false);
+      }
       this.refreshMembers(true);
+    } else if (packet.t === "sun-pair" || packet.t === "sun-answer" || packet.t === "sun-fail") {
+      for (const cb of this.sunListeners) cb(packet, from.identity);
     } else if (packet.t === "watch") {
-      if (!this.screenTrack) return;
+      if (!this.screenTrack && !this.ownSun) return;
       if (packet.on && !this.viewers.has(from.identity)) {
         this.viewers.add(from.identity);
         this.sound("viewerJoin");
@@ -1466,6 +1617,9 @@ export class VoiceClient {
         this.remoteDeaf.delete(participant.identity);
         this.remoteTile.delete(participant.identity);
         this.viewers.delete(participant.identity);
+        if (this.remoteSun.delete(participant.identity) && this.watching.has(participant.identity)) {
+          this.onSunWatch?.(participant.identity, false);
+        }
         this.decodeWatch.delete(participant.identity);
         force();
       })
@@ -2067,6 +2221,11 @@ export class VoiceClient {
     this.holdTimer = 0;
     this.remoteDeaf.clear();
     this.remoteTile.clear();
+    for (const id of this.remoteSun.keys()) if (this.watching.has(id)) this.onSunWatch?.(id, false);
+    this.remoteSun.clear();
+    this.sunVideo = null;
+    // the own Sunshine stream belongs to this call: sunshine.ts stops Sunshine when the call ends
+    this.ownSun = null;
     this.decodeWatch.clear();
     this.net = [];
     this.netLink = null;

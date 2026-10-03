@@ -50,7 +50,12 @@ export type ShellSettings = {
   autostart: boolean;
   autostartAvailable: boolean;
   background?: string;
+  /** Misspelled words are underlined in red. */
+  spellcheck?: boolean;
 };
+
+/** Captions of the right click menu in text fields, drawn by the shell. */
+export type MenuLabels = { cut: string; copy: string; paste: string; selectAll: string; addWord: string; noFixes: string };
 
 /** A monitor in physical pixels with its refresh rate. */
 export type DisplayInfo = { id: string; width: number; height: number; hz: number; primary: boolean };
@@ -78,7 +83,17 @@ export type UpdateState = {
 export type MlAnswer<T> = { ok: boolean; data?: T; error?: string };
 export type MlHostInfo = { paired: boolean; appVersion: string; hostname: string; codecs: number; busy: boolean };
 export type MlApp = { id: number; title: string };
-export type MlStreamOptions = { host: string; app: number; width: number; height: number; fps: number; kbps: number; formats: number };
+export type MlStreamOptions = {
+  host: string;
+  app: number;
+  width: number;
+  height: number;
+  fps: number;
+  kbps: number;
+  formats: number;
+  /** The streamer keeps hearing the own sound (default). */
+  hostAudio?: boolean;
+};
 
 /** The Moonlight part of the shell, or null in a plain browser. */
 export function moonlightBridge() {
@@ -89,11 +104,73 @@ export function moonlightBridge() {
     pair: b.mlPair,
     apps: b.mlApps,
     quit: b.mlQuit ?? (async () => ({ ok: false })),
+    forget: b.mlForget ?? (async () => ({ ok: false })),
+    cancel: b.mlCancel ?? (async () => undefined),
     start: b.mlStart,
     stop: b.mlStop,
     idr: b.mlIdr,
     onEvent: b.onMlEvent,
     onFrame: b.onMlFrame,
+    onAudio: b.onMlAudio ?? (() => () => undefined),
+  };
+}
+
+/* Sunshine bundled with the app: own streams for people with a public IP (electron/sunshine.cjs). */
+
+export type SunStatus = {
+  installed: boolean;
+  version: string;
+  size: number;
+  /** 0..1 while the component downloads, null otherwise. */
+  installing: number | null;
+  running: boolean;
+  ready: boolean;
+  starting: boolean;
+  error: string;
+  port: number;
+  uid: string;
+};
+
+export type SunStartSettings = {
+  output: string;
+  audioSink: string;
+  audio: boolean;
+  encoder: "" | "nvenc" | "amdvce" | "quicksync" | "software";
+  maxKbps: number;
+  port: number;
+  upnp: boolean;
+};
+
+export type SunPairing = { id: string; name: string; address: string };
+export type SunClient = { uuid: string; name: string };
+export type SunDisplay = { id: string; name: string; w: number; h: number; hz: number; primary: boolean };
+export type SunAudioDevice = { id: string; name: string };
+
+export type SunEvent =
+  | { type: "state"; state: SunStatus }
+  | { type: "install"; progress: number }
+  | { type: "pairings"; list: SunPairing[] }
+  | { type: "stopped" };
+
+/** Whether this computer can be reached from outside: see electron/netcheck.cjs. */
+export type NetCheck = { verdict: "white" | "gray" | "unknown"; ip: string; stunIp: string; upnpIp: string; upnp: boolean; lan: string[] };
+
+export function sunshineBridge() {
+  const b = bridge;
+  if (!b?.sunStatus || !b.sunStart || !b.sunStop || !b.onSunEvent || !b.netCheck) return null;
+  return {
+    status: b.sunStatus,
+    install: b.sunInstall ?? (async () => ({ ok: false, error: "no-shell" })),
+    start: b.sunStart,
+    stop: b.sunStop,
+    devices: b.sunDevices ?? (async () => ({ audio: [], displays: [] })),
+    approve: b.sunApprove ?? (async () => ({ ok: false })),
+    deny: b.sunDeny ?? (async () => ({ ok: false })),
+    clients: b.sunClients ?? (async () => null),
+    unpair: b.sunUnpair ?? (async () => ({ ok: false })),
+    onEvent: b.onSunEvent,
+    netCheck: b.netCheck,
+    resolvePublic: b.resolvePublic ?? (async () => ""),
   };
 }
 
@@ -128,7 +205,22 @@ type Bridge = {
   openSecret?: (sealed: string) => Promise<string | null>;
   linkPreview?: (url: string) => Promise<RawPreview | null>;
   mlInfo?: (host: string) => Promise<MlAnswer<MlHostInfo>>;
-  mlPair?: (host: string, pin: string) => Promise<MlAnswer<{ paired: boolean }>>;
+  mlPair?: (host: string, pin: string, name?: string) => Promise<MlAnswer<{ paired: boolean }>>;
+  mlForget?: (host: string) => Promise<MlAnswer<unknown>>;
+  mlCancel?: () => Promise<void>;
+  onMlAudio?: (cb: (packet: ArrayBuffer) => void) => () => void;
+  sunStatus?: () => Promise<SunStatus>;
+  sunInstall?: () => Promise<{ ok: boolean; error?: string }>;
+  sunStart?: (settings: SunStartSettings) => Promise<{ ok: boolean; error?: string; port?: number; uid?: string }>;
+  sunStop?: () => Promise<void>;
+  sunDevices?: () => Promise<{ audio: SunAudioDevice[]; displays: SunDisplay[] }>;
+  sunApprove?: (id: string, pin: string, name: string) => Promise<{ ok: boolean }>;
+  sunDeny?: (id: string) => Promise<{ ok: boolean }>;
+  sunClients?: () => Promise<SunClient[] | null>;
+  sunUnpair?: (uuid: string) => Promise<{ ok: boolean }>;
+  onSunEvent?: (cb: (event: SunEvent) => void) => () => void;
+  netCheck?: () => Promise<NetCheck>;
+  resolvePublic?: (name: string) => Promise<string>;
   mlApps?: (host: string) => Promise<MlAnswer<MlApp[]>>;
   mlQuit?: (host: string) => Promise<MlAnswer<unknown>>;
   mlStart?: (opts: MlStreamOptions) => Promise<{ ok: boolean; error?: string }>;
@@ -145,6 +237,7 @@ type Bridge = {
   openUpdatePage?: () => Promise<void>;
   onUpdate?: (cb: (s: UpdateState) => void) => () => void;
   onBeforeQuit?: (cb: () => Promise<void>) => () => void;
+  setMenuLabels?: (labels: MenuLabels) => Promise<void>;
 };
 
 const bridge = (globalThis as unknown as { desktop?: Bridge }).desktop ?? null;
@@ -268,6 +361,10 @@ export function getShellSettings(): Promise<ShellSettings | null> {
 
 export function setShellSettings(patch: Partial<ShellSettings>): Promise<ShellSettings | null> {
   return bridge?.setShellSettings ? bridge.setShellSettings(patch).catch(() => null) : Promise.resolve(null);
+}
+
+export function setMenuLabels(labels: MenuLabels): void {
+  void bridge?.setMenuLabels?.(labels).catch(() => undefined);
 }
 
 export function pushTrayState(state: TrayState): void {

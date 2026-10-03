@@ -248,6 +248,23 @@ export async function editCaption(
   } as never);
 }
 
+/**
+ * Replace a message with other content: a text becomes a file, a file
+ * another file. Matrix allows a different msgtype in an edit; the reply the
+ * message was stays with the original event.
+ */
+export async function editToContent(client: MatrixClient, roomId: string, eventId: string, content: Record<string, unknown>): Promise<void> {
+  const next: Record<string, unknown> = { ...content };
+  delete next["m.relates_to"];
+  await client.sendMessage(roomId, {
+    ...next,
+    body: `* ${String(next.body ?? "")}`,
+    "m.mentions": {},
+    "m.new_content": next,
+    "m.relates_to": { rel_type: "m.replace", event_id: eventId },
+  } as never);
+}
+
 export async function remove(client: MatrixClient, roomId: string, eventId: string): Promise<void> {
   await client.redactEvent(roomId, eventId);
 }
@@ -398,6 +415,11 @@ export async function search(client: MatrixClient, roomId: string, term: string)
 /**
  * Mark the room read up to the last event, or the server keeps counting the
  * messages as unread.
+ *
+ * The receipt the server knows is compared, not the one the SDK makes up: the
+ * SDK counts an own event (a reaction, a call membership refresh) as read up
+ * to it, while the server still counts everything before it as unread.
+ * Without this a channel whose last event was the user's own stayed unread.
  */
 export async function markRead(client: MatrixClient, room: Room): Promise<void> {
   const me = client.getUserId() ?? "";
@@ -407,7 +429,7 @@ export async function markRead(client: MatrixClient, room: Room): Promise<void> 
     const id = ev.getId();
     // local echoes ("~" ids) are not on the server yet and cannot be receipted
     if (!id || id.startsWith("~")) continue;
-    if (room.hasUserReadEvent(me, id)) return;
+    if (room.getEventReadUpTo(me, true) === id) return;
     await client.sendReadReceipt(ev);
     return;
   }
