@@ -101,6 +101,16 @@ export type TunReady = { ok: boolean; error?: string; key?: string; nat?: string
 /** What the viewer's tunnel reports: a working path (with the local address Sunshine answers on), a failure, the end. */
 export type TunEvent = { ev: "up"; local: string; path: string; rtt: number } | { ev: "fail"; reason: string; text?: string } | { ev: "down"; reason: string };
 
+/** A step of a stream through Sunshine, for the stream log in the profile folder (electron/streamlog.cjs). */
+export function streamLog(text: string): void {
+  void bridge?.streamLog?.(text).catch(() => undefined);
+}
+
+/** The folder with the stream log, in the file manager. */
+export function openLogs(): void {
+  void bridge?.openLogs?.().catch(() => undefined);
+}
+
 /**
  * The Moonlight part of the shell, or null in a plain browser. Every watch has
  * an id: several streams can be watched at once, each with its own tunnel and
@@ -253,6 +263,8 @@ type Bridge = {
   ) => Promise<{ ok: boolean; error?: string; sid?: number; key?: string; nat?: string; cands?: string[] }>;
   sunDrop?: (id: string) => Promise<void>;
   sunPrewarm?: (settings: SunStartSettings) => Promise<void>;
+  streamLog?: (text: string) => Promise<void>;
+  openLogs?: () => Promise<string>;
   tunStart?: (wid: string, base: number) => Promise<TunReady>;
   tunPeer?: (wid: string, sid: number, key: string, nat: string, cands: string[]) => Promise<{ ok: boolean }>;
   onTunEvent?: (cb: (wid: string, json: string) => void) => () => void;

@@ -8,6 +8,7 @@ const guard = require("./guard.cjs");
 const preview = require("./preview.cjs");
 const { publicFetch } = require("./publicfetch.cjs");
 const netcheck = require("./netcheck.cjs");
+const { streamLog, logDir } = require("./streamlog.cjs");
 const sunshine = require("./sunshine.cjs");
 const tray = require("./tray.cjs");
 const updater = require("./updater.cjs");
@@ -202,6 +203,7 @@ function mlCommand(args, timeoutMs, onChild) {
     child.stderr.on("data", (d) => (err = (err + d.toString()).slice(-4000)));
     child.on("exit", (code) => {
       clearTimeout(timer);
+      if (args[0] !== "info" || code !== 0) streamLog("moonlight", `${args[0]} ${args[2] ?? ""}: ${code === 0 ? out.trim().slice(-200) : err.trim().slice(-300) || `exit ${code}`}`);
       if (code !== 0) {
         resolve({ ok: false, error: err.trim() || `exit ${code}` });
         return;
@@ -308,6 +310,7 @@ function startTunnel(sender, wid, base) {
       } catch {
         return;
       }
+      streamLog(`view ${wid}`, JSON.stringify(ev));
       if (ev.ev === "ready" && !ready) {
         ready = true;
         clearTimeout(timer);
@@ -320,8 +323,9 @@ function startTunnel(sender, wid, base) {
         sender.send("app:tun-event", wid, JSON.stringify(ev));
       }
     });
-    child.on("exit", () => {
+    child.on("exit", (code) => {
       clearTimeout(timer);
+      streamLog(`view ${wid}`, `tunnel exited (${code})`);
       if (w.tunnel === child) w.tunnel = null;
       if (!ready) resolve({ ok: false, error: "tunnel" });
       else if (!sender.isDestroyed()) sender.send("app:tun-event", wid, JSON.stringify({ ev: "down", reason: "exit" }));
@@ -358,7 +362,12 @@ function startStream(sender, wid, opts) {
   w.stream = child;
   child.stdin.on("error", () => undefined);
   let errText = "";
+  let logged = 0;
   readRecords(child, (kind, payload) => {
+    if (kind === 2 && logged < 200) {
+      logged += 1;
+      streamLog(`stream ${wid}`, payload.toString("utf8"));
+    }
     if (sender.isDestroyed()) return;
     if (kind === 1) sender.send("app:ml-frame", wid, Buffer.from(payload));
     else if (kind === 2) sender.send("app:ml-event", wid, payload.toString("utf8"));
@@ -367,6 +376,7 @@ function startStream(sender, wid, opts) {
     errText = (errText + d.toString()).slice(-4000);
   });
   child.on("exit", (code) => {
+    streamLog(`stream ${wid}`, `ended (${code}) ${errText.trim().slice(-300)}`);
     if (w.stream === child) w.stream = null;
     if (!sender.isDestroyed()) {
       sender.send("app:ml-event", wid, JSON.stringify({ event: "ended", code: code || 0, text: errText.trim().slice(-500) }));
@@ -409,6 +419,12 @@ function moonlightBridge() {
   guard.handle(ipcMain, "app:ml-stop", (_e, wid) => stopWatch(String(wid)));
 
   guard.handle(ipcMain, "app:tun-start", (event, wid, base) => startTunnel(event.sender, String(wid), base));
+  // the page's own steps of streams, for the same log
+  guard.handle(ipcMain, "app:stream-log", (_e, text) => streamLog("page", String(text ?? "").slice(0, 600)));
+  guard.handle(ipcMain, "app:open-logs", () => {
+    fs.mkdirSync(logDir(), { recursive: true });
+    return shell.openPath(logDir());
+  });
   // the streamer's answer: its session, key and candidates
   guard.handle(ipcMain, "app:tun-peer", (_e, wid, sid, key, nat, cands) => {
     const t = watches.get(String(wid))?.tunnel;
@@ -416,6 +432,7 @@ function moonlightBridge() {
     const list = (Array.isArray(cands) ? cands : []).map(String).filter((c) => TUN_CAND.test(c)).slice(0, 16);
     if (!t || !id || !/^[0-9a-f]{64}$/.test(String(key)) || !list.length) return { ok: false };
     const n = ["open", "cone", "symmetric", "blocked"].includes(nat) ? nat : "unknown";
+    streamLog(`view ${wid}`, `streamer answered: nat ${n}, candidates ${list.join(",")}`);
     try {
       t.stdin.write(`peer ${id} ${key} ${n} ${list.join(",")}\n`);
       return { ok: true };

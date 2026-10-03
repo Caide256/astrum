@@ -29,7 +29,7 @@ use rand::Rng;
 
 use super::stream::Streams;
 use super::wire::{self, Link, Socks, BYE, KEEPALIVE, PCM, PROBE, PROBE_ACK, SEG, ACK, RST, UDP};
-use super::{json_line, path_of, predictions, stun, tcp_port, udp_port, Prober};
+use super::{json_line, path_of, predictions, stun, tcp_port, udp_port, Heard, Prober};
 
 const MAX_SESSIONS: usize = 16;
 
@@ -37,6 +37,7 @@ struct Session {
     id: String,
     link: Arc<Link>,
     prober: Mutex<Prober>,
+    heard: Heard,
     streams: Arc<Streams>,
     flows: Vec<Arc<UdpSocket>>,
     up: AtomicBool,
@@ -148,6 +149,9 @@ impl Host {
                 if let Ok(mut p) = s.prober.lock() {
                     p.add(from);
                 }
+                if s.heard.note(from) {
+                    json_line(&format!("{{\"ev\":\"probe-in\",\"id\":\"{}\",\"from\":\"{from}\"}}", s.id));
+                }
             }
             UDP if body.len() >= 2 => {
                 if let Some(f) = s.flows.get(body[1] as usize) {
@@ -216,6 +220,7 @@ impl Host {
                 id: id.to_string(),
                 link: Arc::new(Link::new(sid, h2v, v2h)),
                 prober: Mutex::new(Prober::new(targets)),
+                heard: Heard::default(),
                 streams: Streams::new(),
                 flows,
                 up: AtomicBool::new(false),
@@ -249,6 +254,8 @@ impl Host {
             hex::encode(host_pub),
             self.cands_text()
         ));
+        let targets = session.prober.lock().map(|p| p.targets_text()).unwrap_or_default();
+        json_line(&format!("{{\"ev\":\"probing\",\"id\":\"{id}\",\"nat\":{},\"targets\":\"{targets}\"}}", crate::moonlight::json_str(nat)));
         Ok(())
     }
 
@@ -259,6 +266,7 @@ impl Host {
                     p.tick(&s.link, &self.socks);
                 }
                 if s.born.elapsed() > Duration::from_secs(45) {
+                    json_line(&format!("{{\"ev\":\"punch-failed\",\"id\":\"{}\",\"heard\":\"{}\"}}", s.id, s.heard.text()));
                     self.close(s.link.sid, "punch");
                     continue;
                 }

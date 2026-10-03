@@ -9,6 +9,7 @@ const dgram = require("node:dgram");
 const https = require("node:https");
 const path = require("node:path");
 const netcheck = require("./netcheck.cjs");
+const { streamLog } = require("./streamlog.cjs");
 
 /**
  * The Sunshine bundled with the app: the stream server for "stream through
@@ -378,6 +379,7 @@ async function launch(settings) {
   const exe = helperPath();
   if (!exe) return { ok: false, error: "no-helper" };
   const port = await pickPort();
+  streamLog("sunshine", `start: port ${port}, encoder ${settings.encoder || meta().detectedEncoder || "auto"}, viewers ${settings.viewers}, upnp ${settings.upnp}`);
   setState({ starting: true, ready: false, error: "", port, uid: "" });
   try {
     const login = credentials();
@@ -423,6 +425,7 @@ async function launch(settings) {
     return { ok: true, port, uid, nat: t.nat, cands: t.cands, encoder: meta().detectedEncoder || settings.encoder || "" };
   } catch (e) {
     const error = String(e?.message || e);
+    streamLog("sunshine", `start failed: ${error}`);
     await stop();
     setState({ starting: false, error });
     return { ok: false, error };
@@ -587,6 +590,7 @@ function startTunnel(settings, port) {
       } catch {
         return;
       }
+      streamLog("host", line);
       if (ev.ev === "ready" && !t.ready) {
         t.nat = String(ev.nat || "");
         t.cands = cleanCands(ev.cands);
@@ -594,6 +598,7 @@ function startTunnel(settings, port) {
         clearTimeout(timer);
         resolve({ nat: t.nat, cands: t.cands });
         const add = (c) => {
+          streamLog("host", `extra candidate ${c}`);
           if (tunnel !== t || !CAND.test(c)) return;
           t.cands = cleanCands([...t.cands, c]);
           try {
@@ -659,6 +664,7 @@ function addViewer(id, key, nat, cands) {
       clearTimeout(timer);
       resolve(res);
     });
+    streamLog("host", `viewer ${id} let in: nat ${n}, candidates ${list.join(",")}`);
     try {
       t.child.stdin.write(`peer ${id} ${key} ${n} ${list.join(",")}\n`);
     } catch {
@@ -862,6 +868,7 @@ function init(opts) {
   handle(ipcMain, "app:sun-approve", async (_e, id, pin, name) => {
     if (!PAIRING_ID.test(String(id)) || !/^\d{4}$/.test(String(pin))) return { ok: false };
     const res = await api("POST", "/api/pin", { pairing_id: String(id), pin: String(pin), name: String(name ?? "").slice(0, 255) });
+    streamLog("sunshine", `pairing ${id} of ${String(name ?? "")}: ${res?.status === true ? "accepted" : `refused ${JSON.stringify(res)}`}`);
     return { ok: res?.status === true };
   });
   handle(ipcMain, "app:sun-deny", async (_e, id) => {

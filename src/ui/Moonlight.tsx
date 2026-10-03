@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { avatarMxc, displayName, flashNotice } from "../app.ts";
+import { openLogs } from "../desktop.ts";
 import { fmtDateTime, t, type Key } from "../i18n/index.ts";
 import { ML_CODECS, ML_FPS, ML_HEIGHTS, autoKbps, forgetHost, hasMoonlight, ml, pictureFor, setQuality, type MlCodec, type MlWatch } from "../moonlight.ts";
 import { setPlayerPrefs, usePlayerPrefs } from "../prefs.ts";
@@ -445,6 +446,13 @@ export function MoonlightTab() {
           <QualitySection />
           <ConnectionsSection />
           <SunshineSection />
+          <div className="section-title">{t("sun.logs.title")}</div>
+          <div className="row left">
+            <button className="ghost small" onClick={openLogs}>
+              {t("sun.logs.open")}
+            </button>
+          </div>
+          <span className="state">{t("sun.logs.hint")}</span>
         </>
       ) : (
         <div className="note gap-top">{t("ml.desktopOnly")}</div>

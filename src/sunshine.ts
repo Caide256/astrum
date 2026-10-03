@@ -1,4 +1,4 @@
-import { sunshineBridge, type NetCheck, type SunClient, type SunDisplay, type SunPairing, type SunStartSettings, type SunStatus } from "./desktop.ts";
+import { streamLog, sunshineBridge, type NetCheck, type SunClient, type SunDisplay, type SunPairing, type SunStartSettings, type SunStatus } from "./desktop.ts";
 import { createStore } from "./store.ts";
 import { blip } from "./voice/audio.ts";
 import { voice, type SunPacket } from "./voice/voice.ts";
@@ -267,12 +267,14 @@ async function admit(name: string): Promise<void> {
   hellos.delete(name);
   const res = await bridge.peer(name, h.key, h.nat, h.cands);
   if (!res.ok || !res.sid || !res.key) {
+    streamLog(`viewer ${h.userId} [${name}] refused by the tunnel: ${res.error ?? ""}`);
     voice.sendSun({ t: "sun-answer", name, ok: false, reason: "busy" }, h.identity);
     return;
   }
   if (/^\d{4}$/.test(h.pin)) admitted.set(name, { userId: h.userId, pin: h.pin, at: Date.now() });
   // the candidates as they are now: the outside address may have moved, the router's port come in
   const cands = res.cands?.length ? res.cands : t.cands;
+  streamLog(`viewer ${h.userId} [${name}] let in: viewer nat ${h.nat}, offered ${cands.join(",")}`);
   voice.sendSun({ t: "sun-offer", name, sid: res.sid, key: res.key, nat: res.nat || t.nat, cands }, h.identity);
   matchPairings();
 }
@@ -334,6 +336,7 @@ function onPacket(packet: SunPacket, from: string): void {
       cands,
       at: now,
     });
+    streamLog(`viewer ${userId} [${packet.name}] asks: nat ${String(packet.nat ?? "")}, candidates ${cands.join(",")}`);
     if (sun.get().allowed.includes(userId)) {
       void admit(packet.name);
       return;
@@ -345,6 +348,7 @@ function onPacket(packet: SunPacket, from: string): void {
     // a sound for a new request, not for every repeat of one already on screen
     if (others.length === before.length) blip("viewerJoin", voice.getState().settings.spkId);
   } else if (packet.t === "sun-fail" && sun.get().live) {
+    streamLog(`viewer ${userId} could not get through: ${String(packet.reason ?? "")}`);
     sun.set({ unreachable: userId });
   }
 }

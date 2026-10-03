@@ -1202,4 +1202,7 @@ export const ru: Record<Key, string> = {
   "sun.watch.punchBlockedTheirs": "С компьютера стримера не выходит UDP: там его режет VPN, zapret или файрвол.",
   "sun.watch.punchBothStrict": "У вас обоих строгий NAT: стример может включить UPnP на роутере или пробросить порт.",
   "sun.watch.pairingNow": "Связываюсь с Sunshine стримера",
+  "sun.logs.title": "Лог стримов",
+  "sun.logs.open": "Открыть папку с логом",
+  "sun.logs.hint": "Что происходило при подключении к стримам: адреса, пробивка, спаривание, ошибки. В нём есть твой IP: отправляй только тому, кто помогает",
 };

@@ -5,6 +5,24 @@ GitHub uses the same two sections, and the app shows the one of its language in
 the update window. Mentions like `@everyone` always go in backticks: GitHub takes
 a bare mention for a GitHub user and lists that user as a contributor of the release.
 
+## 0.9.3
+
+<details>
+<summary>English</summary>
+
+- **A log of streams through Sunshine** for finding out why a stream does not connect: the candidates of both sides, which addresses probes came from and which answered, the path, pairing, the stages and errors of the stream. It is in the profile folder (logs/streams.log); "Open the log folder" in the "Streams" tab. It has IP addresses in it: send it only to whoever helps.
+- scripts/astrum-diag.ps1 in the repository: one command gathers a network report (the NAT, routers, VPN and zapret, the firewall) together with the stream log.
+
+</details>
+
+<details>
+<summary>Русский</summary>
+
+- **Лог стримов через Sunshine,** чтобы разобраться, почему стрим не подключается: кандидаты обеих сторон, с каких адресов пришли пробы и какие ответили, путь, спаривание, стадии и ошибки стрима. Лежит в папке профиля (logs/streams.log), кнопка «Открыть папку с логом» во вкладке «Стримы». В нём есть IP-адреса: отправляй только тому, кто помогает.
+- В репозитории scripts/astrum-diag.ps1: одной командой собирает отчёт о сети (NAT, роутеры, VPN и zapret, файрвол) вместе с логом стримов.
+
+</details>
+
 ## 0.9.2
 
 <details>

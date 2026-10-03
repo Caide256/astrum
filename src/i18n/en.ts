@@ -1200,6 +1200,9 @@ export const en = {
   "sun.watch.punchBlockedTheirs": "UDP does not get out of the streamer's computer: a VPN, zapret or a firewall blocks it there.",
   "sun.watch.punchBothStrict": "Both of you are behind a strict NAT: the streamer can turn UPnP on in the router or forward a port.",
   "sun.watch.pairingNow": "Pairing with the streamer's Sunshine",
+  "sun.logs.title": "Stream log",
+  "sun.logs.open": "Open the log folder",
+  "sun.logs.hint": "What happened when connecting to streams: addresses, punching, pairing, errors. Has your IP in it: send it only to whoever helps",
 };
 
 export type Key = keyof typeof en;

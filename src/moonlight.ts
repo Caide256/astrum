@@ -1,6 +1,6 @@
 import { LocalVideoTrack } from "livekit-client";
 
-import { moonlightBridge, type TunEvent } from "./desktop.ts";
+import { moonlightBridge, streamLog, type TunEvent } from "./desktop.ts";
 import { createStore } from "./store.ts";
 import { openPcmPlayer, type PcmPlayer } from "./voice/audio.ts";
 import { voice, type SunInfo, type SunPacket } from "./voice/voice.ts";
@@ -248,7 +248,13 @@ class Session {
     if (w) ml.set({ watches: { ...ml.get().watches, [this.identity]: { ...w, ...patch } } });
   }
 
+  /** A step of this watch, for the stream log. */
+  log(text: string): void {
+    streamLog(`watch ${this.userId} [${this.wid}] ${text}`);
+  }
+
   fail(reason: MlFail, detail = ""): void {
+    this.log(`failed: ${reason}${detail ? ` (${detail})` : ""}`);
     this.set({ status: "error", error: detail ? `${reason}:${detail}` : reason });
     this.teardown();
   }
@@ -278,6 +284,7 @@ class Session {
     const codec = (await decodes(q.codec)) ? q.codec : "h264";
     const kbps = autoKbps(size.width, size.height, fps, codec);
     this.set({ width: size.width, height: size.height, kbps });
+    this.log(`start: port ${info.port}, ${size.width}x${size.height} ${fps} fps ${codec} ${kbps} kbps`);
 
     this.key = await hostKey(this.userId);
     const known = ml.get().hosts.find((h) => h.key === this.key);
@@ -292,6 +299,7 @@ class Session {
       return;
     }
     const mine = ready.nat ?? "";
+    this.log(`tunnel ready: nat ${mine}, candidates ${(ready.cands ?? []).join(",")}`);
 
     // ask the streamer
     const answer = await Promise.race([
@@ -307,6 +315,7 @@ class Session {
       this.fail(answer.reason as MlFail);
       return;
     }
+    this.log(`let in: streamer nat ${answer.nat}, candidates ${answer.cands.join(",")}`);
 
     // punch through
     this.set({ status: "connecting", stage: "" });
@@ -327,6 +336,7 @@ class Session {
       return;
     }
     this.set({ path: path.path, rtt: path.rtt });
+    this.log(`tunnel up: ${path.path}, ${path.rtt} ms`);
     this.host = `${this.key}@${path.local}:${info.port}`;
     rememberHost({ key: this.key, userId: this.userId, uid: info.uid, at: Date.now() });
 
@@ -381,10 +391,12 @@ class Session {
     const b = bridge;
     if (!b) return false;
     this.set({ stage: "pair" });
+    this.log("pairing");
     await forgetCert(this.key);
     let res = await b.pair(this.host, this.pin, this.name, this.wid);
     if (!this.alive) return false;
     if (!res.ok && /not authorized|401/i.test(res.error ?? "")) {
+      this.log("the streamer refuses this identity: a new one");
       await b.reset();
       if (!this.alive) return false;
       res = await b.pair(this.host, this.pin, this.name, this.wid);
@@ -403,6 +415,7 @@ class Session {
     const resolve = this.answer;
     if (!resolve) return;
     if (packet.t === "sun-wait" && packet.name === this.name) {
+      this.log("waiting for the streamer to let in");
       this.set({ status: "approval" });
     } else if (packet.t === "sun-offer" && packet.name === this.name) {
       const cands = Array.isArray(packet.cands) ? packet.cands.filter((c): c is string => typeof c === "string").slice(0, 16) : [];
@@ -441,6 +454,7 @@ class Session {
     }
     if (ev.event === "stage") this.set({ stage: ev.text ?? "" });
     else if (ev.event === "started") {
+      this.log("stream started");
       this.started = true;
       this.set({ status: "live", stage: "" });
     } else if (ev.event === "stageFailed") this.set({ status: "error", error: `start:${ev.text ?? ""} (${ev.code ?? 0})` });
@@ -448,6 +462,7 @@ class Session {
       const text = ev.text ?? "";
       // the streamer's Sunshine does not know this computer (any more): pair, then once more
       if (!this.started && !this.repaired && /not paired|not authorized|401/i.test(text)) {
+        this.log(`stream refused (${text.slice(0, 120)}): pairing again`);
         this.repaired = true;
         void this.pair().then((ok) => {
           if (ok) void this.startStream();

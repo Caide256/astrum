@@ -24,7 +24,7 @@ use rand::Rng;
 
 use super::stream::Streams;
 use super::wire::{self, Link, Socks, ACK, BYE, KEEPALIVE, PCM, PROBE, PROBE_ACK, RST, SEG, SELECT, UDP};
-use super::{path_of, predictions, stun, tcp_port, udp_port, Prober};
+use super::{path_of, predictions, stun, tcp_port, udp_port, Heard, Prober};
 
 static OUT: Mutex<()> = Mutex::new(());
 
@@ -56,6 +56,7 @@ struct View {
     link: Arc<Link>,
     socks: Arc<Socks>,
     prober: Mutex<Prober>,
+    heard: Heard,
     streams: Arc<Streams>,
     flows: OnceLock<Vec<Arc<Flow>>>,
     selected: AtomicBool,
@@ -94,11 +95,16 @@ impl View {
                 if let Ok(mut p) = self.prober.lock() {
                     p.add(from);
                 }
+                if self.heard.note(from) {
+                    event(format!("{{\"ev\":\"probe-in\",\"from\":\"{from}\"}}"));
+                }
             }
             PROBE_ACK if body.len() >= 9 => {
                 let sent = u64::from_be_bytes(body[1..9].try_into().unwrap_or_default());
-                if let Ok(mut p) = self.prober.lock() {
-                    p.answered(from, wire::now_us().saturating_sub(sent));
+                let rtt = wire::now_us().saturating_sub(sent);
+                let first = self.prober.lock().map(|mut p| p.answered(from, rtt)).unwrap_or(false);
+                if first {
+                    event(format!("{{\"ev\":\"ack\",\"from\":\"{from}\",\"rtt\":{}}}", rtt / 1000));
                 }
             }
             UDP if body.len() >= 2 => {
@@ -210,7 +216,11 @@ impl View {
                     }
                 }
             } else if self.started.elapsed() > Duration::from_secs(20) {
-                event("{\"ev\":\"fail\",\"reason\":\"punch\"}".into());
+                let (targets, answers) = self.prober.lock().map(|p| (p.targets_text(), p.answers())).unwrap_or_default();
+                event(format!(
+                    "{{\"ev\":\"fail\",\"reason\":\"punch\",\"targets\":\"{targets}\",\"heard\":\"{}\",\"answers\":{answers}}}",
+                    self.heard.text()
+                ));
                 bye(self);
             }
             return;
@@ -308,6 +318,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
     if nat == "symmetric" {
         targets.extend(predictions(&targets));
     }
+    event(format!(
+        "{{\"ev\":\"probing\",\"nat\":{},\"targets\":\"{}\"}}",
+        crate::moonlight::json_str(&nat),
+        targets.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",")
+    ));
     let (h2v, v2h) = wire::derive(own, &host_key, &host_key, &view_pub)?;
     let view = Arc::new(View {
         base,
@@ -315,6 +330,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         link: Arc::new(Link::new(sid, v2h, h2v)),
         socks: Arc::new(Socks { v4, v6: v6sock }),
         prober: Mutex::new(Prober::new(targets)),
+        heard: Heard::default(),
         streams: Streams::new(),
         flows: OnceLock::new(),
         selected: AtomicBool::new(false),

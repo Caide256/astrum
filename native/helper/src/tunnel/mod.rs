@@ -115,6 +115,14 @@ impl Prober {
         }
     }
 
+    pub fn targets_text(&self) -> String {
+        self.targets.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",")
+    }
+
+    pub fn answers(&self) -> usize {
+        self.answers.len()
+    }
+
     /// Every 50 ms at first, every 100 ms up to the eighth second, then every 300 ms.
     pub fn tick(&mut self, link: &Link, socks: &Socks) {
         if self.done {
@@ -140,11 +148,14 @@ impl Prober {
         }
     }
 
-    pub fn answered(&mut self, from: SocketAddr, rtt_us: u64) {
-        if !self.answers.iter().any(|(a, _)| *a == from) {
-            self.answers.push((from, rtt_us));
-        }
+    /// An answer to a probe; true the first time this address answered.
+    pub fn answered(&mut self, from: SocketAddr, rtt_us: u64) -> bool {
         self.first.get_or_insert_with(Instant::now);
+        if self.answers.iter().any(|(a, _)| *a == from) {
+            return false;
+        }
+        self.answers.push((from, rtt_us));
+        true
     }
 
     /// The path to use, once answers had 100 ms to come in: a path through the home network answers about as fast.
@@ -157,6 +168,26 @@ impl Prober {
         let best = self.answers.iter().max_by_key(|(a, rtt)| (class(a), Reverse(*rtt))).copied();
         self.done = true;
         best
+    }
+}
+
+/// Addresses probes came from: each is reported once, for the stream log.
+#[derive(Default)]
+pub struct Heard(std::sync::Mutex<Vec<SocketAddr>>);
+
+impl Heard {
+    /// True the first time an address is heard.
+    pub fn note(&self, a: SocketAddr) -> bool {
+        let Ok(mut list) = self.0.lock() else { return false };
+        if list.contains(&a) || list.len() >= 64 {
+            return false;
+        }
+        list.push(a);
+        true
+    }
+
+    pub fn text(&self) -> String {
+        self.0.lock().map(|l| l.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",")).unwrap_or_default()
     }
 }
 
