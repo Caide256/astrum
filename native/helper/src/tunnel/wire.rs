@@ -158,7 +158,17 @@ impl Socks {
 pub fn bind_v4(port: u16) -> std::io::Result<UdpSocket> {
     use rand::Rng;
     if port != 0 {
-        return UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port));
+        // a set port (forwarded by hand) may still be held for a moment by the tunnel of the last start
+        let mut tries = 0;
+        loop {
+            match UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)) {
+                Err(_) if tries < 15 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                res => return res,
+            }
+        }
     }
     for _ in 0..40 {
         let p = rand::thread_rng().gen_range(20000..30000);

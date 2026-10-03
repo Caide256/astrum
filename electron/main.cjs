@@ -288,11 +288,15 @@ function startTunnel(sender, wid, base) {
   if (!(port >= 1030 && port <= 65000)) return Promise.resolve({ ok: false, error: "bad-port" });
   stopChild(w.tunnel);
   const child = spawn(exe, ["tunnel", "view", String(port), netcheck.lanAddresses().join(","), netcheck.v6Addresses().join(",")], {
-    stdio: ["pipe", "pipe", "ignore"],
+    stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
   });
   w.tunnel = child;
   child.stdin.on("error", () => undefined);
+  let errText = "";
+  child.stderr.on("data", (d) => {
+    errText = (errText + d).slice(-300);
+  });
   return new Promise((resolve) => {
     let ready = false;
     const timer = setTimeout(() => {
@@ -325,7 +329,7 @@ function startTunnel(sender, wid, base) {
     });
     child.on("exit", (code) => {
       clearTimeout(timer);
-      streamLog(`view ${wid}`, `tunnel exited (${code})`);
+      streamLog(`view ${wid}`, `tunnel exited (${code}) ${errText.trim()}`);
       if (w.tunnel === child) w.tunnel = null;
       if (!ready) resolve({ ok: false, error: "tunnel" });
       else if (!sender.isDestroyed()) sender.send("app:tun-event", wid, JSON.stringify({ ev: "down", reason: "exit" }));

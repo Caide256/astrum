@@ -5,6 +5,24 @@ GitHub uses the same two sections, and the app shows the one of its language in
 the update window. Mentions like `@everyone` always go in backticks: GitHub takes
 a bare mention for a GitHub user and lists that user as a contributor of the release.
 
+## 0.9.5
+
+<details>
+<summary>English</summary>
+
+- **Streams through Sunshine connect when one side's provider shows some STUN servers another outside port.** One provider gives the traffic to Cloudflare a port of its own while the router keeps the socket's port for everyone else, and only the first port went to the other side. Now each side offers every outside address the servers saw, together with its own port on the outside IP, and the one that kept the port comes first.
+- When the stream tunnel cannot take the port set by hand, it waits a few seconds for the last one to let go, and the stream log says why it did not start.
+
+</details>
+
+<details>
+<summary>Русский</summary>
+
+- **Стримы через Sunshine подключаются, когда провайдер одной из сторон показывает части STUN-серверов другой внешний порт.** У одного провайдера трафик к Cloudflare получает свой порт, а роутер для всех остальных сохраняет порт сокета, и другой стороне уходил только первый порт. Теперь каждая сторона отдаёт все внешние адреса, которые увидели серверы, и свой порт на внешнем IP, а первым идёт тот, где порт сохранился.
+- Если туннель стрима не может занять порт, заданный вручную, он несколько секунд ждёт, пока прошлый его отпустит, а в логе стримов видно, почему туннель не запустился.
+
+</details>
+
 ## 0.9.4
 
 <details>

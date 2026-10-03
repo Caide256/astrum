@@ -53,6 +53,8 @@ struct Host {
     socks: Arc<Socks>,
     keeper: stun::Keeper,
     lan: Vec<SocketAddr>,
+    /// The outside addresses STUN saw at the start (see `Seen::outside`).
+    outside: Vec<SocketAddr>,
     extra: Mutex<Vec<SocketAddr>>,
     sessions: Mutex<HashMap<u32, Arc<Session>>>,
     /// Addresses packets came from that were not a session's: reported once, for the stream log.
@@ -64,18 +66,16 @@ struct Host {
 }
 
 impl Host {
-    /// The candidates now: home network, IPv6, the outside address, and the ones added.
+    /// The candidates now: home network, IPv6, the outside address as it is now and as seen at the start, and the ones added.
     fn cands(&self) -> Vec<SocketAddr> {
         let mut out = self.lan.clone();
-        if let Some(m) = self.keeper.mapped() {
-            out.push(SocketAddr::V4(m));
-        }
-        for c in self.extra.lock().map(|e| e.clone()).unwrap_or_default() {
+        let now = self.keeper.mapped().map(SocketAddr::V4);
+        let extra = self.extra.lock().map(|e| e.clone()).unwrap_or_default();
+        for c in now.into_iter().chain(self.outside.iter().copied()).chain(extra) {
             if !out.contains(&c) {
                 out.push(c);
             }
         }
-        out.dedup();
         out
     }
 
@@ -329,6 +329,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let host = Arc::new(Host {
         base,
         keeper: stun::Keeper::new(&seen),
+        outside: seen.outside(local_port),
         lan: home,
         extra: Mutex::new(Vec::new()),
         socks: Arc::new(Socks::new(v4, v6sock)),

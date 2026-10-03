@@ -572,14 +572,18 @@ function startTunnel(settings, port) {
   const t = { child: p, ready: false, stopping: false, nat: "", cands: [], waiting: new Map() };
   tunnel = t;
   p.stdin.on("error", () => undefined);
-  p.stderr.on("data", () => undefined);
+  let errText = "";
+  p.stderr.on("data", (d) => {
+    errText = (errText + d).slice(-300);
+  });
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("the stream tunnel did not start")), 15_000);
-    p.on("exit", () => {
+    p.on("exit", (code) => {
       clearTimeout(timer);
       if (tunnel === t) tunnel = null;
       for (const w of t.waiting.values()) w({ ok: false, error: "tunnel" });
       t.waiting.clear();
+      if (!t.ready) streamLog("host", `the tunnel ended before it was ready (${code}): ${errText.trim()}`);
       if (!t.ready) reject(new Error("the stream tunnel did not start"));
       else if (child && !t.stopping) emit({ type: "tunnel", ev: "gone" });
     });

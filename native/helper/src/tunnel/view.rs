@@ -262,8 +262,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let p6 = s.local_addr().map(|a| a.port()).unwrap_or(0);
         cands.extend(v6.iter().map(|ip| SocketAddr::new(IpAddr::V6(*ip), p6)));
     }
-    if let Some(m) = seen.mapped {
-        let m = SocketAddr::V4(m);
+    for m in seen.outside(port) {
         if !cands.contains(&m) {
             cands.push(m);
         }

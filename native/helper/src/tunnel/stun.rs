@@ -28,9 +28,10 @@ const COOKIE: u32 = 0x2112_A442;
 pub struct Seen {
     /// "open", "cone", "symmetric" or "blocked" (no answer: UDP does not get out).
     pub nat: &'static str,
-    /// The outside address of the socket, as the first server saw it.
+    /// The outside address of the socket: the one that kept the socket's own
+    /// port if a server saw that, else what the first server to answer saw.
     pub mapped: Option<SocketAddrV4>,
-    /// The server that answered first: asked again to keep the mapping alive.
+    /// The server that saw `mapped`: asked again to keep the mapping alive.
     pub server: Option<SocketAddr>,
     /// The outside address each answering server saw, for the stream log: one answer cannot tell the NAT apart.
     pub all: Vec<SocketAddrV4>,
@@ -39,6 +40,24 @@ pub struct Seen {
 impl Seen {
     pub fn text(&self) -> String {
         self.all.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",")
+    }
+
+    /// Every outside address a server saw, each with the outside IP and the
+    /// socket's own port next to it. Some networks reach some servers
+    /// through another NAT: that server then shows a port nobody else gets,
+    /// while the router itself keeps the socket's port, so the other side
+    /// tries them all.
+    pub fn outside(&self, local_port: u16) -> Vec<SocketAddr> {
+        let mut out: Vec<SocketAddr> = Vec::new();
+        for a in self.mapped.iter().chain(self.all.iter()) {
+            let kept = SocketAddr::V4(SocketAddrV4::new(*a.ip(), local_port));
+            for c in [SocketAddr::V4(*a), kept] {
+                if !out.contains(&c) {
+                    out.push(c);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -110,7 +129,7 @@ pub fn look(sock: &UdpSocket, own: &[Ipv4Addr]) -> Seen {
         ids.push(id);
     }
     let mut answers: Vec<Option<SocketAddrV4>> = vec![None; servers.len()];
-    let mut first: Option<SocketAddr> = None;
+    let mut first: Option<usize> = None;
     let _ = sock.set_read_timeout(Some(Duration::from_millis(50)));
     let start = Instant::now();
     let mut sent_at: Option<Instant> = None;
@@ -135,7 +154,7 @@ pub fn look(sock: &UdpSocket, own: &[Ipv4Addr]) -> Seen {
             if let Some(i) = servers.iter().position(|s| *s == from) {
                 if let Some(m) = parse_response(&buf[..n], &ids[i]) {
                     answers[i] = Some(m);
-                    first.get_or_insert(from);
+                    first.get_or_insert(i);
                     first_at.get_or_insert_with(Instant::now);
                 }
             }
@@ -143,15 +162,19 @@ pub fn look(sock: &UdpSocket, own: &[Ipv4Addr]) -> Seen {
     }
     let _ = sock.set_read_timeout(None);
 
+    // the answer that kept the socket's port is the router's own mapping, the likeliest to work for the other side too
+    let local = sock.local_addr().map(|a| a.port()).ok();
+    let pick = answers.iter().position(|a| a.is_some_and(|m| Some(m.port()) == local)).or(first);
+    let mapped = pick.and_then(|i| answers[i]);
+    let server = pick.map(|i| servers[i]);
     let got: Vec<SocketAddrV4> = answers.into_iter().flatten().collect();
-    let mapped = got.first().copied();
     let nat = match mapped {
         None => "blocked",
         Some(m) if own.contains(m.ip()) => "open",
-        Some(_) if got.iter().any(|a| a.port() != got[0].port()) => "symmetric",
+        Some(m) if got.iter().any(|a| a.port() != m.port()) => "symmetric",
         Some(_) => "cone",
     };
-    Seen { nat, mapped, server: first, all: got }
+    Seen { nat, mapped, server, all: got }
 }
 
 /// Keeps the socket's NAT mapping alive: routers forget an idle UDP mapping
@@ -217,6 +240,21 @@ pub fn probe(args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outside_tries_every_seen_port_and_the_kept_one() {
+        let seen = Seen {
+            nat: "symmetric",
+            mapped: Some("198.51.100.7:26557".parse().unwrap()),
+            server: None,
+            all: vec!["198.51.100.7:32948".parse().unwrap(), "198.51.100.7:26557".parse().unwrap()],
+        };
+        let out: Vec<String> = seen.outside(26557).iter().map(|a| a.to_string()).collect();
+        assert_eq!(out, ["198.51.100.7:26557", "198.51.100.7:32948"]);
+        let cone = Seen { nat: "cone", mapped: Some("203.0.113.9:56799".parse().unwrap()), server: None, all: vec!["203.0.113.9:56799".parse().unwrap()] };
+        let out: Vec<String> = cone.outside(20909).iter().map(|a| a.to_string()).collect();
+        assert_eq!(out, ["203.0.113.9:56799", "203.0.113.9:20909"]);
+    }
 
     #[test]
     fn xor_mapped_address() {
