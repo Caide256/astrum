@@ -6,12 +6,16 @@
 //!
 //! Commands on stdin, one per line:
 //!   clear                        drop all bindings
-//!   bind <id> <part>,<part>,...  add a binding; a part is one or more key
+//!   bind <id> <part>,<part>,... [loose]
+//!                                add a binding; a part is one or more key
 //!                                codes in hex joined by '|', any of which
-//!                                satisfies the part
+//!                                satisfies the part. "loose": other held
+//!                                modifiers do not get in the way (push-to-talk
+//!                                in a game, with Shift or Alt held for running)
 //! Events on stdout:
 //!   ready                        hooks are installed
 //!   down <id>                    every part is held and no extra modifier is
+//!                                (any extra modifier for a loose binding)
 //!   up <id>                      a part of an active binding was released
 //!
 //! Key codes are Windows virtual-key codes with two exceptions: numpad keys are
@@ -58,6 +62,7 @@ struct Binding {
     id: String,
     parts: Vec<Vec<u16>>,
     active: bool,
+    loose: bool,
 }
 
 struct State {
@@ -118,10 +123,10 @@ fn uses(b: &Binding, key: u16) -> bool {
     b.parts.iter().any(|p| p.contains(&key))
 }
 
-/// All parts held and no modifier held that the binding does not ask for.
+/// All parts held and, unless the binding is loose, no modifier held that it does not ask for.
 fn matches(b: &Binding, held: &[bool; KEY_SPACE]) -> bool {
     b.parts.iter().all(|p| part_held(p, held))
-        && MODIFIERS.iter().all(|&m| !held[m as usize] || uses(b, m))
+        && (b.loose || MODIFIERS.iter().all(|&m| !held[m as usize] || uses(b, m)))
 }
 
 fn press(state: &mut State, key: u16) {
@@ -221,9 +226,10 @@ fn apply(line: &str) {
         Some("clear") => state.bindings.clear(),
         Some("bind") => {
             let (Some(id), Some(spec)) = (words.next(), words.next()) else { return };
+            let loose = words.next() == Some("loose");
             let parts: Option<Vec<Vec<u16>>> = spec.split(',').map(parse_part).collect();
             if let Some(parts) = parts.filter(|p| !p.is_empty()) {
-                state.bindings.push(Binding { id: id.to_string(), parts, active: false });
+                state.bindings.push(Binding { id: id.to_string(), parts, active: false, loose });
             }
         }
         _ => return,
@@ -330,4 +336,28 @@ pub fn press_keys(spec: &str) -> Result<(), String> {
         SendInput(&up, size);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn binding(parts: &[&[u16]], loose: bool) -> Binding {
+        Binding { id: "b".into(), parts: parts.iter().map(|p| p.to_vec()).collect(), active: false, loose }
+    }
+
+    #[test]
+    fn extra_modifiers_block_strict_bindings_only() {
+        let mut held = [false; KEY_SPACE];
+        held[0x56] = true; // V
+        held[0xA0] = true; // left Shift, held for running
+        assert!(!matches(&binding(&[&[0x56]], false), &held));
+        assert!(matches(&binding(&[&[0x56]], true), &held));
+        // a loose binding still needs its own keys
+        held[0x56] = false;
+        assert!(!matches(&binding(&[&[0x56]], true), &held));
+        // a binding that asks for the modifier matches either way
+        held[0x56] = true;
+        assert!(matches(&binding(&[&[0xA0, 0xA1], &[0x56]], false), &held));
+    }
 }

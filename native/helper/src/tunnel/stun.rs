@@ -9,6 +9,7 @@
 //! the hard case. An outside address that is the computer's own means no NAT.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4, ToSocketAddrs, UdpSocket};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use rand::RngCore;
@@ -21,6 +22,8 @@ pub struct Seen {
     pub nat: &'static str,
     /// The outside address of the socket, as the first server saw it.
     pub mapped: Option<SocketAddrV4>,
+    /// The server that answered first: asked again to keep the mapping alive.
+    pub server: Option<SocketAddr>,
 }
 
 fn request(id: &[u8; 12]) -> [u8; 20] {
@@ -59,7 +62,9 @@ pub fn parse_response(msg: &[u8], id: &[u8; 12]) -> Option<SocketAddrV4> {
     plain
 }
 
-/// Ask the STUN servers from `sock`. Takes up to two seconds; the socket's read timeout is changed.
+/// Ask the STUN servers from `sock`: done once two answered (enough to tell the
+/// NAT apart), or 250 ms after the first answer, or after a second and a half
+/// without any. The socket's read timeout is changed.
 pub fn look(sock: &UdpSocket, own: &[Ipv4Addr]) -> Seen {
     let mut servers: Vec<SocketAddr> = Vec::new();
     for (host, port) in SERVERS {
@@ -78,13 +83,20 @@ pub fn look(sock: &UdpSocket, own: &[Ipv4Addr]) -> Seen {
         ids.push(id);
     }
     let mut answers: Vec<Option<SocketAddrV4>> = vec![None; servers.len()];
-    let _ = sock.set_read_timeout(Some(Duration::from_millis(100)));
+    let mut first: Option<SocketAddr> = None;
+    let _ = sock.set_read_timeout(Some(Duration::from_millis(50)));
     let start = Instant::now();
     let mut sent_at: Option<Instant> = None;
     let mut buf = [0u8; 1500];
-    while start.elapsed() < Duration::from_millis(2000) && answers.iter().any(Option::is_none) && !servers.is_empty() {
-        // first send, then again every 500 ms to the servers that did not answer
-        if sent_at.map(|t| t.elapsed() >= Duration::from_millis(500)).unwrap_or(true) {
+    let enough = servers.len().min(2);
+    let mut first_at: Option<Instant> = None;
+    while start.elapsed() < Duration::from_millis(1500)
+        && answers.iter().flatten().count() < enough
+        && first_at.map(|t| t.elapsed() < Duration::from_millis(250)).unwrap_or(true)
+        && !servers.is_empty()
+    {
+        // first send, then again every 300 ms to the servers that did not answer
+        if sent_at.map(|t| t.elapsed() >= Duration::from_millis(300)).unwrap_or(true) {
             for (i, s) in servers.iter().enumerate() {
                 if answers[i].is_none() {
                     let _ = sock.send_to(&request(&ids[i]), s);
@@ -96,6 +108,8 @@ pub fn look(sock: &UdpSocket, own: &[Ipv4Addr]) -> Seen {
             if let Some(i) = servers.iter().position(|s| *s == from) {
                 if let Some(m) = parse_response(&buf[..n], &ids[i]) {
                     answers[i] = Some(m);
+                    first.get_or_insert(from);
+                    first_at.get_or_insert_with(Instant::now);
                 }
             }
         }
@@ -110,7 +124,57 @@ pub fn look(sock: &UdpSocket, own: &[Ipv4Addr]) -> Seen {
         Some(_) if got.iter().any(|a| a.port() != got[0].port()) => "symmetric",
         Some(_) => "cone",
     };
-    Seen { nat, mapped }
+    Seen { nat, mapped, server: first }
+}
+
+/// Keeps the socket's NAT mapping alive: routers forget an idle UDP mapping
+/// after 30 to 60 seconds, and a viewer arriving later would aim at a port
+/// that leads nowhere. A binding request every few seconds keeps it, and the
+/// answer tells whether the outside address changed.
+pub struct Keeper {
+    server: Option<SocketAddr>,
+    id: Mutex<[u8; 12]>,
+    mapped: Mutex<Option<SocketAddrV4>>,
+}
+
+impl Keeper {
+    pub fn new(seen: &Seen) -> Self {
+        Keeper { server: seen.server, id: Mutex::new([0; 12]), mapped: Mutex::new(seen.mapped) }
+    }
+
+    pub fn mapped(&self) -> Option<SocketAddrV4> {
+        self.mapped.lock().ok().and_then(|m| *m)
+    }
+
+    pub fn ask(&self, sock: &UdpSocket) {
+        let Some(server) = self.server else { return };
+        let mut id = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut id);
+        if let Ok(mut cur) = self.id.lock() {
+            *cur = id;
+        }
+        let _ = sock.send_to(&request(&id), server);
+    }
+
+    /// A packet from the STUN server: Some(new address) when the mapping moved.
+    pub fn answer(&self, msg: &[u8], from: SocketAddr) -> Option<SocketAddrV4> {
+        if Some(from) != self.server {
+            return None;
+        }
+        let id = *self.id.lock().ok()?;
+        let m = parse_response(msg, &id)?;
+        let mut cur = self.mapped.lock().ok()?;
+        if *cur == Some(m) {
+            return None;
+        }
+        *cur = Some(m);
+        Some(m)
+    }
+}
+
+/// Whether a packet looks like STUN (a response from a STUN server), not the tunnel's.
+pub fn is_stun(msg: &[u8]) -> bool {
+    msg.len() >= 20 && msg[0] & 0xC0 == 0 && msg[4..8] == COOKIE.to_be_bytes()
 }
 
 /// `native-helper tunnel probe <lan ips>`: what a stream tunnel of this computer would see.

@@ -5,8 +5,13 @@
 //! Prints JSON lines: "ready" with this side's candidates once STUN answered,
 //! then "offer", "up" and "down" per viewer. Lines on stdin:
 //!   peer <id> <viewer key> <nat> <candidates>   a viewer the streamer let in
+//!   cand <address>                               one more candidate (the router's port, a forwarded one)
 //!   drop <id>                                    end that viewer's session
 //!   stop                                         (or the end of input) end everything
+//!
+//! An "offer" carries this side's candidates as they are at that moment: the
+//! NAT mapping is kept alive and checked every ten seconds, and a "cands"
+//! event says when the outside address moved.
 //!
 //! Each session forwards to Sunshine on this computer only: its three TCP
 //! ports and three UDP ports, nothing else. The sound of the computer, minus
@@ -41,6 +46,9 @@ struct Session {
 struct Host {
     base: u16,
     socks: Arc<Socks>,
+    keeper: stun::Keeper,
+    lan: Vec<SocketAddr>,
+    extra: Mutex<Vec<SocketAddr>>,
     sessions: Mutex<HashMap<u32, Arc<Session>>>,
     audio: bool,
     pid: u32,
@@ -49,6 +57,25 @@ struct Host {
 }
 
 impl Host {
+    /// The candidates now: home network, IPv6, the outside address, and the ones added.
+    fn cands(&self) -> Vec<SocketAddr> {
+        let mut out = self.lan.clone();
+        if let Some(m) = self.keeper.mapped() {
+            out.push(SocketAddr::V4(m));
+        }
+        for c in self.extra.lock().map(|e| e.clone()).unwrap_or_default() {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+        out.dedup();
+        out
+    }
+
+    fn cands_text(&self) -> String {
+        self.cands().iter().map(|c| c.to_string()).collect::<Vec<_>>().join(",")
+    }
+
     fn session(&self, sid: u32) -> Option<Arc<Session>> {
         self.sessions.lock().ok()?.get(&sid).cloned()
     }
@@ -101,6 +128,12 @@ impl Host {
     }
 
     fn handle(self: &Arc<Self>, from: SocketAddr, buf: &mut [u8]) {
+        if stun::is_stun(buf) {
+            if self.keeper.answer(buf, from).is_some() {
+                json_line(&format!("{{\"ev\":\"cands\",\"cands\":\"{}\"}}", self.cands_text()));
+            }
+            return;
+        }
         let Some(sid) = wire::session_of(buf) else { return };
         let Some(s) = self.session(sid) else { return };
         let Some((ctr, body)) = s.link.open(buf) else { return };
@@ -211,9 +244,10 @@ impl Host {
         }
 
         json_line(&format!(
-            "{{\"ev\":\"offer\",\"id\":\"{id}\",\"sid\":{},\"key\":\"{}\"}}",
+            "{{\"ev\":\"offer\",\"id\":\"{id}\",\"sid\":{},\"key\":\"{}\",\"cands\":\"{}\"}}",
             session.link.sid,
-            hex::encode(host_pub)
+            hex::encode(host_pub),
+            self.cands_text()
         ));
         Ok(())
     }
@@ -251,7 +285,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let lan: Vec<Ipv4Addr> = args.get(4).map(|l| l.split(',').filter_map(|p| p.parse().ok()).collect()).unwrap_or_default();
     let v6: Vec<Ipv6Addr> = args.get(5).map(|l| l.split(',').filter_map(|p| p.parse().ok()).collect()).unwrap_or_default();
 
-    let v4 = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).map_err(|e| format!("cannot open UDP port {port}: {e}"))?;
+    let v4 = wire::bind_v4(port).map_err(|e| format!("cannot open UDP port {port}: {e}"))?;
     wire::tune(&v4);
     let local_port = v4.local_addr().map_err(|e| e.to_string())?.port();
     let v6sock = if v6.is_empty() {
@@ -264,27 +298,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
 
     let seen = stun::look(&v4, &lan);
-    let mut cands: Vec<SocketAddr> = lan.iter().map(|ip| SocketAddr::new(IpAddr::V4(*ip), local_port)).collect();
+    let mut home: Vec<SocketAddr> = lan.iter().map(|ip| SocketAddr::new(IpAddr::V4(*ip), local_port)).collect();
     if let Some(s) = &v6sock {
         let p6 = s.local_addr().map(|a| a.port()).unwrap_or(0);
-        cands.extend(v6.iter().map(|ip| SocketAddr::new(IpAddr::V6(*ip), p6)));
+        home.extend(v6.iter().map(|ip| SocketAddr::new(IpAddr::V6(*ip), p6)));
     }
-    if let Some(m) = seen.mapped {
-        let m = SocketAddr::V4(m);
-        if !cands.contains(&m) {
-            cands.push(m);
-        }
-    }
-    let list: Vec<String> = cands.iter().map(|c| c.to_string()).collect();
-    json_line(&format!(
-        "{{\"ev\":\"ready\",\"port\":{local_port},\"nat\":\"{}\",\"ip\":\"{}\",\"cands\":\"{}\"}}",
-        seen.nat,
-        seen.mapped.map(|m| m.ip().to_string()).unwrap_or_default(),
-        list.join(",")
-    ));
 
     let host = Arc::new(Host {
         base,
+        keeper: stun::Keeper::new(&seen),
+        lan: home,
+        extra: Mutex::new(Vec::new()),
         socks: Arc::new(Socks { v4, v6: v6sock }),
         sessions: Mutex::new(HashMap::new()),
         audio,
@@ -292,6 +316,12 @@ pub fn run(args: &[String]) -> Result<(), String> {
         audio_running: AtomicBool::new(false),
         pcm_seq: AtomicU32::new(0),
     });
+    json_line(&format!(
+        "{{\"ev\":\"ready\",\"port\":{local_port},\"nat\":\"{}\",\"ip\":\"{}\",\"cands\":\"{}\"}}",
+        seen.nat,
+        seen.mapped.map(|m| m.ip().to_string()).unwrap_or_default(),
+        host.cands_text()
+    ));
 
     for v6 in [false, true] {
         let host = host.clone();
@@ -308,9 +338,16 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     {
         let host = host.clone();
-        std::thread::spawn(move || loop {
-            host.tick();
-            std::thread::sleep(Duration::from_millis(20));
+        std::thread::spawn(move || {
+            let mut asked = Instant::now();
+            loop {
+                host.tick();
+                if asked.elapsed() >= Duration::from_secs(10) {
+                    asked = Instant::now();
+                    host.keeper.ask(&host.socks.v4);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
         });
     }
 
@@ -322,6 +359,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
             ["peer", id, key, nat, cands] => {
                 if let Err(e) = host.add_peer(id, key, nat, cands) {
                     json_line(&format!("{{\"ev\":\"refused\",\"id\":{},\"text\":{}}}", crate::moonlight::json_str(id), crate::moonlight::json_str(&e)));
+                }
+            }
+            ["cand", addr] => {
+                if let Ok(a) = addr.parse::<SocketAddr>() {
+                    if wire::candidate_ok(&a) {
+                        if let Ok(mut e) = host.extra.lock() {
+                            if !e.contains(&a) && e.len() < 4 {
+                                e.push(a);
+                            }
+                        }
+                    }
                 }
             }
             ["drop", id] => {

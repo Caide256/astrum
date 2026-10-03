@@ -4,6 +4,8 @@ const crypto = require("node:crypto");
 const dns = require("node:dns").promises;
 const fs = require("node:fs");
 const http = require("node:http");
+const net = require("node:net");
+const dgram = require("node:dgram");
 const https = require("node:https");
 const path = require("node:path");
 const netcheck = require("./netcheck.cjs");
@@ -246,7 +248,40 @@ function cleanSettings(raw) {
   };
 }
 
-function writeConfig(settings) {
+/**
+ * A base port for this start, its whole range free: TCP base-5, base, base+1
+ * (web UI) and base+21, UDP base+9 to base+11. Each start picks anew, so two
+ * people who stream and watch each other at the same time do not need the
+ * same ports: a viewer's end of the tunnel stands in for the streamer's
+ * Sunshine on the streamer's port numbers, next to the own Sunshine.
+ */
+function portFree(port, udp) {
+  return new Promise((resolve) => {
+    if (udp) {
+      const sock = dgram.createSocket("udp4");
+      sock.once("error", () => resolve(false));
+      sock.bind(port, "0.0.0.0", () => sock.close(() => resolve(true)));
+    } else {
+      const srv = net.createServer();
+      srv.once("error", () => resolve(false));
+      srv.listen(port, "0.0.0.0", () => srv.close(() => resolve(true)));
+    }
+  });
+}
+
+async function pickPort() {
+  for (let i = 0; i < 30; i += 1) {
+    // 31000-45950: away from Sunshine's own default (47989), the tunnel's 20000-29999 and LiveKit's 50000-60000
+    const base = 31000 + Math.floor(Math.random() * 300) * 50;
+    const tcp = [base - 5, base, base + 1, base + 21];
+    const udp = [base + 9, base + 10, base + 11];
+    const free = await Promise.all([...tcp.map((p) => portFree(p, false)), ...udp.map((p) => portFree(p, true))]);
+    if (free.every(Boolean)) return base;
+  }
+  return DEFAULT_PORT;
+}
+
+function writeConfig(settings, port) {
   const dir = stateDir();
   fs.mkdirSync(dir, { recursive: true });
   const f = (name) => path.join(dir, name);
@@ -256,7 +291,7 @@ function writeConfig(settings) {
   const lines = [
     // the computer's own name would reach every viewer in Sunshine's server info
     "sunshine_name = Astrum",
-    `port = ${DEFAULT_PORT}`,
+    `port = ${port}`,
     // viewers come through the tunnel: no port of Sunshine is opened on the router
     "upnp = disabled",
     "origin_web_ui_allowed = pc",
@@ -313,17 +348,40 @@ function rememberEncoder() {
   if (m && ENCODERS.has(m[1])) writeJson(metaPath(), { ...meta(), detectedEncoder: m[1] });
 }
 
-async function start(raw) {
+/**
+ * The start in progress or done, with the settings it was made with: a start
+ * with the same settings joins it. Opening the share dialog starts Sunshine
+ * ahead ("warm"), so pressing start is quick; a warm Sunshine nobody started
+ * a stream with goes down again after a few minutes.
+ */
+let run = null;
+let warmTimer = null;
+const WARM_MS = 3 * 60_000;
+
+function start(raw, warm = false) {
+  const settings = cleanSettings(raw);
+  const key = JSON.stringify(settings);
+  clearTimeout(warmTimer);
+  warmTimer = warm ? setTimeout(() => void stop(), WARM_MS) : null;
+  if (run && run.key === key && (state.running || state.starting)) return run.promise;
+  const promise = (async () => {
+    if (state.running || state.starting) await stop();
+    return launch(settings);
+  })();
+  run = { key, promise };
+  return promise;
+}
+
+async function launch(settings) {
   if (process.platform !== "win32") return { ok: false, error: "windows-only" };
   if (!installed()) return { ok: false, error: "not-installed" };
-  if (state.running || state.starting) await stop();
   const exe = helperPath();
   if (!exe) return { ok: false, error: "no-helper" };
-  const settings = cleanSettings(raw);
-  setState({ starting: true, ready: false, error: "", port: DEFAULT_PORT, uid: "" });
+  const port = await pickPort();
+  setState({ starting: true, ready: false, error: "", port, uid: "" });
   try {
     const login = credentials();
-    const conf = writeConfig(settings);
+    const conf = writeConfig(settings, port);
     if (login.fresh || !fs.existsSync(path.join(stateDir(), "credentials.json"))) {
       if (!(await runOnce([conf, "--creds", login.user, login.pass], 60_000))) throw new Error("Sunshine did not accept its login");
     }
@@ -333,30 +391,36 @@ async function start(raw) {
     p.on("exit", () => {
       if (child !== p) return;
       child = null;
+      run = null;
       stopPolling();
+      stopTunnel();
       setState({ running: false, ready: false, starting: false });
       emit({ type: "stopped" });
     });
     setState({ running: true, startedAt: Date.now() });
+    // the tunnel does not wait for Sunshine: its STUN look runs meanwhile
+    const tunnelReady = startTunnel(settings, port);
+    tunnelReady.catch(() => undefined);
 
     // ready once it answers like a GameStream host; encoder checks take a while on first start
     const until = Date.now() + READY_TIMEOUT_MS;
     let info = null;
     while (!info && Date.now() < until && child === p) {
-      info = await serverInfo(DEFAULT_PORT);
-      if (!info) await new Promise((r) => setTimeout(r, 1000));
+      info = await serverInfo(port);
+      if (!info) await new Promise((r) => setTimeout(r, 400));
     }
     if (!info || child !== p) throw new Error(child === p ? "Sunshine did not start in time" : "Sunshine stopped while starting");
     // Sunshine answers even when it found no screen or encoder to stream with (a locked or
     // disconnected session, a busy graphics card): there would be nothing to watch
     if (/Unable to find display or encoder/.test(readLog())) throw new Error("no-display");
     const uid = /<uniqueid>([^<]+)<\/uniqueid>/i.exec(info)?.[1]?.replace(/[^A-Za-z0-9-]/g, "") || "";
-    const t = await startTunnel(settings);
+    const t = await tunnelReady;
     if (child !== p) throw new Error("Sunshine stopped while starting");
     setState({ ready: true, starting: false, uid });
     rememberEncoder();
     startPolling();
-    return { ok: true, port: DEFAULT_PORT, uid, nat: t.nat, cands: t.cands, encoder: meta().detectedEncoder || settings.encoder || "" };
+    void warmDesktop(port, p);
+    return { ok: true, port, uid, nat: t.nat, cands: t.cands, encoder: meta().detectedEncoder || settings.encoder || "" };
   } catch (e) {
     const error = String(e?.message || e);
     await stop();
@@ -367,6 +431,9 @@ async function start(raw) {
 
 function stop() {
   const p = child;
+  run = null;
+  clearTimeout(warmTimer);
+  warmTimer = null;
   stopPolling();
   stopTunnel();
   if (!p) {
@@ -394,6 +461,66 @@ function stop() {
       p.kill();
     }
   });
+}
+
+/* ------------------------------------------------------------------- warm */
+
+/** The name the app's own Moonlight pairs with its own Sunshine under; the page leaves it alone. */
+const SELF_NAME = "astrum-self";
+
+function helperJson(args, timeoutMs) {
+  return new Promise((resolve) => {
+    const exe = helperPath();
+    if (!exe) {
+      resolve({ ok: false });
+      return;
+    }
+    const c = spawn(exe, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    let out = "";
+    let err = "";
+    const timer = setTimeout(() => c.kill(), timeoutMs);
+    c.stdout.on("data", (d) => (out = (out + d.toString()).slice(-8192)));
+    c.stderr.on("data", (d) => (err = (err + d.toString()).slice(-2000)));
+    c.on("error", () => resolve({ ok: false }));
+    c.on("exit", (code) => {
+      clearTimeout(timer);
+      try {
+        resolve(code === 0 ? { ok: true, data: JSON.parse(out.trim().split(/\r?\n/).pop() || "null") } : { ok: false, error: err.trim() });
+      } catch {
+        resolve({ ok: false });
+      }
+    });
+  });
+}
+
+/**
+ * Sunshine checks every encoder and format again whenever an app is launched
+ * (some seconds), not when a running one is resumed. So the desktop is
+ * launched right after the start, by the app's own Moonlight identity paired
+ * with this Sunshine (both ends here, the PIN known to both), with a moment
+ * of streaming to close that session: the first viewer then only resumes it
+ * and gets the picture seconds sooner.
+ */
+async function warmDesktop(port, p) {
+  const dir = path.join(electron.app.getPath("userData"), "moonlight");
+  const host = `self@127.0.0.1:${port}`;
+  const info = await helperJson(["moonlight", "info", dir, host], 15_000);
+  if (!info.ok || child !== p) return;
+  if (!info.data?.paired) {
+    const pin = String(crypto.randomInt(0, 10_000)).padStart(4, "0");
+    const pairing = helperJson(["moonlight", "pair", dir, host, pin, SELF_NAME], 60_000);
+    for (let i = 0; i < 30 && child === p; i += 1) {
+      await new Promise((r) => setTimeout(r, 500));
+      const res = await api("GET", "/api/pin");
+      const req = Array.isArray(res?.pairings) ? res.pairings.find((x) => x?.name === SELF_NAME) : null;
+      if (req) {
+        await api("POST", "/api/pin", { pairing_id: String(req.id), pin, name: SELF_NAME });
+        break;
+      }
+    }
+    if (!(await pairing).ok || child !== p) return;
+  }
+  await helperJson(["moonlight", "warm", dir, host], 90_000);
 }
 
 /* ------------------------------------------------------------------ tunnel */
@@ -424,17 +551,19 @@ function cleanCands(list) {
 /**
  * The streamer's end of the tunnel: one UDP port for all viewers. Its
  * candidates are the home network's addresses, IPv6, the outside address
- * STUN saw, the router's when it agreed to pass the port over UPnP, and the
- * address typed by the user for a port forwarded by hand.
+ * STUN saw (kept alive, an offer carries it as it is then), the router's
+ * once it agreed to pass the port over UPnP, and the address typed by the
+ * user for a port forwarded by hand. The last two come in later: the stream
+ * does not wait for the router.
  */
-function startTunnel(settings) {
+function startTunnel(settings, port) {
   stopTunnel();
   const exe = helperPath();
   const lan = netcheck.lanAddresses();
   const v6 = netcheck.v6Addresses();
   const p = spawn(
     exe,
-    ["tunnel", "host", String(DEFAULT_PORT), String(settings.udpPort), settings.audio ? "1" : "0", String(process.pid), lan.join(","), v6.join(",")],
+    ["tunnel", "host", String(port), String(settings.udpPort), settings.audio ? "1" : "0", String(process.pid), lan.join(","), v6.join(",")],
     { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
   );
   const t = { child: p, ready: false, stopping: false, nat: "", cands: [], waiting: new Map() };
@@ -459,25 +588,33 @@ function startTunnel(settings) {
         return;
       }
       if (ev.ev === "ready" && !t.ready) {
-        const cands = cleanCands(ev.cands);
-        const port = Number(ev.port) || 0;
-        if (settings.upnp && port) {
-          const outside = await netcheck.openPort(port).catch(() => "");
-          if (outside && CAND.test(outside)) cands.push(outside);
-        }
-        if (settings.udpPort && settings.address) {
-          const ip = await publicAddress(settings.address);
-          if (ip) cands.push(`${ip}:${settings.udpPort}`);
-        }
         t.nat = String(ev.nat || "");
-        t.cands = cleanCands(cands);
+        t.cands = cleanCands(ev.cands);
         t.ready = true;
         clearTimeout(timer);
         resolve({ nat: t.nat, cands: t.cands });
+        const add = (c) => {
+          if (tunnel !== t || !CAND.test(c)) return;
+          t.cands = cleanCands([...t.cands, c]);
+          try {
+            p.stdin.write(`cand ${c}\n`);
+          } catch {
+            // the tunnel is gone
+          }
+        };
+        const udp = Number(ev.port) || 0;
+        if (settings.upnp && udp) void netcheck.openPort(udp).then((outside) => outside && add(outside)).catch(() => undefined);
+        if (settings.udpPort && settings.address) void publicAddress(settings.address).then((ip) => ip && add(`${ip}:${settings.udpPort}`));
+      } else if (ev.ev === "cands") {
+        t.cands = cleanCands(ev.cands);
       } else if ((ev.ev === "offer" || ev.ev === "refused") && typeof ev.id === "string") {
         const w = t.waiting.get(ev.id);
         t.waiting.delete(ev.id);
-        w?.(ev.ev === "offer" ? { ok: true, sid: Number(ev.sid) >>> 0, key: String(ev.key || "") } : { ok: false, error: String(ev.text || "refused") });
+        w?.(
+          ev.ev === "offer"
+            ? { ok: true, sid: Number(ev.sid) >>> 0, key: String(ev.key || ""), cands: cleanCands(ev.cands).length ? cleanCands(ev.cands) : t.cands, nat: t.nat }
+            : { ok: false, error: String(ev.text || "refused") },
+        );
       } else if (ev.ev === "up" || ev.ev === "down") {
         emit({ type: "tunnel", ev: ev.ev, id: String(ev.id || ""), path: String(ev.path || ""), reason: String(ev.reason || "") });
       } else if (ev.ev === "audio-error") {
@@ -714,6 +851,10 @@ function init(opts) {
   handle(ipcMain, "app:sun-status", () => publicState());
   handle(ipcMain, "app:sun-install", () => install());
   handle(ipcMain, "app:sun-start", (_e, settings) => start(settings));
+  // the share dialog opened on Sunshine: it starts ahead, a stream started soon after is quick
+  handle(ipcMain, "app:sun-prewarm", (_e, settings) => {
+    if (!state.running && !state.starting && installed()) void start(settings, true);
+  });
   handle(ipcMain, "app:sun-stop", () => stop());
   handle(ipcMain, "app:sun-devices", () => ({ displays: displays() }));
   handle(ipcMain, "app:sun-peer", (_e, id, key, nat, cands) => addViewer(String(id), String(key), String(nat), cands));

@@ -106,6 +106,25 @@ impl Socks {
     }
 }
 
+/// The tunnel's UDP socket: on the given port, or on a random one between
+/// 20000 and 29999. Windows hands out ports from 49152 up by itself, and many
+/// NATs keep the port: there routers often pass whole ranges on to a server
+/// (50000 to 60000 for LiveKit, for one), and packets from a viewer would go
+/// there instead of to this computer.
+pub fn bind_v4(port: u16) -> std::io::Result<UdpSocket> {
+    use rand::Rng;
+    if port != 0 {
+        return UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port));
+    }
+    for _ in 0..40 {
+        let p = rand::thread_rng().gen_range(20000..30000);
+        if let Ok(s) = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, p)) {
+            return Ok(s);
+        }
+    }
+    UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0))
+}
+
 /// Bigger socket buffers: a keyframe arrives as a burst of a few hundred
 /// packets, more than the 64 KB Windows gives a socket by default.
 pub fn tune(sock: &UdpSocket) {

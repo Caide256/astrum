@@ -64,11 +64,29 @@ export type TileLook = {
   color: string;
   image?: string;
   emoji?: string;
-  /** For a picture: how much it is enlarged (1 fills the area) and the point kept in view, in percent. */
+  /**
+   * The one framing of a picture from before each place had its own: still
+   * written (the card's) for older apps, and used where a place has none.
+   */
   zoom?: number;
   x?: number;
   y?: number;
+  /** The part of the picture shown on the profile card and on a call tile: the boxes differ in shape. */
+  card?: BannerFrame;
+  tile?: BannerFrame;
 };
+
+/** How much a picture is enlarged (1 fills the box) and the point kept in view, in percent. */
+export type BannerFrame = { zoom: number; x: number; y: number };
+
+export type BannerPlace = "card" | "tile";
+
+/** The framing of a picture in one place: its own, or the shared one of older apps. */
+export function frameOf(look: TileLook | null | undefined, place: BannerPlace): BannerFrame {
+  const own = look?.[place];
+  if (own) return own;
+  return { zoom: look?.zoom ?? 1, x: look?.x ?? 50, y: look?.y ?? 50 };
+}
 
 /** At most three emoji: the grapheme clusters of the text that are pictures. */
 export function cleanEmoji(raw: unknown): string {
@@ -94,10 +112,24 @@ export function cleanTile(raw: unknown): TileLook | null {
     const f = Number(n);
     return Number.isFinite(f) ? Math.max(lo, Math.min(hi, Math.round(f * 100) / 100)) : d;
   };
-  const frame =
-    v.mode === "image" ? { zoom: num(v.zoom, 1, 4, 1), x: num(v.x, 0, 100, 50), y: num(v.y, 0, 100, 50) } : {};
-  const plain = v.mode === "image" && frame.zoom === 1 && frame.x === 50 && frame.y === 50;
-  return { mode: v.mode, color, ...(image ? { image } : {}), ...(emoji ? { emoji } : {}), ...(plain ? {} : frame) };
+  const cleanFrame = (f: unknown): BannerFrame | null => {
+    const o = f as Partial<BannerFrame> | null;
+    return o && typeof o === "object" ? { zoom: num(o.zoom, 1, 4, 1), x: num(o.x, 0, 100, 50), y: num(o.y, 0, 100, 50) } : null;
+  };
+  const isPlain = (f: BannerFrame) => f.zoom === 1 && f.x === 50 && f.y === 50;
+  if (v.mode !== "image") return { mode: v.mode, color, ...(image ? { image } : {}), ...(emoji ? { emoji } : {}) };
+  const frame = { zoom: num(v.zoom, 1, 4, 1), x: num(v.x, 0, 100, 50), y: num(v.y, 0, 100, 50) };
+  const card = cleanFrame(v.card);
+  const tile = cleanFrame(v.tile);
+  return {
+    mode: v.mode,
+    color,
+    ...(image ? { image } : {}),
+    ...(emoji ? { emoji } : {}),
+    ...(isPlain(frame) ? {} : frame),
+    ...(card ? { card } : {}),
+    ...(tile ? { tile } : {}),
+  };
 }
 
 /**
@@ -563,8 +595,8 @@ export class VoiceClient {
   /** Sunshine streams of others and the own one, from state packets. */
   private remoteSun = new Map<string, SunInfo>();
   private ownSun: SunInfo | null = null;
-  /** The Moonlight picture of a watched Sunshine stream, set by moonlight.ts. */
-  private sunVideo: { identity: string; track: LocalVideoTrack } | null = null;
+  /** The Moonlight pictures of watched Sunshine streams, by streamer, set by moonlight.ts. */
+  private sunVideo = new Map<string, LocalVideoTrack>();
   /** Talking while muted was heard until then. */
   private mutedTalkUntil = 0;
   private silentFor = 0;
@@ -852,7 +884,7 @@ export class VoiceClient {
     this.lostAt.delete(identity);
     this.applyPolicy();
     if (was) this.send({ t: "watch", on: false }, identity);
-    if (was && this.sunVideo?.identity === identity) this.sunVideo = null;
+    if (was) this.sunVideo.delete(identity);
     if (was) this.onSunWatch?.(identity, false);
     this.refreshMembers(true);
   }
@@ -878,7 +910,8 @@ export class VoiceClient {
   screenTrackOf(identity: string): LocalVideoTrack | RemoteVideoTrack | null {
     const room = this.room;
     if (!room) return null;
-    if (this.sunVideo?.identity === identity) return this.sunVideo.track;
+    const sun = this.sunVideo.get(identity);
+    if (sun) return sun;
     if (identity === room.localParticipant.identity) return this.screenTrack;
     const pub = room.remoteParticipants.get(identity)?.getTrackPublication(Track.Source.ScreenShare);
     return (pub?.track as RemoteVideoTrack | undefined) ?? null;
@@ -956,7 +989,8 @@ export class VoiceClient {
           sunshine: !!sun,
         });
       }
-      if (sun && watching && this.sunVideo?.identity === p.identity) {
+      const sunTrack = this.sunVideo.get(p.identity);
+      if (sun && watching && sunTrack) {
         videos.push({
           key: `${p.identity}|sunshine`,
           identity: p.identity,
@@ -964,7 +998,7 @@ export class VoiceClient {
           name,
           screen: true,
           local,
-          track: this.sunVideo.track,
+          track: sunTrack,
         });
       }
 
@@ -1224,9 +1258,10 @@ export class VoiceClient {
     return this.remoteSun.get(identity) ?? null;
   }
 
-  /** The picture of the Sunshine stream being watched, from moonlight.ts. */
-  setSunVideo(identity: string | null, track: LocalVideoTrack | null): void {
-    this.sunVideo = identity && track ? { identity, track } : null;
+  /** The picture of a Sunshine stream being watched, from moonlight.ts; null when it ends. */
+  setSunVideo(identity: string, track: LocalVideoTrack | null): void {
+    if (track) this.sunVideo.set(identity, track);
+    else this.sunVideo.delete(identity);
     this.refreshMembers(true);
   }
 
@@ -2242,7 +2277,7 @@ export class VoiceClient {
     this.remoteTile.clear();
     for (const id of this.remoteSun.keys()) if (this.watching.has(id)) this.onSunWatch?.(id, false);
     this.remoteSun.clear();
-    this.sunVideo = null;
+    this.sunVideo.clear();
     // the own Sunshine stream belongs to this call: sunshine.ts stops Sunshine when the call ends
     this.ownSun = null;
     this.decodeWatch.clear();

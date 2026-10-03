@@ -179,6 +179,17 @@ let tunnel: { nat: string; cands: string[] } | null = null;
 /** Accounts whose access was taken away while Sunshine was off: unpaired at the next start. */
 let revoked: string[] = [];
 
+/**
+ * The share dialog opened on Sunshine: Sunshine starts ahead, so a stream
+ * started from there is quick. Not announced: nobody sees anything until
+ * the stream starts. It goes down again by itself if no stream follows.
+ */
+export function prewarmSunshine(): void {
+  const s = sun.get();
+  if (!bridge || s.live || s.busy || !s.status?.installed || s.status.running || !voice.getState().connected) return;
+  void bridge.prewarm(s.settings);
+}
+
 /** Start streaming the screen through Sunshine in the current call. */
 export async function startSunshineStream(): Promise<boolean> {
   if (!bridge || !voice.getState().connected) return false;
@@ -236,7 +247,7 @@ type Hello = { identity: string; userId: string; pin: string; key: string; nat: 
 /** Hellos of viewers, by the name of their request, until they are let in or turned away. */
 const hellos = new Map<string, Hello>();
 /** Viewers let in, by the name of their request: their pairing in Sunshine is accepted with their PIN. */
-const admitted = new Map<string, { userId: string; pin: string; at: number }>();
+const admitted = new Map<string, { userId: string; pin: string; at: number; approving?: boolean }>();
 /** Pairing requests in Sunshine with no viewer behind them: since when, to turn them away. */
 const strangers = new Map<string, number>();
 let pending: SunPairing[] = [];
@@ -260,7 +271,9 @@ async function admit(name: string): Promise<void> {
     return;
   }
   if (/^\d{4}$/.test(h.pin)) admitted.set(name, { userId: h.userId, pin: h.pin, at: Date.now() });
-  voice.sendSun({ t: "sun-offer", name, sid: res.sid, key: res.key, nat: t.nat, cands: t.cands }, h.identity);
+  // the candidates as they are now: the outside address may have moved, the router's port come in
+  const cands = res.cands?.length ? res.cands : t.cands;
+  voice.sendSun({ t: "sun-offer", name, sid: res.sid, key: res.key, nat: res.nat || t.nat, cands }, h.identity);
   matchPairings();
 }
 
@@ -270,12 +283,21 @@ function matchPairings(): void {
   const now = Date.now();
   for (const [name, a] of admitted) if (now - a.at > ADMIT_TTL_MS) admitted.delete(name);
   for (const p of pending) {
+    // the app's own Moonlight pairing with this Sunshine, let in by the main process
+    if (p.name === "astrum-self") continue;
     const a = admitted.get(p.name);
     if (a) {
-      admitted.delete(p.name);
       strangers.delete(p.id);
-      // the viewer's account is the name Sunshine keeps for it: access can be taken back by account
-      void bridge.approve(p.id, a.pin, a.userId).then(() => refreshClients());
+      if (a.approving) continue;
+      a.approving = true;
+      // the viewer's account is the name Sunshine keeps for it: access can be taken back by account.
+      // Sunshine may refuse for a moment (a session being set up): the request is tried again
+      // the entry stays until it expires: a viewer that has to pair again with a new identity
+      // comes back under the same one-time name
+      void bridge.approve(p.id, a.pin, a.userId).then((res) => {
+        a.approving = false;
+        if (res.ok) void refreshClients();
+      });
       continue;
     }
     // a request nobody let in: from the internet, or a viewer that gave up long ago
@@ -398,8 +420,8 @@ if (bridge) {
     wasConnected = connected;
   });
 
-  // a stale request still waiting in Sunshine is turned away even when nothing else changes
+  // requests still waiting in Sunshine: a refused approval is tried again, a stale request turned away
   window.setInterval(() => {
     if (sun.get().live && pending.length) matchPairings();
-  }, 5000);
+  }, 2000);
 }

@@ -40,10 +40,18 @@ let quitting = false;
 // autostart at sign-in: no window, the app waits in the tray
 const startHidden = process.argv.includes("--hidden");
 
+/** Started hidden from a window that was maximized last time: maximized when first shown. */
+let maximizeOnShow = false;
+
 function showWindow() {
   const win = mainWindow;
   if (!win || win.isDestroyed()) return;
   if (win.isMinimized()) win.restore();
+  if (maximizeOnShow) {
+    maximizeOnShow = false;
+    // maximize() shows the window by itself
+    win.maximize();
+  }
   win.show();
   win.focus();
 }
@@ -150,23 +158,35 @@ function helperPath() {
 /* --------------------------------------------------------------- moonlight */
 
 /**
- * Watching a Sunshine (Moonlight) host: the native helper pairs with it,
- * lists its apps and receives the video. Frames come out of the helper as
- * records ([kind u8][length u32 LE][payload]) and go to the page as they
- * are; the page decodes them with WebCodecs. The client identity (key and
- * certificate) lives in the profile folder.
+ * Watching Sunshine streams: per stream a tunnel to the streamer's computer
+ * (native/helper/src/tunnel/view.rs) and a Moonlight stream through it, each
+ * in a helper process of its own, so several streams can be watched at once.
+ * Frames come out of the helper as records ([kind u8][length u32 LE]
+ * [payload]) and go to the page as they are, tagged with the watch they
+ * belong to; the page decodes them with WebCodecs. The client identity (key
+ * and certificate) lives in the profile folder.
  */
-let mlStream = null;
+
+/** Per watch: its tunnel, its stream, and a pairing that may still wait for the streamer. */
+const watches = new Map();
+const WATCH_ID = /^[\w-]{1,64}$/;
+
+function watchOf(wid) {
+  if (!WATCH_ID.test(String(wid))) return null;
+  let w = watches.get(wid);
+  if (!w) {
+    w = { tunnel: null, stream: null, pairing: null };
+    watches.set(wid, w);
+  }
+  return w;
+}
 
 function mlDir() {
   return path.join(app.getPath("userData"), "moonlight");
 }
 
-/** The pairing waiting for the streamer: dropped when the viewer gives up. */
-let mlPairing = null;
-
 /** One helper command with a JSON answer. */
-function mlCommand(args, timeoutMs) {
+function mlCommand(args, timeoutMs, onChild) {
   return new Promise((resolve) => {
     const exe = helperPath();
     if (!exe || process.platform !== "win32") {
@@ -174,15 +194,14 @@ function mlCommand(args, timeoutMs) {
       return;
     }
     const child = spawn(exe, ["moonlight", ...args], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-    if (args[0] === "pair") mlPairing = child;
+    onChild?.(child);
     let out = "";
     let err = "";
     const timer = setTimeout(() => child.kill(), timeoutMs);
-    child.stdout.on("data", (d) => (out += d.toString()));
-    child.stderr.on("data", (d) => (err += d.toString()));
+    child.stdout.on("data", (d) => (out = (out + d.toString()).slice(-65536)));
+    child.stderr.on("data", (d) => (err = (err + d.toString()).slice(-4000)));
     child.on("exit", (code) => {
       clearTimeout(timer);
-      if (mlPairing === child) mlPairing = null;
       if (code !== 0) {
         resolve({ ok: false, error: err.trim() || `exit ${code}` });
         return;
@@ -196,104 +215,30 @@ function mlCommand(args, timeoutMs) {
   });
 }
 
-/**
- * The viewer's end of a stream tunnel (native/helper/src/tunnel/view.rs):
- * one at a time, like the stream. Its events go to the page as they come,
- * and so does the stream's sound, which travels in the tunnel.
- */
-let mlTunnel = null;
-
-const TUN_CAND = /^(?:(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]{2,39}\]):\d{1,5}$/i;
-
-function stopTunnel() {
-  const t = mlTunnel;
-  mlTunnel = null;
-  if (!t) return;
-  try {
-    t.stdin.write("stop\n");
-  } catch {
-    // already gone
-  }
-  setTimeout(() => {
-    if (t.exitCode === null) t.kill();
-  }, 3000);
-}
-
-function startTunnel(sender, base) {
-  stopTunnel();
-  const exe = helperPath();
-  if (!exe || process.platform !== "win32") return Promise.resolve({ ok: false, error: "no-helper" });
-  const port = Math.round(Number(base));
-  if (!(port >= 1030 && port <= 65000)) return Promise.resolve({ ok: false, error: "bad-port" });
-  const child = spawn(exe, ["tunnel", "view", String(port), netcheck.lanAddresses().join(","), netcheck.v6Addresses().join(",")], {
-    stdio: ["pipe", "pipe", "ignore"],
-    windowsHide: true,
-  });
-  mlTunnel = child;
-  child.stdin.on("error", () => undefined);
-  return new Promise((resolve) => {
-    let ready = false;
-    const timer = setTimeout(() => {
-      if (!ready) resolve({ ok: false, error: "tunnel" });
-    }, 15_000);
-    let pending = Buffer.alloc(0);
-    child.stdout.on("data", (data) => {
-      pending = pending.length ? Buffer.concat([pending, data]) : data;
-      while (pending.length >= 5) {
-        const len = pending.readUInt32LE(1);
-        if (len > 1 << 20) {
-          child.kill();
-          return;
-        }
-        if (pending.length < 5 + len) break;
-        const kind = pending[0];
-        const payload = pending.subarray(5, 5 + len);
-        pending = pending.subarray(5 + len);
-        if (kind === 4) {
-          if (!sender.isDestroyed()) sender.send("app:tun-pcm", Buffer.from(payload));
-          continue;
-        }
-        if (kind !== 2) continue;
-        let ev;
-        try {
-          ev = JSON.parse(payload.toString("utf8"));
-        } catch {
-          continue;
-        }
-        if (ev.ev === "ready" && !ready) {
-          ready = true;
-          clearTimeout(timer);
-          const cands = String(ev.cands || "")
-            .split(",")
-            .filter((c) => TUN_CAND.test(c))
-            .slice(0, 16);
-          resolve({ ok: true, key: String(ev.key || ""), nat: String(ev.nat || ""), cands });
-        } else if (!sender.isDestroyed()) {
-          sender.send("app:tun-event", JSON.stringify(ev));
-        }
-      }
-    });
-    child.on("exit", () => {
-      clearTimeout(timer);
-      if (mlTunnel === child) mlTunnel = null;
-      if (!ready) resolve({ ok: false, error: "tunnel" });
-      else if (!sender.isDestroyed()) sender.send("app:tun-event", JSON.stringify({ ev: "down", reason: "exit" }));
-    });
-  });
-}
-
-function stopMoonlight() {
-  const child = mlStream;
-  mlStream = null;
+/** Ask a helper to stop over its stdin, and end it if it does not. */
+function stopChild(child, line = "stop\n") {
   if (!child) return;
   try {
-    child.stdin.write("stop\n");
+    child.stdin.write(line);
   } catch {
     // already gone
   }
   setTimeout(() => {
     if (child.exitCode === null) child.kill();
   }, 3000);
+}
+
+function stopWatch(wid) {
+  const w = watches.get(wid);
+  if (!w) return;
+  watches.delete(wid);
+  stopChild(w.stream);
+  stopChild(w.tunnel);
+  w.pairing?.kill();
+}
+
+function stopAllWatches() {
+  for (const wid of [...watches.keys()]) stopWatch(wid);
 }
 
 /**
@@ -304,109 +249,180 @@ function stopMoonlight() {
 const HOST_RE = /^(?:[A-Za-z0-9_-]{1,64}@)?(?:(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?|\[[0-9a-f:.]{2,45}\])(?::\d{1,5})?$/i;
 /** The device name a pairing request carries: the streamer's app matches requests by it. */
 const DEVICE_RE = /^[A-Za-z0-9._-]{1,64}$/;
+const TUN_CAND = /^(?:(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]{2,39}\]):\d{1,5}$/i;
 
 function mlHost(h) {
   const v = String(h || "").trim();
   return v.length <= 260 && HOST_RE.test(v) ? v : "";
 }
 
+/** Records from a helper's stdout: whole ones only, a frame may arrive in pieces. */
+function readRecords(child, onRecord) {
+  let pending = Buffer.alloc(0);
+  child.stdout.on("data", (data) => {
+    pending = pending.length ? Buffer.concat([pending, data]) : data;
+    while (pending.length >= 5) {
+      const len = pending.readUInt32LE(1);
+      if (len > 64 * 1024 * 1024) {
+        child.kill();
+        return;
+      }
+      if (pending.length < 5 + len) break;
+      const kind = pending[0];
+      const payload = pending.subarray(5, 5 + len);
+      pending = pending.subarray(5 + len);
+      onRecord(kind, payload);
+    }
+  });
+}
+
+/** The viewer's end of a tunnel: resolves with this side's key and candidates once STUN answered. */
+function startTunnel(sender, wid, base) {
+  const w = watchOf(wid);
+  const exe = helperPath();
+  if (!w) return Promise.resolve({ ok: false, error: "bad-watch" });
+  if (!exe || process.platform !== "win32") return Promise.resolve({ ok: false, error: "no-helper" });
+  const port = Math.round(Number(base));
+  if (!(port >= 1030 && port <= 65000)) return Promise.resolve({ ok: false, error: "bad-port" });
+  stopChild(w.tunnel);
+  const child = spawn(exe, ["tunnel", "view", String(port), netcheck.lanAddresses().join(","), netcheck.v6Addresses().join(",")], {
+    stdio: ["pipe", "pipe", "ignore"],
+    windowsHide: true,
+  });
+  w.tunnel = child;
+  child.stdin.on("error", () => undefined);
+  return new Promise((resolve) => {
+    let ready = false;
+    const timer = setTimeout(() => {
+      if (!ready) resolve({ ok: false, error: "tunnel" });
+    }, 15_000);
+    readRecords(child, (kind, payload) => {
+      if (kind === 4) {
+        if (!sender.isDestroyed()) sender.send("app:tun-pcm", wid, Buffer.from(payload));
+        return;
+      }
+      if (kind !== 2) return;
+      let ev;
+      try {
+        ev = JSON.parse(payload.toString("utf8"));
+      } catch {
+        return;
+      }
+      if (ev.ev === "ready" && !ready) {
+        ready = true;
+        clearTimeout(timer);
+        const cands = String(ev.cands || "")
+          .split(",")
+          .filter((c) => TUN_CAND.test(c))
+          .slice(0, 16);
+        resolve({ ok: true, key: String(ev.key || ""), nat: String(ev.nat || ""), cands });
+      } else if (!sender.isDestroyed()) {
+        sender.send("app:tun-event", wid, JSON.stringify(ev));
+      }
+    });
+    child.on("exit", () => {
+      clearTimeout(timer);
+      if (w.tunnel === child) w.tunnel = null;
+      if (!ready) resolve({ ok: false, error: "tunnel" });
+      else if (!sender.isDestroyed()) sender.send("app:tun-event", wid, JSON.stringify({ ev: "down", reason: "exit" }));
+    });
+  });
+}
+
+function startStream(sender, wid, opts) {
+  const w = watchOf(wid);
+  const exe = helperPath();
+  if (!w) return { ok: false, error: "bad-watch" };
+  if (!exe || process.platform !== "win32") return { ok: false, error: "no-helper" };
+  const o = opts || {};
+  const host = mlHost(o.host);
+  if (!host) return { ok: false, error: "bad-host" };
+  stopChild(w.stream);
+  const num = (v, d) => String(Math.round(Number(v) || d));
+  const args = [
+    "moonlight",
+    "stream",
+    mlDir(),
+    host,
+    num(o.app, 0),
+    num(o.width, 1920),
+    num(o.height, 1080),
+    num(o.fps, 60),
+    num(o.kbps, 20000),
+    num(o.formats, 1),
+    // the streamer keeps hearing the own sound
+    o.hostAudio === false ? "0" : "1",
+    num(o.packet, 1392),
+  ];
+  const child = spawn(exe, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+  w.stream = child;
+  child.stdin.on("error", () => undefined);
+  let errText = "";
+  readRecords(child, (kind, payload) => {
+    if (sender.isDestroyed()) return;
+    if (kind === 1) sender.send("app:ml-frame", wid, Buffer.from(payload));
+    else if (kind === 2) sender.send("app:ml-event", wid, payload.toString("utf8"));
+  });
+  child.stderr.on("data", (d) => {
+    errText = (errText + d.toString()).slice(-4000);
+  });
+  child.on("exit", (code) => {
+    if (w.stream === child) w.stream = null;
+    if (!sender.isDestroyed()) {
+      sender.send("app:ml-event", wid, JSON.stringify({ event: "ended", code: code || 0, text: errText.trim().slice(-500) }));
+    }
+  });
+  return { ok: true };
+}
+
 function moonlightBridge() {
   const bad = { ok: false, error: "bad-host" };
-  const run = (h, args, ms) => {
+  const run = (h, args, ms, onChild) => {
     const host = mlHost(h);
-    return host ? mlCommand([args[0], mlDir(), host, ...args.slice(1)], ms) : bad;
+    return host ? mlCommand([args[0], mlDir(), host, ...args.slice(1)], ms, onChild) : bad;
   };
   guard.handle(ipcMain, "app:ml-info", (_e, h) => run(h, ["info"], 20_000));
   // the streamer lets the request in on the other side; that may take a while
-  guard.handle(ipcMain, "app:ml-pair", (_e, h, pin, name) => {
+  guard.handle(ipcMain, "app:ml-pair", (_e, h, pin, name, wid) => {
     if (!/^\d{4}$/.test(String(pin))) return bad;
     const device = DEVICE_RE.test(String(name ?? "")) ? [String(name)] : [];
-    return run(h, ["pair", String(pin), ...device], 200_000);
+    const w = watchOf(wid);
+    return run(h, ["pair", String(pin), ...device], 200_000, (child) => {
+      if (w) w.pairing = child;
+    });
   });
   guard.handle(ipcMain, "app:ml-forget", (_e, h) => run(h, ["forget"], 10_000));
-  guard.handle(ipcMain, "app:ml-cancel", () => mlPairing?.kill());
-  guard.handle(ipcMain, "app:ml-apps", (_e, h) => run(h, ["apps"], 20_000));
-  guard.handle(ipcMain, "app:ml-quit", (_e, h) => run(h, ["quit"], 20_000));
+  guard.handle(ipcMain, "app:ml-reset", () => mlCommand(["reset", mlDir()], 30_000));
+  guard.handle(ipcMain, "app:ml-cancel", (_e, wid) => {
+    const w = watches.get(String(wid));
+    w?.pairing?.kill();
+    if (w) w.pairing = null;
+  });
+  guard.handle(ipcMain, "app:ml-start", (event, wid, opts) => startStream(event.sender, String(wid), opts));
+  guard.handle(ipcMain, "app:ml-idr", (_e, wid) => {
+    try {
+      watches.get(String(wid))?.stream?.stdin.write("idr\n");
+    } catch {
+      // stream already ended
+    }
+  });
+  guard.handle(ipcMain, "app:ml-stop", (_e, wid) => stopWatch(String(wid)));
 
-  guard.handle(ipcMain, "app:tun-start", (event, base) => startTunnel(event.sender, base));
+  guard.handle(ipcMain, "app:tun-start", (event, wid, base) => startTunnel(event.sender, String(wid), base));
   // the streamer's answer: its session, key and candidates
-  guard.handle(ipcMain, "app:tun-peer", (_e, sid, key, nat, cands) => {
+  guard.handle(ipcMain, "app:tun-peer", (_e, wid, sid, key, nat, cands) => {
+    const t = watches.get(String(wid))?.tunnel;
     const id = Number(sid) >>> 0;
     const list = (Array.isArray(cands) ? cands : []).map(String).filter((c) => TUN_CAND.test(c)).slice(0, 16);
-    if (!mlTunnel || !id || !/^[0-9a-f]{64}$/.test(String(key)) || !list.length) return { ok: false };
+    if (!t || !id || !/^[0-9a-f]{64}$/.test(String(key)) || !list.length) return { ok: false };
     const n = ["open", "cone", "symmetric", "blocked"].includes(nat) ? nat : "unknown";
     try {
-      mlTunnel.stdin.write(`peer ${id} ${key} ${n} ${list.join(",")}\n`);
+      t.stdin.write(`peer ${id} ${key} ${n} ${list.join(",")}\n`);
       return { ok: true };
     } catch {
       return { ok: false };
     }
   });
-  guard.handle(ipcMain, "app:tun-stop", () => stopTunnel());
-
-  guard.handle(ipcMain, "app:ml-start", (event, opts) => {
-    stopMoonlight();
-    const exe = helperPath();
-    if (!exe || process.platform !== "win32") return { ok: false, error: "no-helper" };
-    const o = opts || {};
-    if (!mlHost(o.host)) return bad;
-    const num = (v, d) => String(Math.round(Number(v) || d));
-    const args = [
-      "moonlight",
-      "stream",
-      mlDir(),
-      mlHost(o.host),
-      num(o.app, 0),
-      num(o.width, 1920),
-      num(o.height, 1080),
-      num(o.fps, 60),
-      num(o.kbps, 20000),
-      num(o.formats, 1),
-      // the streamer keeps hearing the own sound
-      o.hostAudio === false ? "0" : "1",
-      num(o.packet, 1392),
-    ];
-    const child = spawn(exe, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
-    mlStream = child;
-    const sender = event.sender;
-    let pending = Buffer.alloc(0);
-    let errText = "";
-
-    child.stdout.on("data", (data) => {
-      pending = pending.length ? Buffer.concat([pending, data]) : data;
-      // whole records only; a frame may arrive in several pieces
-      while (pending.length >= 5) {
-        const len = pending.readUInt32LE(1);
-        if (pending.length < 5 + len) break;
-        const kind = pending[0];
-        const payload = pending.subarray(5, 5 + len);
-        pending = pending.subarray(5 + len);
-        if (sender.isDestroyed()) continue;
-        if (kind === 1) sender.send("app:ml-frame", Buffer.from(payload));
-        else if (kind === 2) sender.send("app:ml-event", payload.toString("utf8"));
-        else if (kind === 3) sender.send("app:ml-audio", Buffer.from(payload));
-      }
-    });
-    child.stderr.on("data", (d) => {
-      errText = (errText + d.toString()).slice(-4000);
-    });
-    child.on("exit", (code) => {
-      if (mlStream === child) mlStream = null;
-      if (!sender.isDestroyed()) {
-        sender.send("app:ml-event", JSON.stringify({ event: "ended", code: code || 0, text: errText.trim().slice(-500) }));
-      }
-    });
-    return { ok: true };
-  });
-
-  guard.handle(ipcMain, "app:ml-idr", () => {
-    try {
-      mlStream?.stdin.write("idr\n");
-    } catch {
-      // stream already ended
-    }
-  });
-  guard.handle(ipcMain, "app:ml-stop", () => stopMoonlight());
 }
 
 /* ------------------------------------------------------- screen share audio */
@@ -512,7 +528,8 @@ function pushBindings() {
   for (const b of bindings) {
     if (!Array.isArray(b.keys) || !b.keys.length) continue;
     const spec = b.keys.map((part) => part.map((k) => Number(k).toString(16)).join("|")).join(",");
-    lines.push(`bind ${String(b.id).replace(/\s/g, "")} ${spec}`);
+    // push-to-talk works with other modifiers held: Shift or Alt are often held down in games
+    lines.push(`bind ${String(b.id).replace(/\s/g, "")} ${spec}${b.action === "ptt" ? " loose" : ""}`);
   }
   child.stdin.write(lines.join("\n") + "\n");
 }
@@ -886,7 +903,11 @@ function createWindow() {
     webPreferences: WEB_PREFS,
   });
   mainWindow = win;
-  if (bounds?.maximized) win.maximize();
+  // maximize() shows a hidden window: started into the tray it waits for the first show
+  if (bounds?.maximized) {
+    if (startHidden) maximizeOnShow = true;
+    else win.maximize();
+  }
   if (!startHidden) win.show();
   watchBounds(win);
   watchFrame(win);
@@ -1204,8 +1225,7 @@ if (!app.requestSingleInstanceLock()) {
     stopAudioHelper();
     // the helper stops Sunshine cleanly on its own once the app is gone
     void sunshine.stop();
-    stopMoonlight();
-    stopTunnel();
+    stopAllWatches();
     if (keysHelper) {
       const child = keysHelper;
       keysHelper = null;

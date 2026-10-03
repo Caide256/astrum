@@ -52,6 +52,7 @@ struct Flow {
 
 struct View {
     base: u16,
+    keeper: Arc<stun::Keeper>,
     link: Arc<Link>,
     socks: Arc<Socks>,
     prober: Mutex<Prober>,
@@ -71,6 +72,10 @@ fn bye(view: &View) -> ! {
 
 impl View {
     fn handle(self: &Arc<Self>, from: SocketAddr, buf: &mut [u8]) {
+        if stun::is_stun(buf) {
+            let _ = self.keeper.answer(buf, from);
+            return;
+        }
         if wire::session_of(buf) != Some(self.link.sid) {
             return;
         }
@@ -204,7 +209,7 @@ impl View {
                         bye(self);
                     }
                 }
-            } else if self.started.elapsed() > Duration::from_secs(15) {
+            } else if self.started.elapsed() > Duration::from_secs(20) {
                 event("{\"ev\":\"fail\",\"reason\":\"punch\"}".into());
                 bye(self);
             }
@@ -226,7 +231,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let lan: Vec<Ipv4Addr> = args.get(1).map(|l| l.split(',').filter_map(|p| p.parse().ok()).collect()).unwrap_or_default();
     let v6: Vec<Ipv6Addr> = args.get(2).map(|l| l.split(',').filter_map(|p| p.parse().ok()).collect()).unwrap_or_default();
 
-    let v4 = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| e.to_string())?;
+    let v4 = wire::bind_v4(0).map_err(|e| e.to_string())?;
     wire::tune(&v4);
     let port = v4.local_addr().map_err(|e| e.to_string())?.port();
     let v6sock = if v6.is_empty() { None } else { UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).ok() };
@@ -255,7 +260,28 @@ pub fn run(args: &[String]) -> Result<(), String> {
         list.join(",")
     ));
 
-    // the streamer's answer
+    // the streamer's answer may take a while (the streamer is asked first):
+    // the NAT mapping is kept alive meanwhile, or the candidates go stale
+    let keeper = Arc::new(stun::Keeper::new(&seen));
+    let waiting = Arc::new(AtomicBool::new(true));
+    if let Ok(sock) = v4.try_clone() {
+        let (keeper, waiting) = (keeper.clone(), waiting.clone());
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1500];
+            let _ = sock.set_read_timeout(Some(Duration::from_millis(200)));
+            let mut asked = Instant::now();
+            while waiting.load(Ordering::Relaxed) {
+                if asked.elapsed() >= Duration::from_secs(10) {
+                    asked = Instant::now();
+                    keeper.ask(&sock);
+                }
+                if let Some((n, from)) = wire::recv(&sock, &mut buf) {
+                    let _ = keeper.answer(&buf[..n], from);
+                }
+            }
+            let _ = sock.set_read_timeout(None);
+        });
+    }
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
     let (sid, host_key, nat, targets) = loop {
@@ -271,6 +297,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
             _ => {}
         }
     };
+    waiting.store(false, Ordering::Relaxed);
+    // the waiting thread lets go of the socket within its read timeout
+    std::thread::sleep(Duration::from_millis(250));
     if targets.is_empty() || sid == 0 {
         event("{\"ev\":\"fail\",\"reason\":\"punch\"}".into());
         std::process::exit(0);
@@ -282,6 +311,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let (h2v, v2h) = wire::derive(own, &host_key, &host_key, &view_pub)?;
     let view = Arc::new(View {
         base,
+        keeper,
         link: Arc::new(Link::new(sid, v2h, h2v)),
         socks: Arc::new(Socks { v4, v6: v6sock }),
         prober: Mutex::new(Prober::new(targets)),
@@ -306,9 +336,17 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     {
         let view = view.clone();
-        std::thread::spawn(move || loop {
-            view.tick();
-            std::thread::sleep(Duration::from_millis(20));
+        std::thread::spawn(move || {
+            let mut asked = Instant::now();
+            loop {
+                view.tick();
+                // until a path is up the mapping is kept by STUN, then by the tunnel's own keepalives
+                if !view.selected.load(Ordering::Relaxed) && asked.elapsed() >= Duration::from_secs(10) {
+                    asked = Instant::now();
+                    view.keeper.ask(&view.socks.v4);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
         });
     }
 

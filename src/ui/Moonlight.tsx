@@ -12,6 +12,7 @@ import {
   hasSunshine,
   installSunshine,
   loadDevices,
+  prewarmSunshine,
   refreshClients,
   refreshStatus,
   removeViewer,
@@ -512,7 +513,7 @@ function failText(w: MlWatch, who: string): string {
   if (reason === "timeout") return t("sun.watch.timeout", { who });
   if (reason === "denied") return t("sun.watch.denied", { who });
   if (reason === "busy") return t("sun.watch.busy", { who });
-  if (reason === "punch") return t("sun.watch.punch");
+  if (reason === "punch") return punchText(detail);
   if (reason === "unreachable") return t("sun.watch.unreachable", { who });
   if (reason === "pairing") return t("sun.watch.pairing", { error: detail || "?" });
   if (reason === "no-app") return t("sun.watch.noApp");
@@ -520,11 +521,29 @@ function failText(w: MlWatch, who: string): string {
   return t("ml.failed", { error: w.error });
 }
 
+const NAT_NAMES: Record<string, Key> = {
+  open: "sun.nat.open",
+  cone: "sun.nat.cone",
+  symmetric: "sun.nat.symmetric",
+  blocked: "sun.nat.blocked",
+};
+
+/** Why punching through failed, from the NAT of both sides ("mine:theirs"). */
+function punchText(detail: string): string {
+  const [mine = "", theirs = ""] = detail.split(":");
+  const name = (n: string) => t(NAT_NAMES[n] ?? "sun.nat.unknown");
+  const both = t("sun.watch.punchNat", { mine: name(mine), theirs: name(theirs) });
+  if (mine === "blocked") return `${t("sun.watch.punchBlockedMine")} ${both}`;
+  if (theirs === "blocked") return `${t("sun.watch.punchBlockedTheirs")} ${both}`;
+  if (mine === "symmetric" && theirs === "symmetric") return `${t("sun.watch.punchBothStrict")} ${both}`;
+  return `${t("sun.watch.punch")} ${both}`;
+}
+
 /** Where watching a Sunshine stream stands, on its tile until the picture comes. */
 export function SunWatchStatus({ identity, userId }: { identity: string; userId: string }) {
-  const w = useStore(ml, (s) => s.watching);
+  const w = useStore(ml, (s) => s.watches[identity]);
   const who = displayName(userId);
-  if (!w || w.identity !== identity) {
+  if (!w) {
     return (
       <div className="ml-status">
         <span>{t("sun.watch.idle")}</span>
@@ -540,7 +559,15 @@ export function SunWatchStatus({ identity, userId }: { identity: string; userId:
       {(w.status === "connecting" || (w.status === "live" && !w.fps)) && (
         <>
           <div className="spinner" />
-          <span>{w.stage ? t("ml.stage", { stage: w.stage }) : w.path ? t("ml.connecting") : t("sun.watch.punching")}</span>
+          <span>
+            {w.stage === "pair"
+              ? t("sun.watch.pairingNow")
+              : w.stage
+                ? t("ml.stage", { stage: w.stage })
+                : w.path
+                  ? t("ml.connecting")
+                  : t("sun.watch.punching")}
+          </span>
         </>
       )}
       {w.status === "approval" && (
@@ -573,8 +600,8 @@ const PATH_NAMES: Record<string, Key> = { lan: "sun.path.lan", v6: "sun.path.v6"
 
 /** Picture size, rate and the path of the Sunshine stream being watched, for the tile label. */
 export function useSunWatchInfo(identity: string): string {
-  const w = useStore(ml, (s) => s.watching);
-  if (!w || w.identity !== identity || w.status !== "live" || !w.fps) return "";
+  const w = useStore(ml, (s) => s.watches[identity]);
+  if (!w || w.status !== "live" || !w.fps) return "";
   const path = PATH_NAMES[w.path] ? ` · ${t(PATH_NAMES[w.path])}${w.rtt ? ` ${w.rtt} ${t("sun.ms")}` : ""}` : "";
   return `${w.height}p · ${t("net.fps", { n: w.fps })}${path}`;
 }
@@ -586,9 +613,9 @@ export function SunsharePane({ onStarted, onClose }: { onStarted: () => void; on
   const state = useStore(sun, (s) => s);
   useEffect(() => {
     void checkNet();
-    void refreshStatus();
+    void refreshStatus().then(() => prewarmSunshine());
   }, []);
-  const starting = state.busy === "start" || state.busy === "install" || !!state.status?.starting;
+  const starting = state.busy === "start" || state.busy === "install";
   return (
     <div className="sun-pane">
       <p className="sub">{t("sun.pane.intro")}</p>

@@ -97,9 +97,21 @@ import {
   type MicState,
   type MicTest,
 } from "../voice/audio.ts";
-import { CAMERA_FPS, CAMERA_HEIGHTS, voice, type DeviceInfo, type InputMode, type Limiter, type TileLook } from "../voice/voice.ts";
-import { Avatar, AvatarDrop } from "./Avatar.tsx";
+import {
+  CAMERA_FPS,
+  CAMERA_HEIGHTS,
+  frameOf,
+  voice,
+  type BannerFrame,
+  type BannerPlace,
+  type DeviceInfo,
+  type InputMode,
+  type Limiter,
+  type TileLook,
+} from "../voice/voice.ts";
+import { Avatar, AvatarDrop, useMxc } from "./Avatar.tsx";
 import { Banner, splitEmoji } from "./Banner.tsx";
+import { BannerFramer } from "./BannerFramer.tsx";
 import { EmojiPicker } from "./EmojiPicker.tsx";
 import { Cropper } from "./Cropper.tsx";
 import { MoonlightTab } from "./Moonlight.tsx";
@@ -230,149 +242,117 @@ const TILE_MODES: { id: TileLook["mode"]; name: Key }[] = [
   { id: "image", name: "tile.image" },
 ];
 
-type Frame = { zoom: number; x: number; y: number };
-
-function frameOf(look: TileLook): Frame {
-  return { zoom: look.zoom ?? 1, x: look.x ?? 50, y: look.y ?? 50 };
-}
-
 /**
  * The own banner in one of the places it shows: the profile card or a call
- * tile. With a picture, dragging moves it and the wheel enlarges it; a
- * picture dropped from the explorer becomes the new banner.
+ * tile. A click opens the framing of that place; a picture dropped from the
+ * explorer becomes the new banner.
  */
 function BannerSpot({
   look,
   avatar,
   name,
   kind,
-  onFrame,
-  onCommit,
+  onOpen,
   onFile,
 }: {
   look: TileLook;
   avatar: string;
   name: string;
-  kind: "card" | "tile";
-  onFrame: (f: Frame) => void;
-  onCommit: () => void;
+  kind: BannerPlace;
+  onOpen: () => void;
   onFile: (f: File) => void;
 }) {
-  const drag = useRef<{ x: number; y: number; from: Frame; w: number; h: number } | null>(null);
   const drop = useImageDrop(onFile);
-  const movable = look.mode === "image";
-  const frame = frameOf(look);
-  const wheelTimer = useRef(0);
-
+  const framable = look.mode === "image";
   return (
     <div className={`banner-spot ${kind}`}>
       <span className="state">{kind === "card" ? t("tile.where.card") : t("tile.where.tile")}</span>
       <div
-        className={`banner-spot-box ${movable ? "movable" : ""} ${drop.over ? "drop-over" : ""}`}
+        className={`banner-spot-box ${framable ? "framable" : ""} ${drop.over ? "drop-over" : ""}`}
         {...drop.bind}
-        onPointerDown={(e) => {
-          if (!movable || e.button !== 0) return;
-          e.currentTarget.setPointerCapture(e.pointerId);
-          const r = e.currentTarget.getBoundingClientRect();
-          drag.current = { x: e.clientX, y: e.clientY, from: frame, w: r.width, h: r.height };
-        }}
-        onPointerMove={(e) => {
-          const d = drag.current;
-          if (!d) return;
-          // the picture follows the mouse: the point in view moves the other way
-          const k = 100 / d.from.zoom;
-          onFrame({
-            zoom: d.from.zoom,
-            x: Math.max(0, Math.min(100, d.from.x - ((e.clientX - d.x) / d.w) * k)),
-            y: Math.max(0, Math.min(100, d.from.y - ((e.clientY - d.y) / d.h) * k)),
-          });
-        }}
-        onPointerUp={() => {
-          if (!drag.current) return;
-          drag.current = null;
-          onCommit();
-        }}
-        onWheel={(e) => {
-          if (!movable) return;
-          const zoom = Math.max(1, Math.min(4, frame.zoom * (e.deltaY < 0 ? 1.08 : 1 / 1.08)));
-          onFrame({ ...frame, zoom });
-          window.clearTimeout(wheelTimer.current);
-          wheelTimer.current = window.setTimeout(onCommit, 350);
-        }}
+        title={framable ? t("tile.frame.open") : ""}
+        onClick={() => framable && onOpen()}
       >
         {kind === "card" ? (
-          <Banner look={look} avatar={avatar} className="banner-preview card">
+          <Banner look={look} avatar={avatar} place="card" className="banner-preview card">
             <div className="banner-preview-who">
-              <Avatar mxc={avatar} name={name || "?"} size={46} />
+              <Avatar mxc={avatar} name={name || "?"} size={40} />
               <b className="ellipsis">{name}</b>
             </div>
           </Banner>
         ) : (
-          <Banner look={look} avatar={avatar} className="banner-preview tile">
+          <Banner look={look} avatar={avatar} place="tile" className="banner-preview tile">
             <Avatar mxc={avatar} name={name || "?"} size={48} className="banner-preview-face" />
             <span className="banner-preview-label ellipsis">{name}</span>
           </Banner>
         )}
+        {framable && !drop.over && <span className="banner-spot-edit">{t("tile.frame.open")}</span>}
         {drop.over && <div className="drop-veil">{t("tile.dropHere")}</div>}
       </div>
     </div>
   );
 }
 
+/** The picture being framed: the current banner, or a new file that is uploaded on "done". */
+type Framing = { place: BannerPlace; file: File | null; src: string };
+
 /**
  * The own banner: the top of the profile card and the background of the tile
  * in calls. A color from the avatar, an own color or picture, and up to three
- * emoji over it. Both places are previewed side by side; a picture can be
- * moved and enlarged right there, and the framing is the same everywhere.
+ * emoji over it. Both places are previewed side by side; a picture is framed
+ * for each place apart, as an avatar is cropped.
  */
 function BannerSection({ avatar, name }: { avatar: string; name: string }) {
   const look = useTileLook();
   const [pickAt, setPickAt] = useState<{ left: number; top: number } | null>(null);
-  // the framing while it is being dragged; it goes out to others when let go
-  const [draft, setDraft] = useState<Frame | null>(null);
+  const [framing, setFraming] = useState<Framing | null>(null);
+  const [saving, setSaving] = useState(false);
   const file = useRef<HTMLInputElement>(null);
   const emoji = splitEmoji(look.emoji ?? "");
-  const shown: TileLook = draft ? { ...look, ...draft } : look;
-  const frame = frameOf(shown);
-  const latest = useRef(shown);
-  latest.current = shown;
+  const current = useMxc(look.mode === "image" ? (look.image ?? "") : "");
 
-  const upload = async (f: File) => {
-    const mxc = await uploadBanner(f);
-    if (mxc) setTileLook({ mode: "image", image: mxc, zoom: 1, x: 50, y: 50 });
+  // a new file is shown from memory until it is uploaded
+  useEffect(() => {
+    const f = framing?.file;
+    if (!f) return;
+    const url = URL.createObjectURL(f);
+    setFraming((fr) => (fr && fr.file === f ? { ...fr, src: url } : fr));
+    return () => URL.revokeObjectURL(url);
+  }, [framing?.file]);
+
+  const pickFile = (f: File, place: BannerPlace = "card") => setFraming({ place, file: f, src: "" });
+  const openFrame = (place: BannerPlace) => current && setFraming({ place, file: null, src: current });
+
+  const save = async (frames: Record<BannerPlace, BannerFrame>) => {
+    const fr = framing;
+    if (!fr) return;
+    // older apps know one framing: they get the card's
+    const legacy = frames.card;
+    if (fr.file) {
+      setSaving(true);
+      const mxc = await uploadBanner(fr.file);
+      setSaving(false);
+      if (!mxc) return;
+      setTileLook({ mode: "image", image: mxc, ...legacy, card: frames.card, tile: frames.tile });
+    } else {
+      setTileLook({ ...legacy, card: frames.card, tile: frames.tile });
+    }
+    setFraming(null);
   };
-  const commit = () => {
-    const f = frameOf(latest.current);
-    setTileLook(f);
-    setDraft(null);
-  };
+
+  const fresh = { zoom: 1, x: 50, y: 50 };
+  const frames: Record<BannerPlace, BannerFrame> = framing?.file
+    ? { card: fresh, tile: fresh }
+    : { card: frameOf(look, "card"), tile: frameOf(look, "tile") };
 
   return (
     <>
       <div className="section-title">{t("tile.title")}</div>
       <div className="banner-spots">
-        <BannerSpot look={shown} avatar={avatar} name={name} kind="card" onFrame={setDraft} onCommit={commit} onFile={(f) => void upload(f)} />
-        <BannerSpot look={shown} avatar={avatar} name={name} kind="tile" onFrame={setDraft} onCommit={commit} onFile={(f) => void upload(f)} />
+        <BannerSpot look={look} avatar={avatar} name={name} kind="card" onOpen={() => openFrame("card")} onFile={(f) => pickFile(f, "card")} />
+        <BannerSpot look={look} avatar={avatar} name={name} kind="tile" onOpen={() => openFrame("tile")} onFile={(f) => pickFile(f, "tile")} />
       </div>
-      {shown.mode === "image" && (
-        <div className="banner-zoom">
-          <span className="state">{t("tile.zoom", { n: Math.round(frame.zoom * 100) })}</span>
-          <input
-            type="range"
-            min={1}
-            max={4}
-            step={0.01}
-            value={frame.zoom}
-            onChange={(e) => setDraft({ ...frame, zoom: Number(e.target.value) })}
-            onPointerUp={commit}
-            onKeyUp={commit}
-          />
-          <button className="ghost small" disabled={frame.zoom === 1 && frame.x === 50 && frame.y === 50} onClick={() => setTileLook({ zoom: 1, x: 50, y: 50 })}>
-            {t("tile.reset")}
-          </button>
-        </div>
-      )}
-      <span className="state">{shown.mode === "image" ? t("tile.moveHint") : t("tile.dropHint")}</span>
+      <span className="state">{look.mode === "image" ? t("tile.moveHint") : t("tile.dropHint")}</span>
       <div className="banner-controls">
         <Seg
           value={look.mode}
@@ -384,6 +364,9 @@ function BannerSection({ avatar, name }: { avatar: string; name: string }) {
           <div className="row left">
             <button className="ghost small" onClick={() => file.current?.click()}>
               {t("tile.imageChange")}
+            </button>
+            <button className="ghost small" disabled={!current} onClick={() => openFrame("card")}>
+              {t("tile.frame.open")}
             </button>
           </div>
         )}
@@ -422,9 +405,21 @@ function BannerSection({ avatar, name }: { avatar: string; name: string }) {
         onChange={(e) => {
           const f = e.target.files?.[0];
           e.target.value = "";
-          if (f) void upload(f);
+          if (f) pickFile(f);
         }}
       />
+      {framing?.src && (
+        <BannerFramer
+          src={framing.src}
+          frames={frames}
+          start={framing.place}
+          avatar={avatar}
+          name={name}
+          busy={saving}
+          onDone={(f) => void save(f)}
+          onCancel={() => setFraming(null)}
+        />
+      )}
       {pickAt && (
         <EmojiPicker
           className="floating"

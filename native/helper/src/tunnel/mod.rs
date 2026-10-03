@@ -115,12 +115,19 @@ impl Prober {
         }
     }
 
-    /// Every 100 ms at first, then every 400 ms.
+    /// Every 50 ms at first, every 100 ms up to the eighth second, then every 300 ms.
     pub fn tick(&mut self, link: &Link, socks: &Socks) {
         if self.done {
             return;
         }
-        let every = if self.start.elapsed() < Duration::from_secs(6) { 100 } else { 400 };
+        let age = self.start.elapsed();
+        let every = if age < Duration::from_secs(3) {
+            50
+        } else if age < Duration::from_secs(8) {
+            100
+        } else {
+            300
+        };
         if self.last.map(|t| t.elapsed() < Duration::from_millis(every)).unwrap_or(false) {
             return;
         }
@@ -140,10 +147,10 @@ impl Prober {
         self.first.get_or_insert_with(Instant::now);
     }
 
-    /// The path to use, once answers had 300 ms to come in.
+    /// The path to use, once answers had 100 ms to come in: a path through the home network answers about as fast.
     pub fn pick(&mut self) -> Option<(SocketAddr, u64)> {
         let first = self.first?;
-        if first.elapsed() < Duration::from_millis(300) {
+        if first.elapsed() < Duration::from_millis(100) {
             return None;
         }
         let class = |a: &SocketAddr| if wire::is_lan(a) { 3 } else if a.is_ipv6() { 2 } else { 1 };

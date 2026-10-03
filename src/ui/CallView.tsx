@@ -281,7 +281,7 @@ function TileView({
         </>
       ) : (
         <>
-          <BannerPicture look={look} />
+          <BannerPicture look={look} place="tile" />
           <EmojiDeco emoji={look?.emoji} scale={Math.max(0.7, Math.min(1.6, (((style?.height as number) || 120) / 160)))} />
           <Avatar mxc={avatarMxc(member.userId, roomId)} name={who} size={Math.max(40, Math.min(96, ((style?.height as number) || 120) * 0.42))} />
         </>

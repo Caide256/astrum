@@ -6880,17 +6880,35 @@ button.unread-bar:active:not(:disabled) {
   touch-action: none;
 }
 
-.banner-spot-box.movable {
-  cursor: grab;
+.banner-spot-box.framable {
+  cursor: pointer;
 }
 
-.banner-spot-box.movable:active {
-  cursor: grabbing;
+/* "adjust the framing" over a preview with a picture, on hover */
+.banner-spot-edit {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
 }
 
+.banner-spot-box.framable:hover .banner-spot-edit {
+  opacity: 1;
+}
+
+/* the shape of the profile card's banner: 420 by 108 */
 .banner-preview.card {
   width: 300px;
-  height: 88px;
+  height: 77px;
 }
 
 .banner-preview.tile {
@@ -6939,21 +6957,6 @@ button.unread-bar:active:not(:disabled) {
   pointer-events: none;
 }
 
-.banner-zoom {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 2px 0 4px;
-}
-
-.banner-zoom input[type="range"] {
-  flex: 1;
-  max-width: 280px;
-}
-
-.banner-zoom .state {
-  min-width: 110px;
-}
 
 .banner-controls {
   flex: 1;
@@ -7096,7 +7099,8 @@ button.unread-bar:active:not(:disabled) {
   max-height: min(420px, 70vh);
   border-radius: 12px;
   border: 1px solid var(--line);
-  background: var(--bg-1);
+  /* solid: a see-through panel over the call is unreadable */
+  background: var(--pop-1);
   color: var(--text);
   box-shadow: 0 14px 38px var(--shadow);
   animation: slide-up 0.16s ease-out;
@@ -7125,7 +7129,7 @@ button.unread-bar:active:not(:disabled) {
   min-width: 0;
   padding: 8px 4px;
   border-radius: 9px;
-  background: var(--bg-2);
+  background: var(--pop-2);
   font-size: 12px;
 }
 
@@ -7575,4 +7579,88 @@ button.unread-bar:active:not(:disabled) {
 
 .sun-more[open] summary {
   color: var(--text);
+}
+
+/* framing a banner picture: the picture under a window of the place's shape */
+.modal.framer {
+  width: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.modal.framer .sub {
+  max-width: 500px;
+  text-align: center;
+}
+
+.modal.framer .row {
+  align-self: stretch;
+  margin-top: 0;
+}
+
+.framer-stage {
+  position: relative;
+  overflow: hidden;
+  border-radius: 12px;
+  background: #000;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.framer-stage:active {
+  cursor: grabbing;
+}
+
+.framer-stage img {
+  position: absolute;
+  max-width: none;
+  pointer-events: none;
+}
+
+/* everything outside the window is dimmed */
+.framer-window {
+  position: absolute;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  border-radius: 10px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+.framer-window.card {
+  border-radius: 12px 12px 0 0;
+}
+
+/* where the avatar sits over the background, so the face is not covered */
+.framer-who {
+  position: absolute;
+  opacity: 0.85;
+}
+
+.framer-who.card {
+  left: 20px;
+  bottom: -30px;
+}
+
+.framer-who.tile {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.framer-zoom {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  align-self: stretch;
+}
+
+.framer-zoom input[type="range"] {
+  flex: 1;
+}
+
+.framer-zoom .state {
+  min-width: 110px;
 }

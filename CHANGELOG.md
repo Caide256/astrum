@@ -5,6 +5,50 @@ GitHub uses the same two sections, and the app shows the one of its language in
 the update window. Mentions like `@everyone` always go in backticks: GitHub takes
 a bare mention for a GitHub user and lists that user as a contributor of the release.
 
+## 0.9.2
+
+<details>
+<summary>English</summary>
+
+### Streams through Sunshine
+- **Several streams at once.** Each watched stream has its own tunnel and decoder; watching one no longer stops another.
+- **Streaming and watching at the same time.** Every Sunshine start picks free ports of its own, so two people can stream and watch each other at once (before, both used the same ports and it worked only now and then).
+- **More reliable connections.** The outside address of the tunnel is kept alive while waiting for a viewer (routers forgot it after half a minute or so, and later viewers could not get through), the tunnel's port is taken from 20000-29999 (away from ranges routers often pass to a server, such as 50000-60000 for LiveKit), punching starts faster and tries longer.
+- **Faster joining.** Joining a stream again takes about 3 seconds: fewer steps, a quicker network check, and the streamer's desktop is started right after the stream starts (Sunshine re-checks every encoder on the first launch, seconds long). The share dialog starts Sunshine ahead while you pick the monitor, so starting a stream is quick too.
+- **"The client is not authorized. Certificate verification failed."** fixed: Sunshine cannot pair a certificate it already knows a second time. The app now makes a new identity and pairs it by itself.
+- The error message after a failed connection says what NAT each side is behind and names the usual culprits: zapret with Game Filter on, a VPN in TUN mode, the firewall.
+
+### Profile background
+- The background picture is framed like an avatar is cropped: the picture moves under a window of the place's shape, the wheel or the slider enlarges it. The profile card and the call tile are framed apart; the picture is the same.
+
+### Other
+- Push-to-talk works with Shift, Alt or Ctrl held down (sprinting and the like in games).
+- Started with Windows into the tray, the app no longer opens its window when it was maximized last time.
+- The soundboard panel is no longer see-through.
+
+</details>
+
+<details>
+<summary>Русский</summary>
+
+### Стримы через Sunshine
+- **Несколько стримов сразу.** У каждого стрима свой туннель и свой декодер; второй стрим больше не выключает первый.
+- **Стримить и смотреть одновременно.** Sunshine при каждом запуске берёт свободные порты, так что двое могут стримить и смотреть друг друга одновременно (раньше у всех были одни и те же порты, и это работало через раз).
+- **Надёжнее подключение.** Внешний адрес туннеля поддерживается, пока ждём зрителя (роутеры забывали его примерно через полминуты, и зрители, пришедшие позже, не могли пробиться). Порт туннеля берётся из 20000-29999, подальше от диапазонов, которые часто пробрасывают на сервер (например, 50000-60000 под LiveKit). Пробивка начинается быстрее и длится дольше.
+- **Быстрее вход.** Повторный вход в стрим занимает около 3 секунд: меньше шагов, быстрее проверка сети, а рабочий стол стримера запускается сразу после старта стрима (при первом запуске Sunshine заново проверяет все кодировщики, это секунды). Окно демонстрации заранее поднимает Sunshine, пока выбираешь монитор, поэтому сам стрим тоже запускается быстро.
+- **Исправлено «The client is not authorized. Certificate verification failed.»:** Sunshine не умеет второй раз спарить уже знакомый сертификат. Программа теперь сама делает новую личность и спаривается заново.
+- В ошибке после неудачного подключения видно, какой NAT у каждой стороны, и названы частые виновники: zapret с включённым Game Filter, VPN в режиме TUN, файрвол.
+
+### Фон профиля
+- Картинка фона кадрируется так же, как аватарка: картинка двигается под окном нужной формы, колесо или ползунок приближают. Карточка профиля и плитка в звонке настраиваются отдельно, картинка одна.
+
+### Прочее
+- Рация работает с зажатым Shift, Alt или Ctrl (бег и прочее в играх).
+- При запуске с Windows в трей окно больше не открывается, если в прошлый раз оно было развёрнуто.
+- Панель звуков больше не просвечивает.
+
+</details>
+
 ## 0.9.1
 
 <details>

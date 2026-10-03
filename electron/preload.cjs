@@ -37,19 +37,23 @@ contextBridge.exposeInMainWorld("desktop", {
   setMenuLabels: (labels) => ipcRenderer.invoke("app:menu-labels", labels),
 
   mlInfo: (host) => ipcRenderer.invoke("app:ml-info", host),
-  mlPair: (host, pin, name) => ipcRenderer.invoke("app:ml-pair", host, pin, name),
+  mlPair: (host, pin, name, wid) => ipcRenderer.invoke("app:ml-pair", host, pin, name, wid),
   mlForget: (host) => ipcRenderer.invoke("app:ml-forget", host),
-  mlCancel: () => ipcRenderer.invoke("app:ml-cancel"),
-  mlApps: (host) => ipcRenderer.invoke("app:ml-apps", host),
-  mlQuit: (host) => ipcRenderer.invoke("app:ml-quit", host),
-  mlStart: (opts) => ipcRenderer.invoke("app:ml-start", opts),
-  mlStop: () => ipcRenderer.invoke("app:ml-stop"),
-  mlIdr: () => ipcRenderer.invoke("app:ml-idr"),
-  onMlEvent: (cb) => listen("app:ml-event", cb),
-  onMlAudio: (cb) => {
-    const handler = (_e, chunk) => cb(chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength));
-    ipcRenderer.on("app:ml-audio", handler);
-    return () => ipcRenderer.removeListener("app:ml-audio", handler);
+  mlReset: () => ipcRenderer.invoke("app:ml-reset"),
+  mlCancel: (wid) => ipcRenderer.invoke("app:ml-cancel", wid),
+  mlStart: (wid, opts) => ipcRenderer.invoke("app:ml-start", wid, opts),
+  mlStop: (wid) => ipcRenderer.invoke("app:ml-stop", wid),
+  mlIdr: (wid) => ipcRenderer.invoke("app:ml-idr", wid),
+  // events of every watch: the callback gets the watch id first
+  onMlEvent: (cb) => {
+    const handler = (_e, wid, json) => cb(wid, json);
+    ipcRenderer.on("app:ml-event", handler);
+    return () => ipcRenderer.removeListener("app:ml-event", handler);
+  },
+  onMlFrame: (cb) => {
+    const handler = (_e, wid, chunk) => cb(wid, chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength));
+    ipcRenderer.on("app:ml-frame", handler);
+    return () => ipcRenderer.removeListener("app:ml-frame", handler);
   },
 
   sunStatus: () => ipcRenderer.invoke("app:sun-status"),
@@ -65,22 +69,18 @@ contextBridge.exposeInMainWorld("desktop", {
   sunPeer: (id, key, nat, cands) => ipcRenderer.invoke("app:sun-peer", id, key, nat, cands),
   sunDrop: (id) => ipcRenderer.invoke("app:sun-drop", id),
   netCheck: () => ipcRenderer.invoke("app:net-check"),
-  tunStart: (base) => ipcRenderer.invoke("app:tun-start", base),
-  tunPeer: (sid, key, nat, cands) => ipcRenderer.invoke("app:tun-peer", sid, key, nat, cands),
-  tunStop: () => ipcRenderer.invoke("app:tun-stop"),
-  onTunEvent: (cb) => listen("app:tun-event", cb),
+  sunPrewarm: (settings) => ipcRenderer.invoke("app:sun-prewarm", settings),
+  tunStart: (wid, base) => ipcRenderer.invoke("app:tun-start", wid, base),
+  tunPeer: (wid, sid, key, nat, cands) => ipcRenderer.invoke("app:tun-peer", wid, sid, key, nat, cands),
+  onTunEvent: (cb) => {
+    const handler = (_e, wid, json) => cb(wid, json);
+    ipcRenderer.on("app:tun-event", handler);
+    return () => ipcRenderer.removeListener("app:tun-event", handler);
+  },
   onTunPcm: (cb) => {
-    const handler = (_e, chunk) => cb(chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength));
+    const handler = (_e, wid, chunk) => cb(wid, chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength));
     ipcRenderer.on("app:tun-pcm", handler);
     return () => ipcRenderer.removeListener("app:tun-pcm", handler);
-  },
-  onMlFrame: (cb) => {
-    const handler = (_e, chunk) => {
-      const copy = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
-      cb(copy);
-    };
-    ipcRenderer.on("app:ml-frame", handler);
-    return () => ipcRenderer.removeListener("app:ml-frame", handler);
   },
 
   windowAction: (action) => ipcRenderer.invoke("app:window", action),

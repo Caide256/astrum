@@ -7,9 +7,15 @@
 //!                                              request, so the host's owner can tell requests apart
 //!   moonlight apps <dir> <host>                the host's apps
 //!   moonlight stream <dir> <host> <app> <w> <h> <fps> <kbps> <formats> [host audio 0/1] [packet size]
-//!                                              stream to stdout in records (see below)
+//!                                              stream to stdout in records (see below); app 0 is the
+//!                                              host's desktop, looked up here. Fails with "not paired"
+//!                                              before anything starts when the host does not know us
 //!   moonlight quit <dir> <host>                end the running session on the host
 //!   moonlight forget <dir> <host>              drop the pinned certificate of a host
+//!   moonlight reset <dir>                      make a new client identity: every host pairs again
+//!   moonlight warm <dir> <host>                start the host's desktop without streaming: Sunshine
+//!                                              checks every encoder on a launch (seconds), a
+//!                                              resume of a running app skips that
 //!
 //! `dir` keeps this client's identity: key, certificate, unique id, and the
 //! certificates of paired hosts. `host` is an address, optionally with the
@@ -47,7 +53,7 @@ use x509_cert::der::{DecodePem, Encode, EncodePem};
 use x509_cert::name::Name;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::spki::SubjectPublicKeyInfoOwned;
-use x509_cert::time::Validity;
+use x509_cert::time::{Time, Validity};
 use x509_cert::Certificate;
 
 use net::{http_get, https_get, xml_blocks, xml_status, xml_value};
@@ -130,12 +136,18 @@ fn identity(dir: &Path) -> Result<Identity, String> {
     Ok(Identity { unique_id, cert_pem, cert_der, cert_signature, key, key_pkcs8 })
 }
 
-/// A self-signed RSA certificate, as Moonlight clients present to hosts.
+/// A self-signed RSA certificate, as Moonlight clients present to hosts. It is
+/// valid from two days ago: a host whose clock is behind would otherwise find
+/// a certificate made just now "not yet valid" and refuse it (HTTP 401).
 fn make_cert(key: &RsaPrivateKey) -> Result<String, String> {
     let signer = SigningKey::<Sha256>::new(key.clone());
     let spki = SubjectPublicKeyInfoOwned::from_key(key.to_public_key()).map_err(|e| e.to_string())?;
     let serial = SerialNumber::new(&[1]).map_err(|e| e.to_string())?;
-    let validity = Validity::from_now(Duration::from_secs(20 * 365 * 24 * 3600)).map_err(|e| e.to_string())?;
+    let now = std::time::SystemTime::now();
+    let validity = Validity {
+        not_before: Time::try_from(now - Duration::from_secs(2 * 24 * 3600)).map_err(|e| e.to_string())?,
+        not_after: Time::try_from(now + Duration::from_secs(20 * 365 * 24 * 3600)).map_err(|e| e.to_string())?,
+    };
     let subject = Name::from_str("CN=NVIDIA GameStream Client").map_err(|e| e.to_string())?;
     let builder = CertificateBuilder::new(Profile::Root, serial, validity, subject, spki, &signer).map_err(|e| e.to_string())?;
     let cert = builder.build::<Signature>().map_err(|e| e.to_string())?;
@@ -365,21 +377,25 @@ fn unpair(addr: &str, port: u16, id: &Identity) {
 
 /* -------------------------------------------------------------- apps, quit */
 
-fn apps(dir: &Path, host: &str) -> Result<String, String> {
-    let id = identity(dir)?;
+/// The host's apps as (id, title).
+fn app_list(dir: &Path, id: &Identity, host: &str, info: &HostInfo) -> Result<Vec<(i64, String)>, String> {
     let (addr, _) = split_host(host);
-    let info = host_info(dir, &id, host)?;
     let server = pinned_cert(dir, host)?;
     let path = format!("/applist?uniqueid={}&uuid={}", id.unique_id, uuid());
     let res = https_get(&addr, info.https_port, &path, &id.cert_der, &id.key_pkcs8, &server, QUICK)?;
     xml_status(&res.body)?;
-    let list: Vec<String> = xml_blocks(&res.body, "App")
+    Ok(xml_blocks(&res.body, "App")
         .into_iter()
-        .map(|b| {
-            let title = xml_value(b, "AppTitle").unwrap_or_default();
-            let id = xml_value(b, "ID").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
-            format!("{{\"id\":{id},\"title\":{}}}", json_str(&title))
-        })
+        .map(|b| (xml_value(b, "ID").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0), xml_value(b, "AppTitle").unwrap_or_default()))
+        .collect())
+}
+
+fn apps(dir: &Path, host: &str) -> Result<String, String> {
+    let id = identity(dir)?;
+    let info = host_info(dir, &id, host)?;
+    let list: Vec<String> = app_list(dir, &id, host, &info)?
+        .into_iter()
+        .map(|(id, title)| format!("{{\"id\":{id},\"title\":{}}}", json_str(&title)))
         .collect();
     Ok(format!("[{}]", list.join(",")))
 }
@@ -426,8 +442,15 @@ extern "C" {
 }
 
 static OUT: Mutex<()> = Mutex::new(());
+/// A warm-up stream writes no records: the caller reads one JSON answer.
+static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// A frame came: the session is fully up and can end the normal way.
+static GOT_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn emit(kind: u8, payload: &[u8]) {
+    if QUIET.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     let _guard = OUT.lock();
     let mut out = std::io::stdout().lock();
     let mut head = [0u8; 5];
@@ -445,6 +468,10 @@ fn emit_event(json: String) {
 
 extern "C" fn on_frame(data: *const c_uchar, length: c_int, number: c_int, frame_type: c_int, format: c_int, width: c_int, height: c_int, pts: c_ulonglong) {
     if data.is_null() || length <= 0 {
+        return;
+    }
+    GOT_FRAME.store(true, std::sync::atomic::Ordering::SeqCst);
+    if QUIET.load(std::sync::atomic::Ordering::SeqCst) {
         return;
     }
     let bytes = unsafe { std::slice::from_raw_parts(data, length as usize) };
@@ -490,15 +517,40 @@ extern "C" fn on_event(kind: c_int, code: c_int, text: *const c_char) {
     }
 }
 
+/// The host's desktop app, started now so the first viewer only resumes it.
+/// A launch leaves a session waiting for its client: a short real stream
+/// takes it (connects and stops), or the next viewer's connection would run
+/// into it. Nothing goes to stdout but the answer.
+fn warm(dir: &Path, host: &str) -> Result<&'static str, String> {
+    let id = identity(dir)?;
+    let info = host_info(dir, &id, host)?;
+    if !info.paired {
+        return Err("not paired".into());
+    }
+    if info.current_game != 0 {
+        return Ok("running");
+    }
+    QUIET.store(true, std::sync::atomic::Ordering::SeqCst);
+    stream(dir, host, 0, 1280, 720, 30, 2000, 1, true, 1392, true)?;
+    Ok("launched")
+}
+
 #[allow(clippy::too_many_arguments)]
-fn stream(dir: &Path, host: &str, app: i64, width: i32, height: i32, fps: i32, kbps: i32, formats: i32, host_audio: bool, packet: i32) -> Result<(), String> {
+fn stream(dir: &Path, host: &str, app: i64, width: i32, height: i32, fps: i32, kbps: i32, formats: i32, host_audio: bool, packet: i32, warm: bool) -> Result<(), String> {
     let id = identity(dir)?;
     let (addr, _) = split_host(host);
     let info = host_info(dir, &id, host)?;
-    if !info.paired {
-        return Err("not paired with this host".into());
+    if !info.paired || pinned_cert(dir, host).is_err() {
+        return Err("not paired".into());
     }
     let server = pinned_cert(dir, host)?;
+    // 0: the host's desktop, found here instead of in a separate call
+    let app = if app != 0 {
+        app
+    } else {
+        let list = app_list(dir, &id, host, &info)?;
+        list.iter().find(|(_, t)| t.to_ascii_lowercase().contains("desktop")).or(list.first()).map(|(i, _)| *i).ok_or("no-app")?
+    };
 
     let mut rikey = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut rikey);
@@ -517,7 +569,12 @@ fn stream(dir: &Path, host: &str, app: i64, width: i32, height: i32, fps: i32, k
         // the streamer keeps hearing the own sound unless the viewer asks otherwise
         if host_audio { 1 } else { 0 },
     );
-    let res = https_get(&addr, info.https_port, &path, &id.cert_der, &id.key_pkcs8, &server, Duration::from_secs(30))?;
+    let mut res = https_get(&addr, info.https_port, &path, &id.cert_der, &id.key_pkcs8, &server, Duration::from_secs(30))?;
+    // the desktop was started meanwhile (the streamer's app warms it up): join it instead
+    if verb == "launch" && xml_status(&res.body).is_err() {
+        let again = path.replacen("/launch?", "/resume?", 1);
+        res = https_get(&addr, info.https_port, &again, &id.cert_der, &id.key_pkcs8, &server, Duration::from_secs(30))?;
+    }
     xml_status(&res.body)?;
     let ok = xml_value(&res.body, "gamesession").or_else(|| xml_value(&res.body, "resume")).unwrap_or_default();
     if ok == "0" || ok.is_empty() {
@@ -551,6 +608,16 @@ fn stream(dir: &Path, host: &str, app: i64, width: i32, height: i32, fps: i32, k
     if rc != 0 {
         return Err(format!("the stream did not start (error {rc})"));
     }
+    if warm {
+        // stopped before the first frame, the session would linger on the host until its ping
+        // timeout and get in the way of the first viewer: it ends once the picture flows
+        let since = std::time::Instant::now();
+        while !GOT_FRAME.load(std::sync::atomic::Ordering::SeqCst) && since.elapsed() < Duration::from_secs(6) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        unsafe { ml_stop() };
+        return Ok(());
+    }
 
     // the app talks to us over stdin: a keyframe request, or the end
     let stdin = std::io::stdin();
@@ -571,8 +638,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let cmd = args.first().map(String::as_str).unwrap_or("");
     let dir = PathBuf::from(args.get(1).cloned().unwrap_or_default());
     let host = args.get(2).cloned().unwrap_or_default();
-    if dir.as_os_str().is_empty() || host.is_empty() {
-        return Err("usage: moonlight info|pair|apps|stream|quit <dir> <host> ...".into());
+    if dir.as_os_str().is_empty() || (host.is_empty() && cmd != "reset") {
+        return Err("usage: moonlight info|pair|apps|stream|quit|forget <dir> <host> ... | reset <dir>".into());
     }
     let num = |i: usize, default: i64| args.get(i).and_then(|v| v.parse::<i64>().ok()).unwrap_or(default);
     match cmd {
@@ -612,6 +679,20 @@ pub fn run(args: &[String]) -> Result<(), String> {
             println!("{{\"forgot\":true}}");
             Ok(())
         }
+        "warm" => {
+            let state = warm(&dir, &host)?;
+            println!("{{\"warm\":\"{state}\"}}");
+            Ok(())
+        }
+        "reset" => {
+            // the identity goes; the pinned host certificates stay true, but every host pairs again
+            for f in ["uniqueid", "client.key", "client.pem"] {
+                let _ = fs::remove_file(dir.join(f));
+            }
+            identity(&dir)?;
+            println!("{{\"reset\":true}}");
+            Ok(())
+        }
         "stream" => stream(
             &dir,
             &host,
@@ -624,6 +705,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             num(9, 1) != 0,
             // through the tunnel each packet gets a header and a tag: smaller video packets keep it under the MTU
             num(10, 1392).clamp(512, 1392) as i32,
+            false,
         ),
         _ => Err(format!("unknown moonlight command {cmd}")),
     }

@@ -1,7 +1,7 @@
 import type { CSSProperties, ReactNode } from "react";
 
 import { useAvatarColor } from "../avatarColor.ts";
-import type { TileLook } from "../voice/voice.ts";
+import { frameOf, type BannerPlace, type TileLook } from "../voice/voice.ts";
 import { useMxc } from "./Avatar.tsx";
 
 /**
@@ -41,14 +41,15 @@ export function useBannerStyle(look: TileLook | null, avatar: string, fallback: 
 }
 
 /**
- * The picture of a banner, filling its box. The same zoom and point give the
- * same framing in boxes of any shape: the profile card, a call tile.
+ * The picture of a banner, filling its box with the framing of that place:
+ * the profile card and a call tile are framed apart, being of different shapes.
  */
-export function BannerPicture({ look }: { look: TileLook | null }) {
+export function BannerPicture({ look, place }: { look: TileLook | null; place: BannerPlace }) {
   const url = useMxc(look?.mode === "image" ? (look.image ?? "") : "");
   if (!url || look?.mode !== "image") return null;
-  const zoom = look.zoom ?? 1;
-  const at = `${look.x ?? 50}% ${look.y ?? 50}%`;
+  const frame = frameOf(look, place);
+  const zoom = frame.zoom;
+  const at = `${frame.x}% ${frame.y}%`;
   return (
     <img
       className="banner-picture"
@@ -86,18 +87,20 @@ export function EmojiDeco({ emoji, scale = 1 }: { emoji?: string; scale?: number
 export function Banner({
   look,
   avatar,
+  place = "card",
   className = "",
   children,
 }: {
   look: TileLook | null;
   avatar: string;
+  place?: BannerPlace;
   className?: string;
   children?: ReactNode;
 }) {
   const style = useBannerStyle(look, avatar, "var(--bg-3)");
   return (
     <div className={`banner ${className}`} style={style}>
-      <BannerPicture look={look} />
+      <BannerPicture look={look} place={place} />
       <EmojiDeco emoji={look?.emoji} />
       {children}
     </div>

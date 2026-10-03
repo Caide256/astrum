@@ -82,7 +82,6 @@ export type UpdateState = {
 /* Moonlight: the native helper talks to a Sunshine host (see electron/main.cjs). */
 export type MlAnswer<T> = { ok: boolean; data?: T; error?: string };
 export type MlHostInfo = { paired: boolean; appVersion: string; hostname: string; codecs: number; busy: boolean };
-export type MlApp = { id: number; title: string };
 export type MlStreamOptions = {
   host: string;
   app: number;
@@ -102,26 +101,27 @@ export type TunReady = { ok: boolean; error?: string; key?: string; nat?: string
 /** What the viewer's tunnel reports: a working path (with the local address Sunshine answers on), a failure, the end. */
 export type TunEvent = { ev: "up"; local: string; path: string; rtt: number } | { ev: "fail"; reason: string; text?: string } | { ev: "down"; reason: string };
 
-/** The Moonlight part of the shell, or null in a plain browser. */
+/**
+ * The Moonlight part of the shell, or null in a plain browser. Every watch has
+ * an id: several streams can be watched at once, each with its own tunnel and
+ * stream, and events say which watch they belong to.
+ */
 export function moonlightBridge() {
   const b = bridge;
-  if (!b?.mlStart || !b.mlInfo || !b.mlPair || !b.mlApps || !b.mlStop || !b.mlIdr || !b.onMlEvent || !b.onMlFrame) return null;
+  if (!b?.mlStart || !b.mlInfo || !b.mlPair || !b.mlStop || !b.mlIdr || !b.onMlEvent || !b.onMlFrame || !b.tunStart) return null;
   return {
     info: b.mlInfo,
     pair: b.mlPair,
-    apps: b.mlApps,
-    quit: b.mlQuit ?? (async () => ({ ok: false })),
     forget: b.mlForget ?? (async () => ({ ok: false })),
+    reset: b.mlReset ?? (async () => ({ ok: false })),
     cancel: b.mlCancel ?? (async () => undefined),
     start: b.mlStart,
     stop: b.mlStop,
     idr: b.mlIdr,
     onEvent: b.onMlEvent,
     onFrame: b.onMlFrame,
-    onAudio: b.onMlAudio ?? (() => () => undefined),
-    tunStart: b.tunStart ?? (async () => ({ ok: false, error: "no-helper" })),
+    tunStart: b.tunStart,
     tunPeer: b.tunPeer ?? (async () => ({ ok: false })),
-    tunStop: b.tunStop ?? (async () => undefined),
     onTunEvent: b.onTunEvent ?? (() => () => undefined),
     onTunPcm: b.onTunPcm ?? (() => () => undefined),
   };
@@ -201,6 +201,7 @@ export function sunshineBridge() {
     netCheck: b.netCheck,
     peer: b.sunPeer ?? (async () => ({ ok: false, error: "no-shell" })),
     drop: b.sunDrop ?? (async () => undefined),
+    prewarm: b.sunPrewarm ?? (async () => undefined),
   };
 }
 
@@ -235,35 +236,38 @@ type Bridge = {
   openSecret?: (sealed: string) => Promise<string | null>;
   linkPreview?: (url: string) => Promise<RawPreview | null>;
   mlInfo?: (host: string) => Promise<MlAnswer<MlHostInfo>>;
-  mlPair?: (host: string, pin: string, name?: string) => Promise<MlAnswer<{ paired: boolean }>>;
+  mlPair?: (host: string, pin: string, name: string, wid: string) => Promise<MlAnswer<{ paired: boolean }>>;
   mlForget?: (host: string) => Promise<MlAnswer<unknown>>;
-  mlCancel?: () => Promise<void>;
-  onMlAudio?: (cb: (packet: ArrayBuffer) => void) => () => void;
+  mlReset?: () => Promise<MlAnswer<unknown>>;
+  mlCancel?: (wid: string) => Promise<void>;
   sunStatus?: () => Promise<SunStatus>;
   sunInstall?: () => Promise<{ ok: boolean; error?: string }>;
   sunStart?: (settings: SunStartSettings) => Promise<SunStarted>;
   sunStop?: () => Promise<void>;
   sunDevices?: () => Promise<{ displays: SunDisplay[] }>;
-  sunPeer?: (id: string, key: string, nat: string, cands: string[]) => Promise<{ ok: boolean; error?: string; sid?: number; key?: string }>;
+  sunPeer?: (
+    id: string,
+    key: string,
+    nat: string,
+    cands: string[],
+  ) => Promise<{ ok: boolean; error?: string; sid?: number; key?: string; nat?: string; cands?: string[] }>;
   sunDrop?: (id: string) => Promise<void>;
-  tunStart?: (base: number) => Promise<TunReady>;
-  tunPeer?: (sid: number, key: string, nat: string, cands: string[]) => Promise<{ ok: boolean }>;
-  tunStop?: () => Promise<void>;
-  onTunEvent?: (cb: (json: string) => void) => () => void;
-  onTunPcm?: (cb: (frame: ArrayBuffer) => void) => () => void;
+  sunPrewarm?: (settings: SunStartSettings) => Promise<void>;
+  tunStart?: (wid: string, base: number) => Promise<TunReady>;
+  tunPeer?: (wid: string, sid: number, key: string, nat: string, cands: string[]) => Promise<{ ok: boolean }>;
+  onTunEvent?: (cb: (wid: string, json: string) => void) => () => void;
+  onTunPcm?: (cb: (wid: string, frame: ArrayBuffer) => void) => () => void;
   sunApprove?: (id: string, pin: string, name: string) => Promise<{ ok: boolean }>;
   sunDeny?: (id: string) => Promise<{ ok: boolean }>;
   sunClients?: () => Promise<SunClient[] | null>;
   sunUnpair?: (uuid: string) => Promise<{ ok: boolean }>;
   onSunEvent?: (cb: (event: SunEvent) => void) => () => void;
   netCheck?: () => Promise<NetCheck>;
-  mlApps?: (host: string) => Promise<MlAnswer<MlApp[]>>;
-  mlQuit?: (host: string) => Promise<MlAnswer<unknown>>;
-  mlStart?: (opts: MlStreamOptions) => Promise<{ ok: boolean; error?: string }>;
-  mlStop?: () => Promise<void>;
-  mlIdr?: () => Promise<void>;
-  onMlEvent?: (cb: (json: string) => void) => () => void;
-  onMlFrame?: (cb: (frame: ArrayBuffer) => void) => () => void;
+  mlStart?: (wid: string, opts: MlStreamOptions) => Promise<{ ok: boolean; error?: string }>;
+  mlStop?: (wid: string) => Promise<void>;
+  mlIdr?: (wid: string) => Promise<void>;
+  onMlEvent?: (cb: (wid: string, json: string) => void) => () => void;
+  onMlFrame?: (cb: (wid: string, frame: ArrayBuffer) => void) => () => void;
   windowAction?: (action: "minimize" | "maximize" | "close" | "state") => Promise<WindowState | null>;
   onWindowState?: (cb: (s: WindowState) => void) => () => void;
   getUpdate?: () => Promise<UpdateState>;
