@@ -9,10 +9,13 @@
 //!    sees it. Its local, IPv6 and outside addresses are its candidates.
 //! 2. The apps swap candidates and fresh X25519 public keys through the call
 //!    (the streamer only for viewers it let in).
-//! 3. Both sides send probes to all of the other's candidates at once. Each
-//!    router then takes the other side's probes for answers to its own and
+//! 3. The streamer opens its routers toward the viewer with packets that die
+//!    a few hops out, then the viewer probes all of the streamer's candidates.
+//!    Each router takes the other side's packets for answers to its own and
 //!    lets them in: the hole is punched. The viewer keeps the best path that
-//!    answered (the home network, then IPv6, then the fastest).
+//!    answered (the home network, then IPv6, then the fastest). Knocking in
+//!    this order matters: a router that hears from outside before its own
+//!    computer sent anything there may move that computer to another port.
 //! 4. Everything then goes through that path, sealed with AES-256-GCM:
 //!    Sunshine's TCP connections (stream.rs) and UDP packets, and the
 //!    computer's sound without the call (Sunshine's own capture would carry
@@ -93,6 +96,9 @@ pub fn predictions(targets: &[SocketAddr]) -> Vec<SocketAddr> {
     out
 }
 
+/// When the streamer opens its routers toward a viewer (see `Socks::open_nat`): at once, then twice more in case one got lost.
+const OPENERS_MS: [u64; 3] = [0, 300, 1000];
+
 /// Probes to the other side's candidates until a path answers.
 pub struct Prober {
     targets: Vec<SocketAddr>,
@@ -100,12 +106,19 @@ pub struct Prober {
     last: Option<Instant>,
     answers: Vec<(SocketAddr, u64)>,
     first: Option<Instant>,
+    /// The streamer's side: outside addresses get only openers until the
+    /// viewer's first probe comes in or this time is up. The viewer then
+    /// knocks first, and the streamer's answers go back through the hole
+    /// the viewer's own probes made.
+    hold: Option<Duration>,
+    opened: usize,
     pub done: bool,
 }
 
 impl Prober {
-    pub fn new(targets: Vec<SocketAddr>) -> Self {
-        Prober { targets, start: Instant::now(), last: None, answers: Vec::new(), first: None, done: false }
+    /// `hold`: on the streamer's side, how long to wait for the viewer to knock first.
+    pub fn new(targets: Vec<SocketAddr>, hold: Option<Duration>) -> Self {
+        Prober { targets, start: Instant::now(), last: None, answers: Vec::new(), first: None, hold, opened: 0, done: false }
     }
 
     /// An address a probe came from that was not on the list: the other side's NAT shows it this way.
@@ -113,6 +126,15 @@ impl Prober {
         if !self.done && !self.targets.contains(&a) && self.targets.len() < 64 && wire::candidate_ok(&a) {
             self.targets.push(a);
         }
+    }
+
+    /// The other side knocked: its routers are open toward this side, probes may follow.
+    pub fn release(&mut self) {
+        self.hold = None;
+    }
+
+    fn holding(&self) -> bool {
+        self.hold.map(|h| self.start.elapsed() < h).unwrap_or(false)
     }
 
     pub fn targets_text(&self) -> String {
@@ -129,6 +151,13 @@ impl Prober {
             return;
         }
         let age = self.start.elapsed();
+        if self.hold.is_some() && self.opened < OPENERS_MS.len() && age >= Duration::from_millis(OPENERS_MS[self.opened]) {
+            self.opened += 1;
+            let mut p = [0u8; 9];
+            p[0] = PROBE;
+            p[1..9].copy_from_slice(&wire::now_us().to_be_bytes());
+            socks.open_nat(&self.targets, || link.seal(&p));
+        }
         let every = if age < Duration::from_secs(3) {
             50
         } else if age < Duration::from_secs(8) {
@@ -143,7 +172,9 @@ impl Prober {
         let mut p = [0u8; 9];
         p[0] = PROBE;
         p[1..9].copy_from_slice(&wire::now_us().to_be_bytes());
-        for t in &self.targets {
+        // the home network and IPv6 have no NAT to trip over: those are probed at once
+        let holding = self.holding();
+        for t in self.targets.iter().filter(|t| !holding || t.is_ipv6() || wire::is_lan(t)) {
             link.send_to(socks, &p, *t);
         }
     }
@@ -212,6 +243,33 @@ mod tests {
         assert_eq!(udp_port(49989, 0), Some(49998));
         assert_eq!(udp_port(49989, 2), Some(50000));
         assert_eq!(udp_port(49989, 9), None);
+    }
+
+    #[test]
+    fn streamer_waits_for_the_viewer_to_knock_first() {
+        use std::net::UdpSocket;
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        rx.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+        let socks = Socks::new(UdpSocket::bind("127.0.0.1:0").unwrap(), None);
+        let (a, b) = (wire::keypair().unwrap(), wire::keypair().unwrap());
+        let (ap, bp) = (a.public, b.public);
+        let (h2v, v2h) = wire::derive(a, &bp, &ap, &bp).unwrap();
+        let link = Link::new(1, h2v, v2h);
+        let count = || {
+            let mut buf = [0u8; 64];
+            std::iter::from_fn(|| rx.recv_from(&mut buf).ok()).count()
+        };
+        let mut p = Prober::new(vec![rx.local_addr().unwrap()], Some(Duration::from_secs(3)));
+        p.tick(&link, &socks);
+        // only the openers, one per TTL (loopback does not count hops)
+        assert_eq!(count(), 3);
+        std::thread::sleep(Duration::from_millis(60));
+        p.tick(&link, &socks);
+        assert_eq!(count(), 0);
+        p.release();
+        std::thread::sleep(Duration::from_millis(60));
+        p.tick(&link, &socks);
+        assert_eq!(count(), 1);
     }
 
     #[test]

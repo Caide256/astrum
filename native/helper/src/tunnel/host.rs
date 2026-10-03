@@ -32,6 +32,10 @@ use super::wire::{self, Link, Socks, BYE, KEEPALIVE, PCM, PROBE, PROBE_ACK, SEG,
 use super::{json_line, path_of, predictions, stun, tcp_port, udp_port, Heard, Prober};
 
 const MAX_SESSIONS: usize = 16;
+/// How long the streamer waits for a viewer to knock first (see `Prober`).
+/// The viewer's probes and these answers make the path, so a long wait
+/// slows nothing down; the streamer's own probes are for when that fails.
+const HOLD: Duration = Duration::from_secs(3);
 
 struct Session {
     id: String,
@@ -51,6 +55,8 @@ struct Host {
     lan: Vec<SocketAddr>,
     extra: Mutex<Vec<SocketAddr>>,
     sessions: Mutex<HashMap<u32, Arc<Session>>>,
+    /// Addresses packets came from that were not a session's: reported once, for the stream log.
+    stray: Heard,
     audio: bool,
     pid: u32,
     audio_running: AtomicBool,
@@ -135,9 +141,9 @@ impl Host {
             }
             return;
         }
-        let Some(sid) = wire::session_of(buf) else { return };
-        let Some(s) = self.session(sid) else { return };
-        let Some((ctr, body)) = s.link.open(buf) else { return };
+        let Some(sid) = wire::session_of(buf) else { return self.stray(from, "not the tunnel's") };
+        let Some(s) = self.session(sid) else { return self.stray(from, "no such session") };
+        let Some((ctr, body)) = s.link.open(buf) else { return self.stray(from, "does not open") };
         let Some(&kind) = body.first() else { return };
         s.link.received(from, ctr, kind);
         match kind {
@@ -148,6 +154,7 @@ impl Host {
                 s.link.send_to(&self.socks, &ack, from);
                 if let Ok(mut p) = s.prober.lock() {
                     p.add(from);
+                    p.release();
                 }
                 if s.heard.note(from) {
                     json_line(&format!("{{\"ev\":\"probe-in\",\"id\":\"{}\",\"from\":\"{from}\"}}", s.id));
@@ -178,6 +185,13 @@ impl Host {
             }
             json_line(&format!("{{\"ev\":\"up\",\"id\":\"{}\",\"path\":\"{}\"}}", s.id, path_of(&from)));
             self.wake_audio();
+        }
+    }
+
+    /// A packet that is no session's: an old viewer, a stranger, or a viewer whose keys differ.
+    fn stray(&self, from: SocketAddr, why: &str) {
+        if self.stray.note(from) {
+            json_line(&format!("{{\"ev\":\"stray\",\"from\":\"{from}\",\"why\":\"{why}\"}}"));
         }
     }
 
@@ -219,7 +233,7 @@ impl Host {
             let s = Arc::new(Session {
                 id: id.to_string(),
                 link: Arc::new(Link::new(sid, h2v, v2h)),
-                prober: Mutex::new(Prober::new(targets)),
+                prober: Mutex::new(Prober::new(targets, Some(HOLD))),
                 heard: Heard::default(),
                 streams: Streams::new(),
                 flows,
@@ -317,17 +331,19 @@ pub fn run(args: &[String]) -> Result<(), String> {
         keeper: stun::Keeper::new(&seen),
         lan: home,
         extra: Mutex::new(Vec::new()),
-        socks: Arc::new(Socks { v4, v6: v6sock }),
+        socks: Arc::new(Socks::new(v4, v6sock)),
         sessions: Mutex::new(HashMap::new()),
+        stray: Heard::default(),
         audio,
         pid,
         audio_running: AtomicBool::new(false),
         pcm_seq: AtomicU32::new(0),
     });
     json_line(&format!(
-        "{{\"ev\":\"ready\",\"port\":{local_port},\"nat\":\"{}\",\"ip\":\"{}\",\"cands\":\"{}\"}}",
+        "{{\"ev\":\"ready\",\"port\":{local_port},\"nat\":\"{}\",\"ip\":\"{}\",\"seen\":\"{}\",\"cands\":\"{}\"}}",
         seen.nat,
         seen.mapped.map(|m| m.ip().to_string()).unwrap_or_default(),
+        seen.text(),
         host.cands_text()
     ));
 
@@ -352,7 +368,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 host.tick();
                 if asked.elapsed() >= Duration::from_secs(10) {
                     asked = Instant::now();
-                    host.keeper.ask(&host.socks.v4);
+                    host.socks.with_v4(|s| host.keeper.ask(s));
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }

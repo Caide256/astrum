@@ -9,7 +9,7 @@
 
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
@@ -87,22 +87,66 @@ fn nonce(counter: u64) -> Nonce {
 
 /* ----------------------------------------------------------------- sockets */
 
+/// Hops a NAT opener lives: enough to pass one, two or three routers of this
+/// side (a home router behind the provider's box, a provider's NAT), short of
+/// the other side's, which is further away than that.
+const OPEN_TTLS: [u32; 3] = [2, 3, 4];
+
 /// The tunnel's UDP sockets: IPv4 always, IPv6 when the computer has it.
 pub struct Socks {
     pub v4: UdpSocket,
     pub v6: Option<UdpSocket>,
+    /// Read by every send, written while the TTL is lowered: no other packet leaves with it.
+    ttl_gate: RwLock<()>,
 }
 
 impl Socks {
+    pub fn new(v4: UdpSocket, v6: Option<UdpSocket>) -> Self {
+        Socks { v4, v6, ttl_gate: RwLock::new(()) }
+    }
+
     pub fn send_to(&self, buf: &[u8], to: SocketAddr) {
         let sock = match to {
             SocketAddr::V4(_) => Some(&self.v4),
             SocketAddr::V6(_) => self.v6.as_ref(),
         };
         if let Some(s) = sock {
+            let _gate = self.ttl_gate.read();
             // a full buffer or an unreachable address: the packet is lost like any UDP packet
             let _ = s.send_to(buf, to);
         }
+    }
+
+    /// The IPv4 socket for something else to send on (STUN), never while its TTL is lowered.
+    pub fn with_v4(&self, f: impl FnOnce(&UdpSocket)) {
+        let _gate = self.ttl_gate.read();
+        f(&self.v4);
+    }
+
+    /// Opens this side's routers toward the other side's outside addresses
+    /// without knocking on the other side's: `packet` goes out with a low TTL
+    /// and dies a few hops out. A router that sees a packet from outside before
+    /// its own computer sent anything there may keep that unanswered flow, and
+    /// the computer's own packets to that address then leave from another port,
+    /// which the other side's router drops: nothing gets through either way.
+    /// The streamer opens first and lets the viewer knock first. Each packet
+    /// is a fresh one from `packet`: one that does arrive is a valid probe.
+    pub fn open_nat(&self, targets: &[SocketAddr], packet: impl Fn() -> Vec<u8>) {
+        let outside: Vec<SocketAddr> = targets.iter().filter(|t| t.is_ipv4() && !is_lan(t)).copied().collect();
+        if outside.is_empty() {
+            return;
+        }
+        let Ok(_gate) = self.ttl_gate.write() else { return };
+        let normal = self.v4.ttl().unwrap_or(128);
+        for ttl in OPEN_TTLS {
+            if self.v4.set_ttl(ttl).is_err() {
+                break;
+            }
+            for t in &outside {
+                let _ = self.v4.send_to(&packet(), t);
+            }
+        }
+        let _ = self.v4.set_ttl(normal);
     }
 }
 
@@ -139,12 +183,14 @@ pub fn tune(sock: &UdpSocket) {
 }
 
 /// A packet on a socket may be an error report of an earlier send (Windows
-/// reports an unreachable port on the next receive): those are skipped.
+/// reports an unreachable port, or a NAT opener that ran out of hops, on the
+/// next receive): those are skipped.
 pub fn recv(sock: &UdpSocket, buf: &mut [u8]) -> Option<(usize, SocketAddr)> {
+    const WSAENETRESET: i32 = 10052;
     loop {
         match sock.recv_from(buf) {
             Ok(r) => return Some(r),
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset || e.raw_os_error() == Some(WSAENETRESET) => continue,
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return None,
             Err(_) => {
                 std::thread::sleep(Duration::from_millis(20));

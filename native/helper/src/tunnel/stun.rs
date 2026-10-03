@@ -14,7 +14,15 @@ use std::time::{Duration, Instant};
 
 use rand::RngCore;
 
-const SERVERS: [(&str, u16); 3] = [("stun.l.google.com", 19302), ("stun1.l.google.com", 19302), ("stun.cloudflare.com", 3478)];
+/// Public STUN servers at different addresses: any one may be cut off
+/// somewhere (Google's port is in the range DPI tools for Discord touch),
+/// and telling the NAT apart takes two answers.
+const SERVERS: [(&str, u16); 4] = [
+    ("stun.cloudflare.com", 3478),
+    ("stun.l.google.com", 19302),
+    ("global.stun.twilio.com", 3478),
+    ("stun.sipnet.ru", 3478),
+];
 const COOKIE: u32 = 0x2112_A442;
 
 pub struct Seen {
@@ -24,6 +32,14 @@ pub struct Seen {
     pub mapped: Option<SocketAddrV4>,
     /// The server that answered first: asked again to keep the mapping alive.
     pub server: Option<SocketAddr>,
+    /// The outside address each answering server saw, for the stream log: one answer cannot tell the NAT apart.
+    pub all: Vec<SocketAddrV4>,
+}
+
+impl Seen {
+    pub fn text(&self) -> String {
+        self.all.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",")
+    }
 }
 
 fn request(id: &[u8; 12]) -> [u8; 20] {
@@ -63,17 +79,28 @@ pub fn parse_response(msg: &[u8], id: &[u8; 12]) -> Option<SocketAddrV4> {
 }
 
 /// Ask the STUN servers from `sock`: done once two answered (enough to tell the
-/// NAT apart), or 250 ms after the first answer, or after a second and a half
+/// NAT apart), or 400 ms after the first answer, or after a second and a half
 /// without any. The socket's read timeout is changed.
 pub fn look(sock: &UdpSocket, own: &[Ipv4Addr]) -> Seen {
+    // the names are looked up side by side, and a lookup that hangs is left behind after a second
+    let (tx, rx) = std::sync::mpsc::channel();
+    for (i, (host, port)) in SERVERS.iter().enumerate() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let a = (*host, *port).to_socket_addrs().ok().and_then(|mut l| l.find(|a| a.is_ipv4()));
+            let _ = tx.send((i, a));
+        });
+    }
+    drop(tx);
+    let mut found: Vec<Option<SocketAddr>> = vec![None; SERVERS.len()];
+    let until = Instant::now() + Duration::from_secs(1);
+    while let Ok((i, a)) = rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
+        found[i] = a;
+    }
     let mut servers: Vec<SocketAddr> = Vec::new();
-    for (host, port) in SERVERS {
-        if let Ok(list) = (host, port).to_socket_addrs() {
-            if let Some(a) = list.into_iter().find(|a| a.is_ipv4()) {
-                if !servers.iter().any(|s| s.ip() == a.ip()) {
-                    servers.push(a);
-                }
-            }
+    for a in found.into_iter().flatten() {
+        if !servers.iter().any(|s| s.ip() == a.ip()) {
+            servers.push(a);
         }
     }
     let mut ids: Vec<[u8; 12]> = Vec::new();
@@ -92,7 +119,7 @@ pub fn look(sock: &UdpSocket, own: &[Ipv4Addr]) -> Seen {
     let mut first_at: Option<Instant> = None;
     while start.elapsed() < Duration::from_millis(1500)
         && answers.iter().flatten().count() < enough
-        && first_at.map(|t| t.elapsed() < Duration::from_millis(250)).unwrap_or(true)
+        && first_at.map(|t| t.elapsed() < Duration::from_millis(400)).unwrap_or(true)
         && !servers.is_empty()
     {
         // first send, then again every 300 ms to the servers that did not answer
@@ -124,7 +151,7 @@ pub fn look(sock: &UdpSocket, own: &[Ipv4Addr]) -> Seen {
         Some(_) if got.iter().any(|a| a.port() != got[0].port()) => "symmetric",
         Some(_) => "cone",
     };
-    Seen { nat, mapped, server: first }
+    Seen { nat, mapped, server: first, all: got }
 }
 
 /// Keeps the socket's NAT mapping alive: routers forget an idle UDP mapping
@@ -183,7 +210,7 @@ pub fn probe(args: &[String]) -> Result<(), String> {
     let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
     let seen = look(&sock, &own);
     let ip = seen.mapped.map(|m| IpAddr::V4(*m.ip()).to_string()).unwrap_or_default();
-    println!("{{\"nat\":\"{}\",\"ip\":\"{ip}\"}}", seen.nat);
+    println!("{{\"nat\":\"{}\",\"ip\":\"{ip}\",\"seen\":\"{}\"}}", seen.nat, seen.text());
     Ok(())
 }
 

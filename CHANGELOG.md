@@ -5,6 +5,26 @@ GitHub uses the same two sections, and the app shows the one of its language in
 the update window. Mentions like `@everyone` always go in backticks: GitHub takes
 a bare mention for a GitHub user and lists that user as a contributor of the release.
 
+## 0.9.4
+
+<details>
+<summary>English</summary>
+
+- **Streams through Sunshine connect where both sides sit behind two routers.** The streamer used to knock on the viewer's router before the viewer had sent anything; some routers then move the viewer to another outside port, and nothing got through either way for the whole minute. Now the streamer first opens its own routers with packets that die a few hops out, and the viewer knocks first.
+- The NAT check asks more STUN servers at different addresses and waits for two answers: Google's server does not answer from some networks, and with one answer the NAT type was a guess. The stream log shows what each server saw.
+- The stream log tells packets that came from an unknown address or did not open apart from silence.
+
+</details>
+
+<details>
+<summary>Русский</summary>
+
+- **Стримы через Sunshine подключаются, когда у обоих по два роутера.** Раньше стример стучался в роутер зрителя до того, как зритель сам что-то отправил. Некоторые роутеры после этого переводят зрителя на другой внешний порт, и целую минуту ничего не проходило ни в одну сторону. Теперь стример сначала открывает свои роутеры пакетами, которые умирают через несколько хопов, а первым стучится зритель.
+- Проверка NAT спрашивает больше STUN-серверов на разных адресах и ждёт два ответа: сервер Google из некоторых сетей не отвечает, а по одному ответу тип NAT был догадкой. В логе стримов видно, что увидел каждый сервер.
+- В логе стримов теперь видно пакеты, которые пришли с незнакомого адреса или не открылись, а не только тишину.
+
+</details>
+
 ## 0.9.3
 
 <details>

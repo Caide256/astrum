@@ -57,6 +57,8 @@ struct View {
     socks: Arc<Socks>,
     prober: Mutex<Prober>,
     heard: Heard,
+    /// Addresses packets came from that were not this session's: reported once, for the stream log.
+    stray: Heard,
     streams: Arc<Streams>,
     flows: OnceLock<Vec<Arc<Flow>>>,
     selected: AtomicBool,
@@ -78,9 +80,9 @@ impl View {
             return;
         }
         if wire::session_of(buf) != Some(self.link.sid) {
-            return;
+            return self.stray(from, "not this session's");
         }
-        let Some((ctr, body)) = self.link.open(buf) else { return };
+        let Some((ctr, body)) = self.link.open(buf) else { return self.stray(from, "does not open") };
         let Some(&kind) = body.first() else { return };
         // before a path is picked, only probes count
         if self.selected.load(Ordering::Relaxed) || kind == PROBE || kind == PROBE_ACK {
@@ -124,6 +126,12 @@ impl View {
                 std::process::exit(0);
             }
             _ => {}
+        }
+    }
+
+    fn stray(&self, from: SocketAddr, why: &str) {
+        if self.stray.note(from) {
+            event(format!("{{\"ev\":\"stray\",\"from\":\"{from}\",\"why\":\"{why}\"}}"));
         }
     }
 
@@ -264,9 +272,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let view_pub = own.public;
     let list: Vec<String> = cands.iter().map(|c| c.to_string()).collect();
     event(format!(
-        "{{\"ev\":\"ready\",\"key\":\"{}\",\"nat\":\"{}\",\"cands\":\"{}\"}}",
+        "{{\"ev\":\"ready\",\"key\":\"{}\",\"nat\":\"{}\",\"seen\":\"{}\",\"cands\":\"{}\"}}",
         hex::encode(view_pub),
         seen.nat,
+        seen.text(),
         list.join(",")
     ));
 
@@ -278,7 +287,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         let (keeper, waiting) = (keeper.clone(), waiting.clone());
         std::thread::spawn(move || {
             let mut buf = [0u8; 1500];
-            let _ = sock.set_read_timeout(Some(Duration::from_millis(200)));
+            let _ = sock.set_read_timeout(Some(Duration::from_millis(50)));
             let mut asked = Instant::now();
             while waiting.load(Ordering::Relaxed) {
                 if asked.elapsed() >= Duration::from_secs(10) {
@@ -309,7 +318,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     };
     waiting.store(false, Ordering::Relaxed);
     // the waiting thread lets go of the socket within its read timeout
-    std::thread::sleep(Duration::from_millis(250));
+    std::thread::sleep(Duration::from_millis(70));
     if targets.is_empty() || sid == 0 {
         event("{\"ev\":\"fail\",\"reason\":\"punch\"}".into());
         std::process::exit(0);
@@ -328,9 +337,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
         base,
         keeper,
         link: Arc::new(Link::new(sid, v2h, h2v)),
-        socks: Arc::new(Socks { v4, v6: v6sock }),
-        prober: Mutex::new(Prober::new(targets)),
+        socks: Arc::new(Socks::new(v4, v6sock)),
+        // the viewer knocks first: the streamer holds its own probes until then
+        prober: Mutex::new(Prober::new(targets, None)),
         heard: Heard::default(),
+        stray: Heard::default(),
         streams: Streams::new(),
         flows: OnceLock::new(),
         selected: AtomicBool::new(false),
@@ -359,7 +370,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 // until a path is up the mapping is kept by STUN, then by the tunnel's own keepalives
                 if !view.selected.load(Ordering::Relaxed) && asked.elapsed() >= Duration::from_secs(10) {
                     asked = Instant::now();
-                    view.keeper.ask(&view.socks.v4);
+                    view.socks.with_v4(|s| view.keeper.ask(s));
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
