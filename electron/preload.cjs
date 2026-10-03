@@ -62,8 +62,18 @@ contextBridge.exposeInMainWorld("desktop", {
   sunClients: () => ipcRenderer.invoke("app:sun-clients"),
   sunUnpair: (uuid) => ipcRenderer.invoke("app:sun-unpair", uuid),
   onSunEvent: (cb) => listen("app:sun-event", cb),
+  sunPeer: (id, key, nat, cands) => ipcRenderer.invoke("app:sun-peer", id, key, nat, cands),
+  sunDrop: (id) => ipcRenderer.invoke("app:sun-drop", id),
   netCheck: () => ipcRenderer.invoke("app:net-check"),
-  resolvePublic: (name) => ipcRenderer.invoke("app:resolve-public", name),
+  tunStart: (base) => ipcRenderer.invoke("app:tun-start", base),
+  tunPeer: (sid, key, nat, cands) => ipcRenderer.invoke("app:tun-peer", sid, key, nat, cands),
+  tunStop: () => ipcRenderer.invoke("app:tun-stop"),
+  onTunEvent: (cb) => listen("app:tun-event", cb),
+  onTunPcm: (cb) => {
+    const handler = (_e, chunk) => cb(chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength));
+    ipcRenderer.on("app:tun-pcm", handler);
+    return () => ipcRenderer.removeListener("app:tun-pcm", handler);
+  },
   onMlFrame: (cb) => {
     const handler = (_e, chunk) => {
       const copy = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);

@@ -6,7 +6,7 @@
 //!                                              `name` is the device name the host shows for the
 //!                                              request, so the host's owner can tell requests apart
 //!   moonlight apps <dir> <host>                the host's apps
-//!   moonlight stream <dir> <host> <app> <w> <h> <fps> <kbps> <formats> [host audio 0/1]
+//!   moonlight stream <dir> <host> <app> <w> <h> <fps> <kbps> <formats> [host audio 0/1] [packet size]
 //!                                              stream to stdout in records (see below)
 //!   moonlight quit <dir> <host>                end the running session on the host
 //!   moonlight forget <dir> <host>              drop the pinned certificate of a host
@@ -67,7 +67,7 @@ struct Identity {
     key_pkcs8: Vec<u8>,
 }
 
-fn json_str(s: &str) -> String {
+pub(crate) fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for c in s.chars() {
@@ -491,7 +491,7 @@ extern "C" fn on_event(kind: c_int, code: c_int, text: *const c_char) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn stream(dir: &Path, host: &str, app: i64, width: i32, height: i32, fps: i32, kbps: i32, formats: i32, host_audio: bool) -> Result<(), String> {
+fn stream(dir: &Path, host: &str, app: i64, width: i32, height: i32, fps: i32, kbps: i32, formats: i32, host_audio: bool, packet: i32) -> Result<(), String> {
     let id = identity(dir)?;
     let (addr, _) = split_host(host);
     let info = host_info(dir, &id, host)?;
@@ -539,7 +539,7 @@ fn stream(dir: &Path, host: &str, app: i64, width: i32, height: i32, fps: i32, k
             height,
             fps,
             kbps,
-            1392,
+            packet,
             formats,
             rikey.as_ptr(),
             iv.as_ptr(),
@@ -622,6 +622,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
             num(7, 20_000) as i32,
             num(8, 1) as i32,
             num(9, 1) != 0,
+            // through the tunnel each packet gets a header and a tag: smaller video packets keep it under the MTU
+            num(10, 1392).clamp(512, 1392) as i32,
         ),
         _ => Err(format!("unknown moonlight command {cmd}")),
     }

@@ -36,6 +36,31 @@ function blockedV4(ip) {
   );
 }
 
+/** The 16-bit groups of an IPv6 address, "::" expanded; null if it is not one. */
+function groups(v) {
+  const [head, tail = ""] = v.split("::");
+  const h = head ? head.split(":") : [];
+  const t = tail ? tail.split(":") : [];
+  if (v.includes("::") ? h.length + t.length > 7 : h.length !== 8) return null;
+  const all = [...h, ...Array(8 - h.length - t.length).fill("0"), ...t].map((g) => Number.parseInt(g, 16));
+  return all.length === 8 && all.every((g) => Number.isInteger(g) && g >= 0 && g <= 0xffff) ? all : null;
+}
+
+function embeddedV4(v) {
+  if (/\d+\.\d+\.\d+\.\d+$/.test(v)) {
+    const m = /(\d+\.\d+\.\d+\.\d+)$/.exec(v);
+    if (/^(::ffff:|64:ff9b::)/.test(v)) return m[1];
+    return null;
+  }
+  const g = groups(v);
+  if (!g) return null;
+  const v4 = (hi, lo) => `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+  if (g.slice(0, 5).every((x) => x === 0) && g[5] === 0xffff) return v4(g[6], g[7]);
+  if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((x) => x === 0)) return v4(g[6], g[7]);
+  if (g[0] === 0x2002) return v4(g[1], g[2]);
+  return null;
+}
+
 function blockedIp(ip) {
   const v = String(ip).toLowerCase().replace(/^\[|\]$/g, "").split("%")[0];
   if (net.isIPv4(v)) return blockedV4(v);
@@ -43,6 +68,9 @@ function blockedIp(ip) {
   if (v === "::" || v === "::1") return true;
   const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(v);
   if (mapped) return blockedV4(mapped[1]);
+  // an IPv4 address carried inside IPv6: mapped in hex, NAT64 (64:ff9b::/96) and 6to4 (2002::/16)
+  const embedded = embeddedV4(v);
+  if (embedded) return blockedV4(embedded);
   // unique local, link local, site local (deprecated), multicast
   return /^(f[cd]|fe[89ab]|fe[c-f]|ff)/.test(v);
 }

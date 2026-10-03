@@ -508,7 +508,7 @@ async function launch(s: session.Session, c: MatrixClient): Promise<void> {
   afterConnect(s, c);
   wire(c);
   restoreView();
-  await session.start(c);
+  await session.start(c, s.storeKey);
   // a fresh account gets its encryption keys here, no other client needed
   void crypto.setupFreshAccount(c).catch((e) => console.warn("encryption setup skipped", e));
   // invites the server failed to decline last time
@@ -564,7 +564,8 @@ async function connect(s: session.Session): Promise<boolean> {
 }
 
 /** A fresh sign-in: store the session and start everything as on launch. */
-async function enter(s: session.Session): Promise<boolean> {
+async function enter(fresh: session.Session): Promise<boolean> {
+  const s = session.withStoreKey(fresh);
   await session.saveSession(s);
   return connect(s);
 }
@@ -1207,16 +1208,17 @@ function previewsOf(content: Record<string, any>): LinkPreview[] {
   for (const p of list.slice(0, MAX_PREVIEWS)) {
     if (!p || typeof p !== "object") continue;
     const url = String(p.matched_url ?? p["og:url"] ?? "");
-    if (!/^https?:\/\//i.test(url)) continue;
+    if (!/^https?:\/\//i.test(url) || url.length > 2048) continue;
     const enc = p["beeper:image:encryption"];
     const file = enc && typeof enc.url === "string" ? (enc as EncryptedFile) : null;
     const mxc = String(file?.url ?? p["og:image"] ?? "");
     const embed = String(p[EMBED] ?? "");
     out.push({
       url,
-      title: String(p["og:title"] ?? ""),
-      description: String(p["og:description"] ?? ""),
-      site: String(p["og:site_name"] ?? ""),
+      // a card shows a line or three: longer texts only weigh the chat down
+      title: String(p["og:title"] ?? "").slice(0, 300),
+      description: String(p["og:description"] ?? "").slice(0, 1000),
+      site: String(p["og:site_name"] ?? "").slice(0, 100),
       image: isMxc(mxc)
         ? {
             mxc,

@@ -18,6 +18,12 @@ export type Session = {
   userId: string;
   accessToken: string;
   deviceId: string;
+  /**
+   * The key the encryption store of this sign-in is locked with (hex, 32
+   * bytes), kept inside the sealed session. Sign-ins made before it existed
+   * have none: their store stays as it was made, unlocked.
+   */
+  storeKey?: string;
 };
 
 /**
@@ -33,10 +39,23 @@ function parse(raw: string | null): Session | null {
   if (!raw) return null;
   try {
     const s = JSON.parse(raw) as Session;
+    if (s.storeKey !== undefined && !/^[0-9a-f]{64}$/.test(String(s.storeKey))) delete s.storeKey;
     return s.homeserver && s.accessToken && s.userId ? s : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * A fresh sign-in gets a key for its encryption store: the message keys in
+ * the profile folder are then useless without the sealed session, as the
+ * token is. Only where the session can be sealed: a key stored in the open
+ * next to the store would protect nothing.
+ */
+export function withStoreKey(s: Session): Session {
+  if (!canSeal || s.storeKey) return s;
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return { ...s, storeKey: [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("") };
 }
 
 function read(key: string): string | null {
@@ -293,9 +312,9 @@ export function isSessionGone(e: unknown): boolean {
  * failures do not end the wait: the SDK retries on its own until the server
  * answers. Only a revoked access token rejects.
  */
-export async function start(client: MatrixClient): Promise<void> {
+export async function start(client: MatrixClient, storeKey?: string): Promise<void> {
   // crypto must be ready before sync, or the first events arrive undecrypted
-  await startCrypto(client, client.getDeviceId() ?? "");
+  await startCrypto(client, client.getDeviceId() ?? "", storeKey);
   return new Promise((resolve, reject) => {
     const onSync = (state: SyncState, _prev: SyncState | null, data?: { error?: Error }) => {
       if (state === SyncState.Prepared) {

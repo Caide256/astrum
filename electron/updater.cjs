@@ -159,6 +159,8 @@ async function download() {
       const { value, done } = await reader.read();
       if (done) break;
       const chunk = Buffer.from(value);
+      // a release asset has a known size: anything much bigger is not that file
+      if (release.size && got + chunk.length > release.size + 1024 * 1024) throw new Error("the download is bigger than the release says");
       hash.update(chunk);
       if (!out.write(chunk)) await new Promise((r) => out.once("drain", r));
       got += chunk.length;
@@ -178,6 +180,16 @@ async function download() {
   return file;
 }
 
+/** The file on disk still is the one that was verified: checked again right before it runs. */
+function stillVerified(file) {
+  try {
+    const hash = crypto.createHash(release.algo).update(fs.readFileSync(file)).digest(release.encoding);
+    return hash === release.hash;
+  } catch {
+    return false;
+  }
+}
+
 async function start() {
   if (!state.canInstall || state.status === "downloading") return state;
   set({ status: "downloading", progress: 0, error: "" });
@@ -192,7 +204,13 @@ async function start() {
 
 /** Run the downloaded installer silently and quit; it starts the app again when done. */
 function install() {
-  if (!downloaded || !fs.existsSync(downloaded)) return;
+  if (!downloaded || !release || !fs.existsSync(downloaded)) return;
+  if (!stillVerified(downloaded)) {
+    fs.rmSync(downloaded, { force: true });
+    downloaded = "";
+    set({ status: "error", error: "checksum mismatch" });
+    return;
+  }
   const child = spawn(downloaded, ["/S", "--updated", "--force-run"], { detached: true, stdio: "ignore" });
   child.unref();
   beforeInstall();

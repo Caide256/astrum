@@ -7,6 +7,7 @@
 //!
 //! Output on stdout: raw PCM, 48 kHz, stereo, signed 16-bit little-endian,
 //! interleaved frames. The process exits when the stdout pipe is closed.
+//! The stream tunnel takes the same PCM in-process (`capture_to`).
 
 use std::collections::VecDeque;
 use std::io::{self, Write};
@@ -18,6 +19,8 @@ use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 const RATE: usize = 48_000;
 const CHANNELS: usize = 2;
 const BLOCK: usize = CHANNELS * 2;
+/// 10 ms of sound: smaller gains nothing, larger adds latency.
+pub const CHUNK: usize = RATE / 100 * BLOCK;
 
 /// Process that owns a window, 0 if the window does not exist.
 pub fn window_pid(hwnd: isize) -> u32 {
@@ -28,8 +31,16 @@ pub fn window_pid(hwnd: isize) -> u32 {
     pid
 }
 
-/// Capture the process tree of `pid` (`include_tree`) or everything except it.
+/// Capture the process tree of `pid` (`include_tree`) or everything except it, to stdout.
 pub fn capture(pid: u32, include_tree: bool) -> Result<(), String> {
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    // reader closed the pipe
+    capture_to(pid, include_tree, &mut |chunk| out.write_all(chunk).and_then(|_| out.flush()).is_ok())
+}
+
+/// The same capture handed over in 10 ms chunks; `sink` returns false to stop.
+pub fn capture_to(pid: u32, include_tree: bool, sink: &mut dyn FnMut(&[u8]) -> bool) -> Result<(), String> {
     initialize_mta().ok().map_err(|e| format!("COM init failed: {e}"))?;
 
     let format = WaveFormat::new(16, 16, &SampleType::Int, RATE, CHANNELS, None);
@@ -48,11 +59,8 @@ pub fn capture(pid: u32, include_tree: bool) -> Result<(), String> {
     let capture = client.get_audiocaptureclient().map_err(|e| e.to_string())?;
     client.start_stream().map_err(|e| e.to_string())?;
 
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
     let mut queue: VecDeque<u8> = VecDeque::with_capacity(RATE * BLOCK);
-    // 10 ms chunks: smaller gains nothing, larger adds latency
-    let chunk = RATE / 100 * BLOCK;
+    let chunk = CHUNK;
     let mut buf = vec![0u8; chunk];
 
     let debug = std::env::var_os("HELPER_AUDIO_DEBUG").is_some();
@@ -72,8 +80,7 @@ pub fn capture(pid: u32, include_tree: bool) -> Result<(), String> {
             for b in buf.iter_mut() {
                 *b = queue.pop_front().unwrap_or(0);
             }
-            // reader closed the pipe
-            if out.write_all(&buf).and_then(|_| out.flush()).is_err() {
+            if !sink(&buf) {
                 let _ = client.stop_stream();
                 return Ok(());
             }

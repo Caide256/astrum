@@ -64,6 +64,10 @@ fn connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, String
     Ok(stream)
 }
 
+/// Host answers are a few kilobytes of XML (the app list with its pictures a bit
+/// more): anything past this is not an answer, and must not fill the memory.
+const MAX_ANSWER: u64 = 8 * 1024 * 1024;
+
 fn request_text(host: &str, port: u16, path: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: Moonlight\r\nConnection: close\r\n\r\n")
 }
@@ -74,7 +78,7 @@ pub fn http_get(host: &str, port: u16, path: &str, timeout: Duration) -> Result<
     let mut stream = connect(host, port, timeout)?;
     stream.write_all(request_text(host, port, path).as_bytes()).map_err(|e| e.to_string())?;
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).map_err(|e| e.to_string())?;
+    (&mut stream).take(MAX_ANSWER).read_to_end(&mut raw).map_err(|e| e.to_string())?;
     split_response(&raw)
 }
 
@@ -152,7 +156,7 @@ pub fn https_get(
     let mut tls = StreamOwned::new(conn, sock);
     tls.write_all(request_text(host, port, path).as_bytes()).map_err(|e| e.to_string())?;
     let mut raw = Vec::new();
-    match tls.read_to_end(&mut raw) {
+    match (&mut tls).take(MAX_ANSWER).read_to_end(&mut raw) {
         Ok(_) => {}
         // some hosts close without a TLS close_notify; what arrived is the answer
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof && !raw.is_empty() => {}

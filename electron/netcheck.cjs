@@ -1,30 +1,17 @@
 const dgram = require("node:dgram");
-const dns = require("node:dns").promises;
 const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
-const crypto = require("node:crypto");
 
 /**
- * Does this computer have a public ("white") IP that friends can reach?
+ * The network around this computer, for streams through Sunshine.
  *
- * Three looks: the address the internet sees (STUN), the addresses of the
- * network adapters, and the router's own outside address (UPnP). A public
- * address on an adapter means a direct connection; the router reporting the
- * same public address as STUN means a home router with a white IP (and UPnP
- * opens the ports by itself); a router that sits behind another private
- * address means the provider's NAT, a "gray" IP, which nobody outside can
- * reach. Without UPnP the answer stays unknown.
- *
- * STUN goes to public STUN servers, as every WebRTC call does; UPnP only
+ * The NAT check itself runs in the native helper (STUN from the same kind of
+ * socket the stream tunnel uses, see native/helper/src/tunnel). Here: the
+ * addresses of the network adapters, and the router over UPnP, which can
+ * open a port for the tunnel and says what its outside address is. UPnP only
  * talks to devices in the local network.
  */
-
-const STUN_SERVERS = [
-  ["stun.l.google.com", 19302],
-  ["stun.cloudflare.com", 3478],
-  ["stun1.l.google.com", 19302],
-];
 
 function v4(ip) {
   return net.isIPv4(ip) ? ip.split(".").map(Number) : null;
@@ -48,67 +35,6 @@ function isPublic(ip) {
   return !!v4(ip) && !isPrivate(ip) && !isShared(ip) && v4(ip)[0] < 224 && v4(ip)[0] !== 0;
 }
 
-/** One STUN binding request; the answer carries our address as the server saw it. */
-async function stunOnce(host, port, timeoutMs) {
-  let address;
-  try {
-    address = (await dns.lookup(host, { family: 4 })).address;
-  } catch {
-    return null;
-  }
-  return new Promise((resolve) => {
-    const sock = dgram.createSocket("udp4");
-    const id = crypto.randomBytes(12);
-    const done = (ip) => {
-      clearTimeout(timer);
-      try {
-        sock.close();
-      } catch {
-        // already closed
-      }
-      resolve(ip);
-    };
-    const timer = setTimeout(() => done(null), timeoutMs);
-    sock.on("error", () => done(null));
-    sock.on("message", (msg) => {
-      if (msg.length < 20 || msg.readUInt16BE(0) !== 0x0101 || !msg.subarray(8, 20).equals(id)) return;
-      let at = 20;
-      while (at + 4 <= msg.length) {
-        const type = msg.readUInt16BE(at);
-        const len = msg.readUInt16BE(at + 2);
-        const body = msg.subarray(at + 4, at + 4 + len);
-        if ((type === 0x0020 || type === 0x0001) && body.length >= 8 && body[1] === 0x01) {
-          const raw = body.subarray(4, 8);
-          const ip = type === 0x0020 ? [raw[0] ^ 0x21, raw[1] ^ 0x12, raw[2] ^ 0xa4, raw[3] ^ 0x42] : [...raw];
-          done(ip.join("."));
-          return;
-        }
-        at += 4 + len + ((4 - (len % 4)) % 4);
-      }
-    });
-    const req = Buffer.alloc(20);
-    req.writeUInt16BE(0x0001, 0);
-    req.writeUInt16BE(0, 2);
-    req.writeUInt32BE(0x2112a442, 4);
-    id.copy(req, 8);
-    sock.send(req, port, address, (err) => err && done(null));
-  });
-}
-
-/** Our public address as STUN servers see it: the first answer of a few servers. */
-function stunAddress(timeoutMs = 3000) {
-  return new Promise((resolve) => {
-    let left = STUN_SERVERS.length;
-    for (const [host, port] of STUN_SERVERS) {
-      void stunOnce(host, port, timeoutMs).then((ip) => {
-        left -= 1;
-        if (ip) resolve(ip);
-        else if (!left) resolve(null);
-      });
-    }
-  });
-}
-
 /** IPv4 addresses of the network adapters, without loopback, Tailscale and Clash. */
 function adapterAddresses() {
   const out = [];
@@ -120,6 +46,26 @@ function adapterAddresses() {
     }
   }
   return [...new Set(out)];
+}
+
+/** Addresses of the home network: the tunnel's candidates for a viewer in the same network. */
+function lanAddresses() {
+  return adapterAddresses().filter((ip) => isPrivate(ip) && !ip.startsWith("127."));
+}
+
+/** Native global IPv6 addresses (2000::/3): reachable without NAT when both sides have IPv6. */
+function v6Addresses() {
+  const out = [];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const a of list || []) {
+      if (a.family !== "IPv6" || a.internal || a.scopeid) continue;
+      if (!/^[23][0-9a-f]{3}:/i.test(a.address)) continue;
+      // Teredo (2001:0::/32) and 6to4 (2002::/16) are IPv6 tunneled through IPv4 relays: no help here
+      if (/^2001:0{0,4}:/i.test(a.address) || /^2002:/i.test(a.address)) continue;
+      out.push(a.address.toLowerCase());
+    }
+  }
+  return [...new Set(out)].slice(0, 2);
 }
 
 /* -------------------------------------------------------------------- UPnP */
@@ -168,6 +114,7 @@ const SEARCH_TARGETS = [
 
 /** Search from one local address: the router is on one of the adapters, not always the default one. */
 function searchFrom(local, timeoutMs, found) {
+  // found: description URL -> the local address it answered on
   return new Promise((resolve) => {
     const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
     const finish = () => {
@@ -182,7 +129,7 @@ function searchFrom(local, timeoutMs, found) {
     sock.on("message", (msg, rinfo) => {
       if (!isPrivate(rinfo.address)) return;
       const m = /^location:\s*(\S+)/im.exec(msg.toString("utf8"));
-      if (m) found.add(m[1]);
+      if (m && !found.has(m[1])) found.set(m[1], local);
     });
     sock.bind(0, local, () => {
       try {
@@ -199,77 +146,123 @@ function searchFrom(local, timeoutMs, found) {
   });
 }
 
-/** Routers answering an SSDP search for an internet gateway: their description URLs. */
+/** Routers answering an SSDP search for an internet gateway: description URL -> our local address. */
 async function findGateways(timeoutMs) {
-  const found = new Set();
+  const found = new Map();
   const locals = adapterAddresses().filter(isPrivate);
   await Promise.all(locals.map((ip) => searchFrom(ip, timeoutMs, found)));
-  return [...found];
+  return found;
 }
 
-/** The outside address the router reports, through its WAN connection service. */
-async function gatewayAddress(location) {
+/** The WAN connection services of a router: where to send commands. */
+async function wanServices(location) {
   const xml = await httpText(location, {}, 2500);
-  if (!xml) return null;
+  if (!xml) return [];
   const base = /<URLBase>\s*([^<\s]+)\s*<\/URLBase>/i.exec(xml)?.[1] || location;
+  const out = [];
   for (const block of xml.match(/<service>[\s\S]*?<\/service>/gi) || []) {
     const type = /<serviceType>\s*([^<\s]+)\s*<\/serviceType>/i.exec(block)?.[1] || "";
-    if (!/WAN(IP|PPP)Connection/i.test(type)) continue;
+    if (!/^urn:schemas-upnp-org:service:WAN(IP|PPP)Connection:\d$/i.test(type)) continue;
     const control = /<controlURL>\s*([^<\s]+)\s*<\/controlURL>/i.exec(block)?.[1];
     if (!control) continue;
-    let url;
     try {
-      url = new URL(control, base).toString();
+      out.push({ type, url: new URL(control, base).toString() });
     } catch {
-      continue;
+      // a broken URL: skip the service
     }
-    const body =
-      '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">' +
-      `<s:Body><u:GetExternalIPAddress xmlns:u="${type}"/></s:Body></s:Envelope>`;
-    const answer = await httpText(
-      url,
-      { method: "POST", body, headers: { "Content-Type": 'text/xml; charset="utf-8"', SOAPAction: `"${type}#GetExternalIPAddress"` } },
-      2500,
-    );
-    const ip = answer && /<NewExternalIPAddress>\s*([^<\s]*)\s*<\/NewExternalIPAddress>/i.exec(answer)?.[1];
-    if (ip && net.isIPv4(ip)) return ip;
+  }
+  return out;
+}
+
+const XML_ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" };
+
+/** One SOAP command to a router service; the answer's text, or null. */
+function soap(service, action, args) {
+  const body =
+    '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">' +
+    `<s:Body><u:${action} xmlns:u="${service.type}">` +
+    Object.entries(args)
+      .map(([k, v]) => `<${k}>${String(v).replace(/[&<>"]/g, (c) => XML_ESC[c])}</${k}>`)
+      .join("") +
+    `</u:${action}></s:Body></s:Envelope>`;
+  return httpText(
+    service.url,
+    { method: "POST", body, headers: { "Content-Type": 'text/xml; charset="utf-8"', SOAPAction: `"${service.type}#${action}"` } },
+    2500,
+  );
+}
+
+async function externalAddress(service) {
+  const answer = await soap(service, "GetExternalIPAddress", {});
+  const ip = answer && /<NewExternalIPAddress>\s*([^<\s]*)\s*<\/NewExternalIPAddress>/i.exec(answer)?.[1];
+  return ip && net.isIPv4(ip) ? ip : null;
+}
+
+/** The router (one answering UPnP with a WAN service) and its outside address. */
+async function router() {
+  const found = await findGateways(2500);
+  for (const [location, local] of [...found].slice(0, 4)) {
+    for (const service of await wanServices(location).catch(() => [])) {
+      const ip = await externalAddress(service).catch(() => null);
+      if (ip) return { service, local, ip };
+    }
   }
   return null;
 }
 
-async function upnpAddress() {
-  for (const location of (await findGateways(2500)).slice(0, 4)) {
-    const ip = await gatewayAddress(location).catch(() => null);
-    if (ip) return ip;
-  }
-  return null;
+let mapped = null;
+
+/**
+ * Ask the router to pass a UDP port to this computer: the stream tunnel's
+ * port. Returns the outside "ip:port", or "" when the router said no or its
+ * outside address is not public (then the provider's NAT is in front of it).
+ * The mapping expires on its own after an hour if the app is gone.
+ */
+async function openPort(port) {
+  const r = await router().catch(() => null);
+  if (!r || !isPublic(r.ip)) return "";
+  const args = (lease) => ({
+    NewRemoteHost: "",
+    NewExternalPort: port,
+    NewProtocol: "UDP",
+    NewInternalPort: port,
+    NewInternalClient: r.local,
+    NewEnabled: 1,
+    NewPortMappingDescription: "Astrum stream",
+    NewLeaseDuration: lease,
+  });
+  let answer = await soap(r.service, "AddPortMapping", args(3600));
+  // some routers take only permanent mappings
+  if (answer && /<errorCode>\s*725\s*</i.test(answer)) answer = await soap(r.service, "AddPortMapping", args(0));
+  if (!answer || /<errorCode>/i.test(answer)) return "";
+  mapped = { service: r.service, port };
+  return `${r.ip}:${port}`;
+}
+
+async function closePort() {
+  const m = mapped;
+  mapped = null;
+  if (!m) return;
+  await soap(m.service, "DeletePortMapping", { NewRemoteHost: "", NewExternalPort: m.port, NewProtocol: "UDP" }).catch(() => null);
 }
 
 /**
- * verdict: "white" (reachable from outside), "gray" (behind the provider's
- * NAT), "unknown" (the router does not say). `ip` is the address to give out:
- * the router's when it knows one (STUN may be answered through a VPN), else
- * STUN's. `lan` are the local addresses for people in the same network.
+ * What a stream tunnel of this computer would face. `probe` is the native
+ * helper's STUN look ({nat, ip}); nat: "open" (a public address right on the
+ * computer), "cone" (an ordinary NAT, hole punching works), "symmetric" (a
+ * strict NAT), "blocked" (UDP does not get out). The router may open a port
+ * by UPnP, which beats any NAT in front of this computer.
  */
-async function check() {
-  const [stunIp, upnpIp] = await Promise.all([stunAddress().catch(() => null), upnpAddress().catch(() => null)]);
-  const adapters = adapterAddresses();
-  const lan = adapters.filter(isPrivate);
-  // a public address straight on an adapter counts only if the internet sees it too:
-  // VPN adapters (Radmin, Hamachi) carry public-looking addresses of their own
-  const direct = adapters.find((a) => isPublic(a) && (a === stunIp || a === upnpIp));
-  let verdict = "unknown";
-  let ip = "";
-  if (direct) {
-    verdict = "white";
-    ip = direct;
-  } else if (upnpIp) {
-    verdict = isPublic(upnpIp) ? "white" : "gray";
-    ip = isPublic(upnpIp) ? upnpIp : stunIp || "";
-  } else if (stunIp) {
-    ip = stunIp;
-  }
-  return { verdict, ip, stunIp: stunIp || "", upnpIp: upnpIp || "", upnp: !!upnpIp, lan };
+async function check(probe) {
+  const [seen, r] = await Promise.all([probe().catch(() => null), router().catch(() => null)]);
+  const nat = ["open", "cone", "symmetric", "blocked"].includes(seen?.nat) ? seen.nat : "unknown";
+  return {
+    nat,
+    ip: typeof seen?.ip === "string" && net.isIPv4(seen.ip) ? seen.ip : "",
+    upnp: !!r && isPublic(r.ip),
+    v6: v6Addresses().length > 0,
+    lan: lanAddresses(),
+  };
 }
 
-module.exports = { check, isPublic, isPrivate };
+module.exports = { check, isPublic, isPrivate, lanAddresses, v6Addresses, openPort, closePort };

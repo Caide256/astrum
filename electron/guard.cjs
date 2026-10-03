@@ -1,3 +1,4 @@
+const { app } = require("electron");
 const path = require("node:path");
 const { fileURLToPath } = require("node:url");
 
@@ -11,7 +12,9 @@ const { fileURLToPath } = require("node:url");
  * packaged app loads the files of dist/ next to this folder.
  */
 
-const DEV_URL = process.env.APP_DEV_URL || "";
+// a packaged app never loads a page from elsewhere, whatever the environment says:
+// the page there would get the whole bridge
+const DEV_URL = (!app.isPackaged && process.env.APP_DEV_URL) || "";
 const DEV_ORIGIN = (() => {
   try {
     return DEV_URL ? new URL(DEV_URL).origin : "";

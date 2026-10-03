@@ -43,7 +43,9 @@ import { LANGS, fmtDateTime, setLang, t, useLang, type Key, type Lang } from "..
 import type { CryptoStatus } from "../matrix/crypto.ts";
 import type { SessionRow } from "../matrix/people.ts";
 import {
-  UI_SCALES,
+  UI_SCALE_MAX,
+  UI_SCALE_MIN,
+  UI_SCALE_STEP,
   setNotifyMode,
   setNotifyPrefs,
   setUiScale,
@@ -51,14 +53,12 @@ import {
   useNotifyPrefs,
   useUiScale,
   useViewPrefs,
-  setPlayerPrefs,
   setPrivacy,
   setSoundPrefs,
   setChatLook,
   setTileLook,
   getTileLook,
   useChatLook,
-  usePlayerPrefs,
   usePrivacy,
   useTileLook,
   type ChatLook,
@@ -768,11 +768,10 @@ function AudioTab() {
         <Picker label={t("audio.mic")} value={settings.micId} list={devices.mics} onPick={(id) => void voice.applySettings({ micId: id })} />
         <Picker label={t("audio.output")} value={settings.spkId} list={devices.speakers} onPick={(id) => void voice.applySettings({ spkId: id })} />
       </div>
-
-      <div className="section-title">{t("camera.section")}</div>
-      <div className="two">
-        <Picker label={t("camera.device")} value={settings.camId} list={devices.cams} onPick={(id) => void voice.setCamera(state.camera, id)} />
-        <CameraQuality />
+      <div className="row left">
+        <button className="ghost small" onClick={() => void voice.unlockDevices()}>
+          <IconRefresh /> {t("audio.refreshDevices")}
+        </button>
       </div>
 
       <div className="section-title">{t("audio.test")}</div>
@@ -867,6 +866,12 @@ function AudioTab() {
         <span>{t("audio.gain")}</span>
       </label>
 
+      <div className="section-title">{t("camera.section")}</div>
+      <div className="two">
+        <Picker label={t("camera.device")} value={settings.camId} list={devices.cams} onPick={(id) => void voice.setCamera(state.camera, id)} />
+        <CameraQuality />
+      </div>
+
       <div className="section-title">{t("audio.soundsTitle")}</div>
       <label className="check">
         <input type="checkbox" checked={settings.sounds} onChange={() => void voice.applySettings({ sounds: !settings.sounds })} />
@@ -879,9 +884,6 @@ function AudioTab() {
             {t(s.name)}
           </button>
         ))}
-        <button className="ghost small" onClick={() => void voice.unlockDevices()}>
-          <IconRefresh /> {t("audio.refreshDevices")}
-        </button>
       </div>
     </>
   );
@@ -1302,10 +1304,47 @@ function MessagesLook() {
   );
 }
 
+/**
+ * The interface scale. The window zooms only when the slider is let go:
+ * zooming while dragging would move the slider away from under the cursor.
+ */
+function ScaleSlider({ value }: { value: number }) {
+  const [draft, setDraft] = useState<number | null>(null);
+  const shown = draft ?? value;
+  const commit = () => {
+    if (draft !== null && draft !== value) setUiScale(draft);
+    setDraft(null);
+  };
+  return (
+    <div className="field scale-field">
+      <div className="scale-row">
+        <span className="state">{UI_SCALE_MIN}%</span>
+        <input
+          type="range"
+          min={UI_SCALE_MIN}
+          max={UI_SCALE_MAX}
+          step={UI_SCALE_STEP}
+          value={shown}
+          aria-label={t("appearance.scale")}
+          onChange={(e) => setDraft(Number(e.target.value))}
+          onPointerUp={commit}
+          onKeyUp={commit}
+          onBlur={commit}
+        />
+        <span className="state">{UI_SCALE_MAX}%</span>
+        <b className="scale-value">{shown}%</b>
+        <button className="ghost small" disabled={value === 100 && draft === null} onClick={() => (setDraft(null), setUiScale(100))}>
+          {t("appearance.scale.reset")}
+        </button>
+      </div>
+      <span className="state">{t("appearance.scale.hint")}</span>
+    </div>
+  );
+}
+
 function AppearanceTab() {
   const theme = useTheme();
   const lang = useLang();
-  const player = usePlayerPrefs();
   const priv = usePrivacy();
   const viewPrefs = useViewPrefs();
   const scale = useUiScale();
@@ -1347,29 +1386,10 @@ function AppearanceTab() {
         </>
       )}
 
-      <MessagesLook />
-
-      <div className="section-title">{t("player.title")}</div>
-      <Toggle checked={player.mini} onChange={(mini) => setPlayerPrefs({ mini })} title={t("player.mini")} hint={t("player.mini.hint")} />
-      <Toggle
-        checked={player.magnet}
-        disabled={!player.mini}
-        onChange={(magnet) => setPlayerPrefs({ magnet })}
-        title={t("player.magnet")}
-        hint={t("player.magnet.hint")}
-      />
-
       <div className="section-title">{t("appearance.scale")}</div>
-      <div className="field">
-        <div className="seg scale-seg">
-          {UI_SCALES.map((n) => (
-            <button key={n} className={scale === n ? "on" : ""} onClick={() => setUiScale(n)}>
-              {n}%
-            </button>
-          ))}
-        </div>
-        <span className="state">{t("appearance.scale.hint")}</span>
-      </div>
+      <ScaleSlider value={scale} />
+
+      <MessagesLook />
 
       <div className="section-title">{t("appearance.others")}</div>
       <Toggle
@@ -1471,38 +1491,6 @@ function AppTab() {
 
   return (
     <>
-      {!hasShell && <div className="note">{t("app.onlyDesktop")}</div>}
-      {hasShell && !shell && <div className="state">{t("common.loading")}</div>}
-      {shell && (
-        <>
-          <div className="section-title">{t("app.window")}</div>
-          <Toggle
-            checked={shell.closeToTray}
-            onChange={(v) => set({ closeToTray: v })}
-            title={t("app.closeToTray")}
-            hint={t("app.closeToTray.hint")}
-          />
-
-          <div className="section-title">{t("app.startup")}</div>
-          <Toggle
-            checked={shell.autostart}
-            disabled={!shell.autostartAvailable}
-            onChange={(v) => set({ autostart: v })}
-            title={t("app.autostart")}
-            hint={shell.autostartAvailable ? t("app.autostart.hint") : t("app.autostart.unavailable")}
-          />
-          {shell.autostart && <div className="note gap-top">{t("app.autostart.portable")}</div>}
-
-          <div className="section-title">{t("app.typing")}</div>
-          <Toggle
-            checked={!!shell.spellcheck}
-            onChange={(v) => set({ spellcheck: v })}
-            title={t("app.spellcheck")}
-            hint={t("app.spellcheck.hint")}
-          />
-        </>
-      )}
-
       <div className="section-title">{t("app.notifications")}</div>
       <div className="field">
         <Seg value={notify} list={NOTIFY_MODES} onPick={setNotifyMode} />
@@ -1531,6 +1519,38 @@ function AppTab() {
           {t("app.mentionTry")}
         </button>
       </div>
+
+      {!hasShell && <div className="note">{t("app.onlyDesktop")}</div>}
+      {hasShell && !shell && <div className="state">{t("common.loading")}</div>}
+      {shell && (
+        <>
+          <div className="section-title">{t("app.typing")}</div>
+          <Toggle
+            checked={!!shell.spellcheck}
+            onChange={(v) => set({ spellcheck: v })}
+            title={t("app.spellcheck")}
+            hint={t("app.spellcheck.hint")}
+          />
+
+          <div className="section-title">{t("app.window")}</div>
+          <Toggle
+            checked={shell.closeToTray}
+            onChange={(v) => set({ closeToTray: v })}
+            title={t("app.closeToTray")}
+            hint={t("app.closeToTray.hint")}
+          />
+
+          <div className="section-title">{t("app.startup")}</div>
+          <Toggle
+            checked={shell.autostart}
+            disabled={!shell.autostartAvailable}
+            onChange={(v) => set({ autostart: v })}
+            title={t("app.autostart")}
+            hint={shell.autostartAvailable ? t("app.autostart.hint") : t("app.autostart.unavailable")}
+          />
+          {shell.autostart && <div className="note gap-top">{t("app.autostart.portable")}</div>}
+        </>
+      )}
 
       <UpdatesSection />
     </>
@@ -1941,16 +1961,28 @@ function SessionsTab() {
 
 /* ------------------------------------------------------------------- window */
 
-const TABS: { id: SettingsTab; name: Key }[] = [
-  { id: "profile", name: "settings.tab.profile" },
-  { id: "audio", name: "settings.tab.audio" },
-  { id: "keys", name: "settings.tab.keys" },
-  { id: "appearance", name: "settings.tab.appearance" },
-  { id: "app", name: "settings.tab.app" },
-  { id: "moonlight", name: "settings.tab.moonlight" },
-  { id: "crypto", name: "settings.tab.crypto" },
-  { id: "sessions", name: "settings.tab.sessions" },
+/** The account first, then how the app looks, sounds and behaves; in each group the most used first. */
+const TAB_GROUPS: { name: Key; tabs: { id: SettingsTab; name: Key }[] }[] = [
+  {
+    name: "settings.group.account",
+    tabs: [
+      { id: "profile", name: "settings.tab.profile" },
+      { id: "crypto", name: "settings.tab.crypto" },
+      { id: "sessions", name: "settings.tab.sessions" },
+    ],
+  },
+  {
+    name: "settings.group.app",
+    tabs: [
+      { id: "appearance", name: "settings.tab.appearance" },
+      { id: "app", name: "settings.tab.app" },
+      { id: "audio", name: "settings.tab.audio" },
+      { id: "moonlight", name: "settings.tab.moonlight" },
+      { id: "keys", name: "settings.tab.keys" },
+    ],
+  },
 ];
+const TABS = TAB_GROUPS.flatMap((g) => g.tabs);
 
 export function Settings() {
   const open = useStore(app, (s) => s.settingsOpen);
@@ -1977,10 +2009,15 @@ export function Settings() {
     <div className={`modal-back ${closing ? "closing" : ""}`} onClick={close}>
       <div className="modal wide settings" onClick={(e) => e.stopPropagation()}>
         <div className="settings-tabs">
-          {TABS.map((tb) => (
-            <button key={tb.id} className={tab === tb.id ? "on" : "ghost"} onClick={() => app.set({ settingsTab: tb.id })}>
-              {t(tb.name)}
-            </button>
+          {TAB_GROUPS.map((g) => (
+            <div key={g.name} className="settings-group">
+              <span className="settings-group-name">{t(g.name)}</span>
+              {g.tabs.map((tb) => (
+                <button key={tb.id} className={tab === tb.id ? "on" : "ghost"} onClick={() => app.set({ settingsTab: tb.id })}>
+                  {t(tb.name)}
+                </button>
+              ))}
+            </div>
           ))}
         </div>
 

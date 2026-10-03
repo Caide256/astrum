@@ -93,7 +93,14 @@ export type MlStreamOptions = {
   formats: number;
   /** The streamer keeps hearing the own sound (default). */
   hostAudio?: boolean;
+  /** Video packet size: smaller through the tunnel, which adds its own header to each. */
+  packet?: number;
 };
+
+/** The viewer's end of the stream tunnel: this side's key and candidates. */
+export type TunReady = { ok: boolean; error?: string; key?: string; nat?: string; cands?: string[] };
+/** What the viewer's tunnel reports: a working path (with the local address Sunshine answers on), a failure, the end. */
+export type TunEvent = { ev: "up"; local: string; path: string; rtt: number } | { ev: "fail"; reason: string; text?: string } | { ev: "down"; reason: string };
 
 /** The Moonlight part of the shell, or null in a plain browser. */
 export function moonlightBridge() {
@@ -112,10 +119,15 @@ export function moonlightBridge() {
     onEvent: b.onMlEvent,
     onFrame: b.onMlFrame,
     onAudio: b.onMlAudio ?? (() => () => undefined),
+    tunStart: b.tunStart ?? (async () => ({ ok: false, error: "no-helper" })),
+    tunPeer: b.tunPeer ?? (async () => ({ ok: false })),
+    tunStop: b.tunStop ?? (async () => undefined),
+    onTunEvent: b.onTunEvent ?? (() => () => undefined),
+    onTunPcm: b.onTunPcm ?? (() => () => undefined),
   };
 }
 
-/* Sunshine bundled with the app: own streams for people with a public IP (electron/sunshine.cjs). */
+/* Sunshine bundled with the app: own streams, sent to viewers through the tunnel (electron/sunshine.cjs). */
 
 export type SunStatus = {
   installed: boolean;
@@ -129,31 +141,48 @@ export type SunStatus = {
   error: string;
   port: number;
   uid: string;
+  /** The streamer's end of the tunnel while Sunshine runs: its NAT and candidates. */
+  tunnel: { nat: string; cands: string[] } | null;
 };
 
 export type SunStartSettings = {
   output: string;
-  audioSink: string;
+  /** The computer's sound, without the app's own, goes to viewers. */
   audio: boolean;
   encoder: "" | "nvenc" | "amdvce" | "quicksync" | "software";
   maxKbps: number;
-  port: number;
+  /** How many viewers at once: each has a session and an encoder of its own. */
+  viewers: number;
+  /** The tunnel's UDP port, fixed for a port forwarded by hand; 0 picks any. */
+  udpPort: number;
   upnp: boolean;
+  /** The outside address (an IP or a DynDNS name) of a port forwarded by hand. */
+  address: string;
+};
+
+export type SunStarted = {
+  ok: boolean;
+  error?: string;
+  port?: number;
+  uid?: string;
+  nat?: string;
+  cands?: string[];
+  encoder?: string;
 };
 
 export type SunPairing = { id: string; name: string; address: string };
 export type SunClient = { uuid: string; name: string };
 export type SunDisplay = { id: string; name: string; w: number; h: number; hz: number; primary: boolean };
-export type SunAudioDevice = { id: string; name: string };
 
 export type SunEvent =
   | { type: "state"; state: SunStatus }
   | { type: "install"; progress: number }
   | { type: "pairings"; list: SunPairing[] }
-  | { type: "stopped" };
+  | { type: "stopped" }
+  | { type: "tunnel"; ev: "up" | "down" | "gone" | "audio-error"; id?: string; path?: string; reason?: string };
 
-/** Whether this computer can be reached from outside: see electron/netcheck.cjs. */
-export type NetCheck = { verdict: "white" | "gray" | "unknown"; ip: string; stunIp: string; upnpIp: string; upnp: boolean; lan: string[] };
+/** The NAT this computer is behind and whether the router opens ports: see electron/netcheck.cjs. */
+export type NetCheck = { nat: "open" | "cone" | "symmetric" | "blocked" | "unknown"; ip: string; upnp: boolean; v6: boolean; lan: string[] };
 
 export function sunshineBridge() {
   const b = bridge;
@@ -163,14 +192,15 @@ export function sunshineBridge() {
     install: b.sunInstall ?? (async () => ({ ok: false, error: "no-shell" })),
     start: b.sunStart,
     stop: b.sunStop,
-    devices: b.sunDevices ?? (async () => ({ audio: [], displays: [] })),
+    devices: b.sunDevices ?? (async () => ({ displays: [] })),
     approve: b.sunApprove ?? (async () => ({ ok: false })),
     deny: b.sunDeny ?? (async () => ({ ok: false })),
     clients: b.sunClients ?? (async () => null),
     unpair: b.sunUnpair ?? (async () => ({ ok: false })),
     onEvent: b.onSunEvent,
     netCheck: b.netCheck,
-    resolvePublic: b.resolvePublic ?? (async () => ""),
+    peer: b.sunPeer ?? (async () => ({ ok: false, error: "no-shell" })),
+    drop: b.sunDrop ?? (async () => undefined),
   };
 }
 
@@ -211,16 +241,22 @@ type Bridge = {
   onMlAudio?: (cb: (packet: ArrayBuffer) => void) => () => void;
   sunStatus?: () => Promise<SunStatus>;
   sunInstall?: () => Promise<{ ok: boolean; error?: string }>;
-  sunStart?: (settings: SunStartSettings) => Promise<{ ok: boolean; error?: string; port?: number; uid?: string }>;
+  sunStart?: (settings: SunStartSettings) => Promise<SunStarted>;
   sunStop?: () => Promise<void>;
-  sunDevices?: () => Promise<{ audio: SunAudioDevice[]; displays: SunDisplay[] }>;
+  sunDevices?: () => Promise<{ displays: SunDisplay[] }>;
+  sunPeer?: (id: string, key: string, nat: string, cands: string[]) => Promise<{ ok: boolean; error?: string; sid?: number; key?: string }>;
+  sunDrop?: (id: string) => Promise<void>;
+  tunStart?: (base: number) => Promise<TunReady>;
+  tunPeer?: (sid: number, key: string, nat: string, cands: string[]) => Promise<{ ok: boolean }>;
+  tunStop?: () => Promise<void>;
+  onTunEvent?: (cb: (json: string) => void) => () => void;
+  onTunPcm?: (cb: (frame: ArrayBuffer) => void) => () => void;
   sunApprove?: (id: string, pin: string, name: string) => Promise<{ ok: boolean }>;
   sunDeny?: (id: string) => Promise<{ ok: boolean }>;
   sunClients?: () => Promise<SunClient[] | null>;
   sunUnpair?: (uuid: string) => Promise<{ ok: boolean }>;
   onSunEvent?: (cb: (event: SunEvent) => void) => () => void;
   netCheck?: () => Promise<NetCheck>;
-  resolvePublic?: (name: string) => Promise<string>;
   mlApps?: (host: string) => Promise<MlAnswer<MlApp[]>>;
   mlQuit?: (host: string) => Promise<MlAnswer<unknown>>;
   mlStart?: (opts: MlStreamOptions) => Promise<{ ok: boolean; error?: string }>;

@@ -7,6 +7,7 @@ const brand = require("../brand.json");
 const guard = require("./guard.cjs");
 const preview = require("./preview.cjs");
 const { publicFetch } = require("./publicfetch.cjs");
+const netcheck = require("./netcheck.cjs");
 const sunshine = require("./sunshine.cjs");
 const tray = require("./tray.cjs");
 const updater = require("./updater.cjs");
@@ -195,6 +196,92 @@ function mlCommand(args, timeoutMs) {
   });
 }
 
+/**
+ * The viewer's end of a stream tunnel (native/helper/src/tunnel/view.rs):
+ * one at a time, like the stream. Its events go to the page as they come,
+ * and so does the stream's sound, which travels in the tunnel.
+ */
+let mlTunnel = null;
+
+const TUN_CAND = /^(?:(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]{2,39}\]):\d{1,5}$/i;
+
+function stopTunnel() {
+  const t = mlTunnel;
+  mlTunnel = null;
+  if (!t) return;
+  try {
+    t.stdin.write("stop\n");
+  } catch {
+    // already gone
+  }
+  setTimeout(() => {
+    if (t.exitCode === null) t.kill();
+  }, 3000);
+}
+
+function startTunnel(sender, base) {
+  stopTunnel();
+  const exe = helperPath();
+  if (!exe || process.platform !== "win32") return Promise.resolve({ ok: false, error: "no-helper" });
+  const port = Math.round(Number(base));
+  if (!(port >= 1030 && port <= 65000)) return Promise.resolve({ ok: false, error: "bad-port" });
+  const child = spawn(exe, ["tunnel", "view", String(port), netcheck.lanAddresses().join(","), netcheck.v6Addresses().join(",")], {
+    stdio: ["pipe", "pipe", "ignore"],
+    windowsHide: true,
+  });
+  mlTunnel = child;
+  child.stdin.on("error", () => undefined);
+  return new Promise((resolve) => {
+    let ready = false;
+    const timer = setTimeout(() => {
+      if (!ready) resolve({ ok: false, error: "tunnel" });
+    }, 15_000);
+    let pending = Buffer.alloc(0);
+    child.stdout.on("data", (data) => {
+      pending = pending.length ? Buffer.concat([pending, data]) : data;
+      while (pending.length >= 5) {
+        const len = pending.readUInt32LE(1);
+        if (len > 1 << 20) {
+          child.kill();
+          return;
+        }
+        if (pending.length < 5 + len) break;
+        const kind = pending[0];
+        const payload = pending.subarray(5, 5 + len);
+        pending = pending.subarray(5 + len);
+        if (kind === 4) {
+          if (!sender.isDestroyed()) sender.send("app:tun-pcm", Buffer.from(payload));
+          continue;
+        }
+        if (kind !== 2) continue;
+        let ev;
+        try {
+          ev = JSON.parse(payload.toString("utf8"));
+        } catch {
+          continue;
+        }
+        if (ev.ev === "ready" && !ready) {
+          ready = true;
+          clearTimeout(timer);
+          const cands = String(ev.cands || "")
+            .split(",")
+            .filter((c) => TUN_CAND.test(c))
+            .slice(0, 16);
+          resolve({ ok: true, key: String(ev.key || ""), nat: String(ev.nat || ""), cands });
+        } else if (!sender.isDestroyed()) {
+          sender.send("app:tun-event", JSON.stringify(ev));
+        }
+      }
+    });
+    child.on("exit", () => {
+      clearTimeout(timer);
+      if (mlTunnel === child) mlTunnel = null;
+      if (!ready) resolve({ ok: false, error: "tunnel" });
+      else if (!sender.isDestroyed()) sender.send("app:tun-event", JSON.stringify({ ev: "down", reason: "exit" }));
+    });
+  });
+}
+
 function stopMoonlight() {
   const child = mlStream;
   mlStream = null;
@@ -241,6 +328,22 @@ function moonlightBridge() {
   guard.handle(ipcMain, "app:ml-apps", (_e, h) => run(h, ["apps"], 20_000));
   guard.handle(ipcMain, "app:ml-quit", (_e, h) => run(h, ["quit"], 20_000));
 
+  guard.handle(ipcMain, "app:tun-start", (event, base) => startTunnel(event.sender, base));
+  // the streamer's answer: its session, key and candidates
+  guard.handle(ipcMain, "app:tun-peer", (_e, sid, key, nat, cands) => {
+    const id = Number(sid) >>> 0;
+    const list = (Array.isArray(cands) ? cands : []).map(String).filter((c) => TUN_CAND.test(c)).slice(0, 16);
+    if (!mlTunnel || !id || !/^[0-9a-f]{64}$/.test(String(key)) || !list.length) return { ok: false };
+    const n = ["open", "cone", "symmetric", "blocked"].includes(nat) ? nat : "unknown";
+    try {
+      mlTunnel.stdin.write(`peer ${id} ${key} ${n} ${list.join(",")}\n`);
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
+  });
+  guard.handle(ipcMain, "app:tun-stop", () => stopTunnel());
+
   guard.handle(ipcMain, "app:ml-start", (event, opts) => {
     stopMoonlight();
     const exe = helperPath();
@@ -261,6 +364,7 @@ function moonlightBridge() {
       num(o.formats, 1),
       // the streamer keeps hearing the own sound
       o.hostAudio === false ? "0" : "1",
+      num(o.packet, 1392),
     ];
     const child = spawn(exe, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     mlStream = child;
@@ -284,7 +388,7 @@ function moonlightBridge() {
       }
     });
     child.stderr.on("data", (d) => {
-      errText += d.toString();
+      errText = (errText + d.toString()).slice(-4000);
     });
     child.on("exit", (code) => {
       if (mlStream === child) mlStream = null;
@@ -346,7 +450,7 @@ function audioBridge() {
       if (whole > 0 && !sender.isDestroyed()) sender.send("app:screen-audio", all.subarray(0, whole));
     });
     child.stderr.on("data", (d) => {
-      errText += d.toString();
+      errText = (errText + d.toString()).slice(-4000);
     });
     child.on("exit", (code) => {
       if (audioHelper === child) audioHelper = null;
@@ -375,6 +479,30 @@ let bindings = [];
 function sendHotkey(detail) {
   const win = mainWindow;
   if (win && !win.isDestroyed()) win.webContents.send("app:hotkey", detail);
+}
+
+/**
+ * Bindings from the page, checked: a few dozen at most, each a few parts of
+ * a few key codes. A page that could bind every key would see everything
+ * typed anywhere in the system.
+ */
+const MAX_BINDINGS = 24;
+
+function cleanBindings(list) {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const b of list.slice(0, MAX_BINDINGS)) {
+    if (!b || typeof b !== "object" || !/^[\w.-]{1,64}$/.test(String(b.id))) continue;
+    const accelerator = typeof b.accelerator === "string" && b.accelerator.length <= 64 ? b.accelerator : null;
+    let keys = null;
+    if (Array.isArray(b.keys) && b.keys.length && b.keys.length <= 4) {
+      keys = b.keys.map((part) => (Array.isArray(part) ? part.slice(0, 4).map(Number).filter((k) => Number.isInteger(k) && k > 0 && k < 0x300) : []));
+      if (keys.some((part) => !part.length)) keys = null;
+    }
+    if (!keys && !accelerator) continue;
+    out.push({ id: String(b.id), action: String(b.action ?? "").slice(0, 64), keys, accelerator });
+  }
+  return out;
 }
 
 function pushBindings() {
@@ -441,7 +569,7 @@ function registerShortcuts(list) {
 function hotkeyBridge() {
   // answers whether the native hook is used and which shortcuts the system refused
   guard.handle(ipcMain, "app:hotkeys", (_e, list) => {
-    bindings = Array.isArray(list) ? list : [];
+    bindings = cleanBindings(list);
     if (keysHelper) {
       globalShortcut.unregisterAll();
       pushBindings();
@@ -675,7 +803,7 @@ function applySpellcheck(on) {
 
 function spellBridge() {
   tray.setSpellcheckHandler(applySpellcheck);
-  applySpellcheck(tray.loadSettings().spellcheck);
+  applySpellcheck(tray.loadSettings().spell !== false);
   guard.handle(ipcMain, "app:menu-labels", (_e, labels) => {
     if (!labels || typeof labels !== "object") return;
     for (const key of Object.keys(menuLabels)) {
@@ -1077,6 +1205,7 @@ if (!app.requestSingleInstanceLock()) {
     // the helper stops Sunshine cleanly on its own once the app is gone
     void sunshine.stop();
     stopMoonlight();
+    stopTunnel();
     if (keysHelper) {
       const child = keysHelper;
       keysHelper = null;

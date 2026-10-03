@@ -1,9 +1,9 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import { avatarMxc, displayName, flashNotice } from "../app.ts";
 import { fmtDateTime, t, type Key } from "../i18n/index.ts";
-import { ML_FPS, ML_HEIGHTS, autoKbps, forgetHost, hasMoonlight, ml, pictureFor, setQuality, type MlWatch } from "../moonlight.ts";
-import { useIdsHidden } from "../prefs.ts";
+import { ML_CODECS, ML_FPS, ML_HEIGHTS, autoKbps, forgetHost, hasMoonlight, ml, pictureFor, setQuality, type MlCodec, type MlWatch } from "../moonlight.ts";
+import { setPlayerPrefs, usePlayerPrefs } from "../prefs.ts";
 import { useStore } from "../store.ts";
 import {
   allowViewer,
@@ -19,7 +19,6 @@ import {
   startSunshineStream,
   stopSunshineStream,
   sun,
-  sunshineAllowed,
   type SunSettings,
 } from "../sunshine.ts";
 import { voice } from "../voice/voice.ts";
@@ -31,12 +30,53 @@ function mbps(kbps: number): string {
   return (kbps / 1000).toFixed(kbps >= 10_000 ? 0 : 1).replace(/\.0$/, "");
 }
 
+/* ------------------------------------------------------- regular streams */
+
+function PlayerSection() {
+  const player = usePlayerPrefs();
+  return (
+    <>
+      <div className="section-title">{t("player.title")}</div>
+      <Toggle checked={player.mini} onChange={(mini) => setPlayerPrefs({ mini })} title={t("player.mini")} hint={t("player.mini.hint")} />
+      <Toggle
+        checked={player.magnet}
+        disabled={!player.mini}
+        onChange={(magnet) => setPlayerPrefs({ magnet })}
+        title={t("player.magnet")}
+        hint={t("player.magnet.hint")}
+      />
+    </>
+  );
+}
+
 /* ---------------------------------------------------------------- viewing */
 
 const HEIGHT_NAMES: Record<number, string> = { 720: "720p", 1080: "1080p", 1440: "1440p", 2160: "4K" };
+const CODEC_NAMES: Record<MlCodec, string> = { h264: "H.264", hevc: "HEVC (H.265)", av1: "AV1" };
+
+/** Which codecs this computer's graphics card decodes: the others are greyed out. */
+function useDecodable(): Record<MlCodec, boolean> {
+  const [ok, setOk] = useState<Record<MlCodec, boolean>>({ h264: true, hevc: true, av1: true });
+  useEffect(() => {
+    let alive = true;
+    const probe: Record<MlCodec, string> = { h264: "avc1.640033", hevc: "hvc1.1.6.L153.B0", av1: "av01.0.13M.08" };
+    void Promise.all(
+      ML_CODECS.map(async (c) => {
+        if (c === "h264" || typeof VideoDecoder === "undefined") return [c, c === "h264"] as const;
+        const r = await VideoDecoder.isConfigSupported({ codec: probe[c], hardwareAcceleration: "prefer-hardware" }).catch(() => null);
+        return [c, !!r?.supported] as const;
+      }),
+    ).then((list) => alive && setOk(Object.fromEntries(list) as Record<MlCodec, boolean>));
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return ok;
+}
 
 function QualitySection() {
   const q = useStore(ml, (s) => s.quality);
+  const decodable = useDecodable();
   // what the bitrate comes to with a 1440p source, the usual monitor of a streamer
   const sample = pictureFor({ w: 2560, h: 1440 }, q);
   return (
@@ -66,13 +106,19 @@ function QualitySection() {
       <div className="field">
         <label>{t("ml.codec")}</label>
         <div className="seg">
-          <button className={q.codec === "h264" ? "on" : ""} onClick={() => setQuality({ codec: "h264" })}>
-            H.264
-          </button>
-          <button className={q.codec === "hevc" ? "on" : ""} onClick={() => setQuality({ codec: "hevc" })}>
-            HEVC (H.265)
-          </button>
+          {ML_CODECS.map((c) => (
+            <button
+              key={c}
+              className={q.codec === c ? "on" : ""}
+              disabled={!decodable[c]}
+              title={decodable[c] ? "" : t("ml.codec.noDecoder")}
+              onClick={() => setQuality({ codec: c })}
+            >
+              {CODEC_NAMES[c]}
+            </button>
+          ))}
         </div>
+        <span className="state">{t("ml.codec.hint")}</span>
       </div>
       <div className="field">
         <label>{t("ml.bitrateAuto")}</label>
@@ -88,7 +134,6 @@ function QualitySection() {
 
 function ConnectionsSection() {
   const hosts = useStore(ml, (s) => s.hosts);
-  const hidden = useIdsHidden();
   return (
     <>
       <div className="section-title">{t("ml.connections")}</div>
@@ -99,10 +144,7 @@ function ConnectionsSection() {
               <Avatar mxc={avatarMxc(h.userId)} name={displayName(h.userId)} size={28} />
               <div className="grow ellipsis">
                 <b className="ellipsis">{displayName(h.userId)}</b>
-                <div className="state ellipsis">
-                  {!hidden && <span className="sensitive">{h.address} · </span>}
-                  {h.at ? t("ml.lastWatched", { when: fmtDateTime(h.at) }) : ""}
-                </div>
+                <div className="state ellipsis">{h.at ? t("ml.lastWatched", { when: fmtDateTime(h.at) }) : ""}</div>
               </div>
               <button className="ghost icon small" title={t("ml.forget")} onClick={() => void forgetHost(h.key)}>
                 <IconTrash />
@@ -118,43 +160,53 @@ function ConnectionsSection() {
 
 /* ----------------------------------------------------------- own Sunshine */
 
+/** How likely viewers get through to this computer, from the NAT in front of it. */
 function NetLine() {
   const net = useStore(sun, (s) => s.net);
   const checking = useStore(sun, (s) => s.checking);
-  const manual = useStore(sun, (s) => s.settings.manualWhite);
-  const hidden = useIdsHidden();
-  const ip = (v: string) => (hidden ? "•••" : v);
+  const level = !net ? "" : net.nat === "blocked" ? "bad" : net.nat === "symmetric" && !net.upnp ? "fair" : net.nat === "unknown" ? "fair" : "good";
+  const text = checking
+    ? t("sun.net.checking")
+    : !net
+      ? t("sun.net.none")
+      : net.nat === "blocked"
+        ? t("sun.net.blocked")
+        : net.nat === "open"
+          ? t("sun.net.open")
+          : net.upnp
+            ? t("sun.net.upnp")
+            : net.nat === "cone"
+              ? t("sun.net.cone")
+              : net.nat === "symmetric"
+                ? t("sun.net.symmetric")
+                : t("sun.net.unknown");
   return (
     <div className="sun-net">
-      <div className={`sun-net-line ${net?.verdict ?? ""}`}>
-        <i className={`sun-net-dot ${checking ? "checking" : (net?.verdict ?? "")}`} />
+      <div className="sun-net-line">
+        <i className={`sun-net-dot ${checking ? "checking" : level}`} />
         <span className="grow">
-          {checking
-            ? t("sun.net.checking")
-            : !net
-              ? t("sun.net.none")
-              : net.verdict === "white"
-                ? t(net.upnp ? "sun.net.whiteUpnp" : "sun.net.white", { ip: ip(net.ip) })
-                : net.verdict === "gray"
-                  ? t("sun.net.gray")
-                  : net.stunIp
-                    ? t("sun.net.unknownSeen", { ip: ip(net.stunIp) })
-                    : t("sun.net.unknown")}
+          {text}
+          {net?.v6 && !checking && <span className="state"> {t("sun.net.v6")}</span>}
         </span>
         <button className="ghost small" disabled={checking} onClick={() => void checkNet(true)}>
           <IconRefresh /> {t("sun.net.recheck")}
         </button>
       </div>
-      {net?.verdict === "unknown" && (
-        <Toggle checked={manual} onChange={(manualWhite) => setSunSettings({ manualWhite })} title={t("sun.manualWhite")} hint={t("sun.manualWhite.hint")} />
-      )}
     </div>
   );
 }
 
+const ENCODER_NAMES: Record<string, Key> = {
+  nvenc: "sun.encoder.nvenc",
+  amdvce: "sun.encoder.amd",
+  quicksync: "sun.encoder.intel",
+  software: "sun.encoder.cpu",
+};
+
 function ComponentLine() {
   const status = useStore(sun, (s) => s.status);
   const busy = useStore(sun, (s) => s.busy);
+  const encoder = useStore(sun, (s) => s.encoder);
   if (!status) return <div className="state">{t("common.loading")}</div>;
   if (status.installing !== null) {
     return (
@@ -166,15 +218,25 @@ function ComponentLine() {
       </div>
     );
   }
-  return status.installed ? (
-    <span className="state">{t("sun.installed", { version: status.version })}</span>
-  ) : (
-    <div className="row left">
-      <span className="state grow">{t("sun.notInstalled", { size: Math.round(status.size / 1048576) })}</span>
-      <button className="ghost small" disabled={!!busy} onClick={() => void installSunshine()}>
-        {t("sun.download")}
-      </button>
-    </div>
+  if (!status.installed) {
+    return (
+      <div className="row left">
+        <span className="state grow">{t("sun.notInstalled", { size: Math.round(status.size / 1048576) })}</span>
+        <button className="ghost small" disabled={!!busy} onClick={() => void installSunshine()}>
+          {t("sun.download")}
+        </button>
+      </div>
+    );
+  }
+  return (
+    <>
+      <span className="state">{t("sun.installed", { version: status.version })}</span>
+      {encoder && (
+        <span className={encoder === "software" ? "note warn" : "state"}>
+          {encoder === "software" ? t("sun.encoder.cpuWarn") : t("sun.encoder.using", { name: t(ENCODER_NAMES[encoder] ?? "sun.encoder.auto") })}
+        </span>
+      )}
+    </>
   );
 }
 
@@ -187,11 +249,13 @@ const ENCODERS: { id: SunSettings["encoder"]; name: Key }[] = [
 ];
 
 const CAPS = [0, 10_000, 20_000, 40_000, 80_000, 150_000];
+const VIEWER_COUNTS = [1, 2, 3, 4, 6, 8];
 
 /** Monitor and sound: asked in the share dialog too. */
 export function SunSourceFields() {
   const settings = useStore(sun, (s) => s.settings);
   const devices = useStore(sun, (s) => s.devices);
+  const noSound = useStore(sun, (s) => s.noSound);
   useEffect(() => {
     if (!devices) void loadDevices();
   }, [devices]);
@@ -211,19 +275,75 @@ export function SunSourceFields() {
         </select>
       </div>
       <Toggle checked={settings.audio} onChange={(audio) => setSunSettings({ audio })} title={t("sun.audio")} hint={t("sun.audio.hint")} />
-      {settings.audio && (
+      {noSound && <div className="note warn">{t("sun.audio.failed")}</div>}
+    </>
+  );
+}
+
+/** For networks where a direct path is hard: UPnP, or a port forwarded by hand. */
+function NetworkFields() {
+  const settings = useStore(sun, (s) => s.settings);
+  const [port, setPort] = useState(settings.udpPort ? String(settings.udpPort) : "");
+  return (
+    <details className="sun-more">
+      <summary>{t("sun.more")}</summary>
+      <Toggle checked={settings.upnp} onChange={(upnp) => setSunSettings({ upnp })} title={t("sun.upnp")} hint={t("sun.upnp.hint")} />
+      <div className="field two">
         <div className="field">
-          <label>{t("sun.audioSink")}</label>
-          <select value={settings.audioSink} onChange={(e) => setSunSettings({ audioSink: e.target.value })}>
-            <option value="">{t("sun.audioSink.default")}</option>
-            {(devices?.audio ?? []).map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name}
-              </option>
-            ))}
-          </select>
+          <label>{t("sun.udpPort")}</label>
+          <input
+            inputMode="numeric"
+            value={port}
+            placeholder={t("sun.udpPort.auto")}
+            onChange={(e) => {
+              const v = e.target.value.replace(/\D/g, "").slice(0, 5);
+              setPort(v);
+              const n = Number(v);
+              setSunSettings({ udpPort: n >= 1024 && n <= 65535 ? n : 0 });
+            }}
+          />
         </div>
-      )}
+        <div className="field">
+          <label>{t("sun.address")}</label>
+          <input
+            value={settings.address}
+            disabled={!settings.udpPort}
+            placeholder={t("sun.address.placeholder")}
+            onChange={(e) => setSunSettings({ address: e.target.value.trim() })}
+          />
+        </div>
+      </div>
+      <span className="state">{t("sun.udpPort.hint")}</span>
+    </details>
+  );
+}
+
+function ViewersSection() {
+  const allowed = useStore(sun, (s) => s.allowed);
+  return (
+    <>
+      <div className="section-title">{t("sun.viewers")}</div>
+      <div className="admin-list">
+        {allowed.map((userId) => (
+          <div key={userId} className="admin-item">
+            <div className="admin-row">
+              <Avatar mxc={avatarMxc(userId)} name={displayName(userId)} size={28} />
+              <b className="grow ellipsis">{displayName(userId)}</b>
+              <button className="ghost icon small" title={t("sun.viewers.remove")} onClick={() => void removeViewer(userId)}>
+                <IconTrash />
+              </button>
+            </div>
+          </div>
+        ))}
+        {allowed.length === 0 && <div className="state">{t("sun.viewers.none")}</div>}
+        {allowed.length > 1 && (
+          <div className="row left">
+            <button className="ghost small danger-text" onClick={() => void removeViewer("*")}>
+              {t("sun.viewers.removeAll")}
+            </button>
+          </div>
+        )}
+      </div>
     </>
   );
 }
@@ -231,7 +351,6 @@ export function SunSourceFields() {
 function SunshineSettings() {
   const settings = useStore(sun, (s) => s.settings);
   const live = useStore(sun, (s) => s.live);
-  const clients = useStore(sun, (s) => s.clients);
   return (
     <>
       {live && (
@@ -243,16 +362,29 @@ function SunshineSettings() {
         </div>
       )}
       <SunSourceFields />
-      <div className="field">
-        <label>{t("sun.encoder")}</label>
-        <select value={settings.encoder} onChange={(e) => setSunSettings({ encoder: e.target.value as SunSettings["encoder"] })}>
-          {ENCODERS.map((x) => (
-            <option key={x.id} value={x.id}>
-              {t(x.name)}
-            </option>
-          ))}
-        </select>
+      <div className="field two">
+        <div className="field">
+          <label>{t("sun.encoder")}</label>
+          <select value={settings.encoder} onChange={(e) => setSunSettings({ encoder: e.target.value as SunSettings["encoder"] })}>
+            {ENCODERS.map((x) => (
+              <option key={x.id} value={x.id}>
+                {t(x.name)}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="field">
+          <label>{t("sun.viewersMax")}</label>
+          <select value={settings.viewers} onChange={(e) => setSunSettings({ viewers: Number(e.target.value) })}>
+            {VIEWER_COUNTS.map((n) => (
+              <option key={n} value={n}>
+                {n}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
+      <span className="state">{t("sun.viewersMax.hint")}</span>
       <div className="field">
         <label>{t("sun.cap")}</label>
         <select value={settings.maxKbps} onChange={(e) => setSunSettings({ maxKbps: Number(e.target.value) })}>
@@ -264,59 +396,15 @@ function SunshineSettings() {
         </select>
         <span className="state">{t("sun.cap.hint")}</span>
       </div>
-      <div className="field">
-        <label>{t("sun.address")}</label>
-        <input value={settings.address} placeholder={t("sun.address.placeholder")} onChange={(e) => setSunSettings({ address: e.target.value.trim() })} />
-        <span className="state">{t("sun.address.hint")}</span>
-      </div>
-      <Toggle checked={settings.upnp} onChange={(upnp) => setSunSettings({ upnp })} title={t("sun.upnp")} hint={t("sun.upnp.hint")} />
-      <div className="field narrow">
-        <label>{t("sun.port")}</label>
-        <input
-          type="number"
-          min={1100}
-          max={64000}
-          value={settings.port}
-          onChange={(e) => {
-            const v = Math.round(Number(e.target.value));
-            if (v >= 1100 && v <= 64000) setSunSettings({ port: v });
-          }}
-        />
-      </div>
-      <PortsLine />
+      <NetworkFields />
       {live && <span className="state">{t("sun.nextTime")}</span>}
-
-      <div className="section-title">{t("sun.viewers")}</div>
-      {!live ? (
-        <span className="state">{t("sun.viewers.offline")}</span>
-      ) : (
-        <div className="admin-list">
-          {(clients ?? []).map((c) => (
-            <div key={c.uuid} className="admin-item">
-              <div className="admin-row">
-                <b className="grow ellipsis">{c.name || c.uuid}</b>
-                <button className="ghost icon small" title={t("sun.viewers.remove")} onClick={() => void removeViewer(c.uuid)}>
-                  <IconTrash />
-                </button>
-              </div>
-            </div>
-          ))}
-          {clients && clients.length === 0 && <div className="state">{t("sun.viewers.none")}</div>}
-          {clients && clients.length > 1 && (
-            <div className="row left">
-              <button className="ghost small danger-text" onClick={() => void removeViewer("*")}>
-                {t("sun.viewers.removeAll")}
-              </button>
-            </div>
-          )}
-        </div>
-      )}
+      <ViewersSection />
     </>
   );
 }
 
 function SunshineSection() {
-  const state = useStore(sun, (s) => s);
+  const error = useStore(sun, (s) => s.error);
   useEffect(() => {
     void checkNet();
     void refreshStatus();
@@ -324,43 +412,42 @@ function SunshineSection() {
     if (sun.get().live) void refreshClients();
   }, []);
   if (!hasSunshine) return null;
-  const allowed = sunshineAllowed(state);
   return (
     <>
       <div className="section-title">{t("sun.title")}</div>
       <p className="sub">{t("sun.intro")}</p>
       <NetLine />
-      {allowed ? (
-        <>
-          <ComponentLine />
-          <SunshineSettings />
-        </>
-      ) : (
-        state.net?.verdict === "gray" && <div className="note">{t("sun.grayNote")}</div>
-      )}
-      {state.error && <div className="error gap-top">{sunError(state.error)}</div>}
+      <ComponentLine />
+      <SunshineSettings />
+      {error && <div className="error gap-top">{sunError(error)}</div>}
     </>
   );
 }
 
 export function sunError(code: string): string {
-  if (code === "not-white") return t("sun.err.notWhite");
   if (code === "not-installed" || code === "install") return t("sun.err.install");
   if (code === "no-helper") return t("desktop.err.noHelper");
   if (code === "stopped") return t("sun.err.stopped");
   if (code === "no-display") return t("sun.err.noDisplay");
+  if (code === "tunnel" || /tunnel/.test(code)) return t("sun.err.tunnel");
   if (code === "start") return t("sun.err.start", { error: "" });
   return t("sun.err.start", { error: code });
 }
 
 export function MoonlightTab() {
-  if (!hasMoonlight) return <div className="note">{t("ml.desktopOnly")}</div>;
   return (
     <>
-      <p className="sub">{t("ml.intro")}</p>
-      <QualitySection />
-      <ConnectionsSection />
-      <SunshineSection />
+      <PlayerSection />
+      {hasMoonlight ? (
+        <>
+          <p className="sub gap-top">{t("ml.intro")}</p>
+          <QualitySection />
+          <ConnectionsSection />
+          <SunshineSection />
+        </>
+      ) : (
+        <div className="note gap-top">{t("ml.desktopOnly")}</div>
+      )}
     </>
   );
 }
@@ -380,7 +467,7 @@ export function SunRequests() {
       {requests.map((r) => {
         const who = displayName(r.userId);
         return (
-          <div key={r.id} className="sun-request">
+          <div key={r.name} className="sun-request">
             <Avatar mxc={avatarMxc(r.userId)} name={who} size={34} />
             <div className="grow">
               <b className="ellipsis">{who}</b>
@@ -390,13 +477,13 @@ export function SunRequests() {
               <button
                 className="primary small"
                 onClick={() => {
-                  void allowViewer(r, `${who} (${r.userId})`);
+                  void allowViewer(r);
                   flashNotice(t("sun.allowed", { who }));
                 }}
               >
                 {t("sun.allow")}
               </button>
-              <button className="ghost small" onClick={() => void denyViewer(r)}>
+              <button className="ghost small" onClick={() => denyViewer(r)}>
                 {t("sun.deny")}
               </button>
             </div>
@@ -420,8 +507,13 @@ export function SunRequests() {
 function failText(w: MlWatch, who: string): string {
   const [reason, ...rest] = w.error.split(":");
   const detail = rest.join(":");
-  if (reason === "unreachable") return t("sun.watch.unreachable", { who });
+  if (reason === "tunnel") return t("sun.watch.tunnel");
+  if (reason === "off") return t("sun.watch.off", { who });
+  if (reason === "timeout") return t("sun.watch.timeout", { who });
   if (reason === "denied") return t("sun.watch.denied", { who });
+  if (reason === "busy") return t("sun.watch.busy", { who });
+  if (reason === "punch") return t("sun.watch.punch");
+  if (reason === "unreachable") return t("sun.watch.unreachable", { who });
   if (reason === "pairing") return t("sun.watch.pairing", { error: detail || "?" });
   if (reason === "no-app") return t("sun.watch.noApp");
   if (reason === "start") return t("sun.watch.start", { error: detail || "?" });
@@ -448,7 +540,7 @@ export function SunWatchStatus({ identity, userId }: { identity: string; userId:
       {(w.status === "connecting" || (w.status === "live" && !w.fps)) && (
         <>
           <div className="spinner" />
-          <span>{w.stage ? t("ml.stage", { stage: w.stage }) : t("ml.connecting")}</span>
+          <span>{w.stage ? t("ml.stage", { stage: w.stage }) : w.path ? t("ml.connecting") : t("sun.watch.punching")}</span>
         </>
       )}
       {w.status === "approval" && (
@@ -477,41 +569,32 @@ export function SunWatchStatus({ identity, userId }: { identity: string; userId:
   );
 }
 
-/** Picture size and rate of the Sunshine stream being watched, for the tile label. */
+const PATH_NAMES: Record<string, Key> = { lan: "sun.path.lan", v6: "sun.path.v6", wan: "sun.path.wan" };
+
+/** Picture size, rate and the path of the Sunshine stream being watched, for the tile label. */
 export function useSunWatchInfo(identity: string): string {
   const w = useStore(ml, (s) => s.watching);
   if (!w || w.identity !== identity || w.status !== "live" || !w.fps) return "";
-  return `${w.height}p · ${t("net.fps", { n: w.fps })}`;
+  const path = PATH_NAMES[w.path] ? ` · ${t(PATH_NAMES[w.path])}${w.rtt ? ` ${w.rtt} ${t("sun.ms")}` : ""}` : "";
+  return `${w.height}p · ${t("net.fps", { n: w.fps })}${path}`;
 }
 
 /* ------------------------------------------------- share dialog, Sunshine */
 
-/** Ports to forward on the router when UPnP is off or missing. */
-function PortsLine() {
-  const p = useStore(sun, (s) => s.settings.port);
-  return <span className="state">{t("sun.ports", { tcp: `${p - 5}, ${p}, ${p + 21}`, udp: `${p + 9}-${p + 11}` })}</span>;
-}
-
-/** The Sunshine side of the share dialog: checks, the monitor, the sound, and start. */
+/** The Sunshine side of the share dialog: the network, the monitor, the sound, and start. */
 export function SunsharePane({ onStarted, onClose }: { onStarted: () => void; onClose: () => void }) {
   const state = useStore(sun, (s) => s);
   useEffect(() => {
     void checkNet();
     void refreshStatus();
   }, []);
-  const allowed = sunshineAllowed(state);
   const starting = state.busy === "start" || state.busy === "install" || !!state.status?.starting;
   return (
     <div className="sun-pane">
       <p className="sub">{t("sun.pane.intro")}</p>
       <NetLine />
-      {allowed && (
-        <>
-          {!state.net?.upnp && <PortsLine />}
-          <ComponentLine />
-          <SunSourceFields />
-        </>
-      )}
+      <ComponentLine />
+      <SunSourceFields />
       {state.error && <div className="error">{sunError(state.error)}</div>}
       <div className="row">
         <button className="ghost" onClick={onClose}>
@@ -522,7 +605,7 @@ export function SunsharePane({ onStarted, onClose }: { onStarted: () => void; on
             {t("share.stop")}
           </button>
         ) : (
-          <button className="primary" disabled={!allowed || starting} onClick={() => void startSunshineStream().then((ok) => ok && onStarted())}>
+          <button className="primary" disabled={starting} onClick={() => void startSunshineStream().then((ok) => ok && onStarted())}>
             {state.busy === "install" ? t("sun.pane.downloading") : starting ? t("sun.pane.starting") : t("sun.pane.start")}
           </button>
         )}

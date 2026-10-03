@@ -48,15 +48,15 @@ const PRESENCE_NAME: Record<string, Key> = {
   offline: "presence.offline",
 };
 
-const STATUS_MODES: { mode: StatusMode; title: Key; hint: Key }[] = [
-  { mode: "auto", title: "presence.online", hint: "status.auto.hint" },
-  { mode: "unavailable", title: "presence.away", hint: "status.away.hint" },
-  { mode: "dnd", title: "presence.dnd", hint: "status.dnd.hint" },
-  { mode: "streamer", title: "status.streamer", hint: "status.streamer.hint" },
-  { mode: "offline", title: "status.invisible", hint: "status.invisible.hint" },
+const STATUS_MODES: { mode: StatusMode; title: Key }[] = [
+  { mode: "auto", title: "presence.online" },
+  { mode: "unavailable", title: "presence.away" },
+  { mode: "dnd", title: "presence.dnd" },
+  { mode: "streamer", title: "status.streamer" },
+  { mode: "offline", title: "status.invisible" },
 ];
 
-/** Own status: a drop-down with every mode and what it does. */
+/** Own status: a drop-down with every mode. */
 function StatusPicker() {
   const mode = useStore(app, (s) => s.statusMode);
   const [open, setOpen] = useState(false);
@@ -94,10 +94,7 @@ function StatusPicker() {
               }}
             >
               <i className={`status-chip ${m.mode === "auto" ? "online" : m.mode}`} />
-              <span className="status-text">
-                <b>{t(m.title)}</b>
-                <small>{t(m.hint)}</small>
-              </span>
+              <span className="status-text">{t(m.title)}</span>
             </button>
           ))}
         </div>

@@ -5,6 +5,68 @@ GitHub uses the same two sections, and the app shows the one of its language in
 the update window. Mentions like `@everyone` always go in backticks: GitHub takes
 a bare mention for a GitHub user and lists that user as a contributor of the release.
 
+## 0.9.1
+
+<details>
+<summary>English</summary>
+
+### Streams through Sunshine
+- **No port forwarding and no public IP needed.** The two computers connect directly through an encrypted tunnel (X25519 and AES-256-GCM) that punches through NAT by itself, as games and calls do. It does not get through only when both sides are behind a strict ("symmetric") NAT; then the router can open one UDP port over UPnP, or the port can be forwarded by hand.
+- Sunshine is no longer open to the internet: only the tunnel of a viewer you let in reaches it. The streamer's addresses go only to viewers that were let in.
+- The stream's sound no longer carries the call: it is everything that plays on the computer except Astrum, as with a regular share. It goes uncompressed through the tunnel.
+- Several viewers at once, each with their own encoder on the graphics card (up to 8 on NVIDIA). A cap is in the "Streams" tab.
+- A viewer asks once. Access can be taken back in "Viewers with access" even while you do not stream.
+- The encoder Sunshine uses is shown; a warning if it fell back to the processor.
+- The network check tells what NAT is in front of the computer, whether the router has UPnP, and whether there is IPv6.
+- Viewers: AV1 next to H.264 and HEVC, only codecs the graphics card decodes can be picked; the stream tile shows the path (home network, IPv6, direct) and the round trip.
+- Sunshine no longer shows the computer's name to viewers.
+
+### Settings
+- The tabs come in two groups, "Account" and "App", in a more logical order. "App" is now "General", "Voice & Audio" is "Voice & Video". The stream player settings moved to "Streams", the camera to the end of "Voice & Video", "Refresh devices" next to the devices.
+- The interface scale is a slider.
+- Spelling mistakes are underlined by default.
+- The statuses have no descriptions any more.
+
+### Security
+- New sign-ins lock the encryption key store with a key kept inside the sealed session: a copy of the profile folder no longer gives the message keys. Older sign-ins keep their store as it is; signing out and in again locks it.
+- A packaged app no longer takes the page address from an environment variable.
+- Global hotkeys from the page are checked and limited: a page that could bind every key would see everything typed in the system.
+- Updates: the installer is checked again right before it runs, and a download bigger than the release says is stopped.
+- Link previews no longer reach local addresses hidden in IPv6 forms (NAT64, 6to4, hex-mapped IPv4).
+- Answers from a Sunshine host and data in the tunnel are limited in size; repeated "watching" packets and stream requests no longer flood with sounds; link preview texts and server names in invites are checked.
+
+</details>
+
+<details>
+<summary>Русский</summary>
+
+### Стримы через Sunshine
+- **Не нужны ни проброс портов, ни белый IP.** Компьютеры соединяются напрямую по зашифрованному туннелю (X25519 и AES-256-GCM), который сам пробивается через NAT, как в играх и звонках. Не пробьётся, только если у обоих строгий («симметричный») NAT; тогда роутер может открыть один UDP-порт по UPnP или порт можно пробросить вручную.
+- Sunshine больше не открыт в интернет: до него доходит только туннель зрителя, которого ты пустил. Адреса стримера получают только допущенные зрители.
+- В звуке стрима больше нет звонка: это всё, что играет на компьютере, кроме Astrum, как в обычной демонстрации. Идёт по туннелю без сжатия.
+- Несколько зрителей одновременно, у каждого свой кодировщик на видеокарте (у NVIDIA до 8). Предел во вкладке «Стримы».
+- Зритель спрашивает один раз. Доступ можно забрать в «Зрителях с доступом», даже когда не стримишь.
+- Видно, каким кодировщиком кодирует Sunshine; предупреждение, если он скатился на процессор.
+- Проверка сети показывает, какой NAT стоит перед компьютером, есть ли на роутере UPnP и есть ли IPv6.
+- Для зрителя: AV1 рядом с H.264 и HEVC, выбрать можно только кодеки, которые видеокарта декодирует; на плитке стрима видно, как он идёт (по локалке, IPv6, напрямую) и задержка.
+- Sunshine больше не показывает зрителям имя компьютера.
+
+### Настройки
+- Вкладки разбиты на две группы, «Учётная запись» и «Приложение», порядок стал логичнее. «Приложение» теперь «Общие», «Голос и звук» стал «Голос и видео». Настройки плеера демонстрации переехали в «Стримы», камера в конец «Голоса и видео», «Обновить устройства» рядом с устройствами.
+- Масштаб интерфейса ползунком.
+- Ошибки в словах подчёркиваются по умолчанию.
+- У статусов больше нет описаний.
+
+### Безопасность
+- Новые входы запирают хранилище ключей шифрования ключом, который лежит внутри запечатанной сессии: копия папки профиля больше не даёт ключей от сообщений. Старые входы оставляют хранилище как есть; выйти и войти снова, и оно запрётся.
+- Собранная программа больше не берёт адрес страницы из переменной окружения.
+- Глобальные горячие клавиши от страницы проверяются и ограничены: страница, которая могла бы назначить каждую клавишу, видела бы всё, что набирается в системе.
+- Обновления: установщик сверяется ещё раз прямо перед запуском, скачивание больше заявленного в релизе обрывается.
+- Превью ссылок больше не достают до локальных адресов, спрятанных в формах IPv6 (NAT64, 6to4, IPv4 в шестнадцатеричном виде).
+- Ответы хоста Sunshine и данные в туннеле ограничены по размеру; повторные пакеты «смотрю» и запросы на стрим больше не засыпают звуками; тексты превью и имена серверов в приглашениях проверяются.
+
+</details>
+
 ## 0.9.0
 
 <details>

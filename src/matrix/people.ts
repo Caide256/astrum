@@ -340,7 +340,8 @@ function viaFor(roomId: string, inviter: string): string[] {
   const domain = (id: string) => id.split(":").slice(1).join(":");
   if (inviter) out.add(domain(inviter));
   if (domain(roomId)) out.add(domain(roomId));
-  return [...out].filter(Boolean);
+  // server names only: a host name or address with an optional port
+  return [...out].filter((d) => /^(?:[a-z0-9.-]{1,253}|\[[0-9a-f:.]{2,45}\])(?::\d{1,5})?$/i.test(d));
 }
 
 /** The room behind an invite is gone: everybody left, so nobody can let us in. */

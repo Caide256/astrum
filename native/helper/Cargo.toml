@@ -3,7 +3,7 @@ name = "native-helper"
 version = "0.2.0"
 edition = "2021"
 license = "GPL-3.0-only"
-description = "Native helper for the desktop client: per-process audio capture, global key bindings and Moonlight streams"
+description = "Native helper for the desktop client: per-process audio capture, global key bindings, Moonlight streams and the peer-to-peer stream tunnel"
 
 [dependencies]
 aes = "0.8"
@@ -11,6 +11,7 @@ aes-gcm = "0.10"
 cbc = "0.1"
 hex = "0.4"
 rand = "0.8"
+ring = "0.17"
 rsa = { version = "0.9", features = ["sha2", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pki-types = "1"
@@ -31,6 +32,7 @@ cc = "1"
 version = "0.61"
 features = [
   "Win32_Foundation",
+  "Win32_Networking_WinSock",
   "Win32_Security",
   "Win32_System_Console",
   "Win32_System_JobObjects",

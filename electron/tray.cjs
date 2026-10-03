@@ -18,7 +18,8 @@ const ICON = path.join(__dirname, "..", brand.logo);
 
 /* ----------------------------------------------------------- shell settings */
 
-const DEFAULTS = { closeToTray: true, autostart: false, trayHintShown: false, background: "", window: null, spellcheck: false };
+// "spell" replaced "spellcheck" (off by default in 0.9.0): the spell checker is on unless turned off
+const DEFAULTS = { closeToTray: true, autostart: false, trayHintShown: false, background: "", window: null, spell: true };
 let settings = null;
 
 function settingsFile() {
@@ -29,6 +30,7 @@ function loadSettings() {
   if (settings) return settings;
   try {
     settings = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(settingsFile(), "utf8")) };
+    delete settings.spellcheck;
   } catch {
     settings = { ...DEFAULTS };
   }
@@ -72,7 +74,7 @@ function publicSettings() {
     autostart: settings.autostart,
     autostartAvailable: electron.app.isPackaged,
     background: settings.background,
-    spellcheck: !!settings.spellcheck,
+    spellcheck: settings.spell !== false,
   };
 }
 
@@ -80,8 +82,8 @@ function updateSettings(patch) {
   loadSettings();
   if (typeof patch?.closeToTray === "boolean") settings.closeToTray = patch.closeToTray;
   if (typeof patch?.spellcheck === "boolean") {
-    settings.spellcheck = patch.spellcheck;
-    onSpellcheck(settings.spellcheck);
+    settings.spell = patch.spellcheck;
+    onSpellcheck(settings.spell);
   }
   if (typeof patch?.background === "string" && /^#[0-9a-f]{6}$/i.test(patch.background)) settings.background = patch.background;
   if (patch?.window && typeof patch.window === "object") {
@@ -167,10 +169,11 @@ function applyState(state) {
   if (!state || typeof state !== "object") return;
   const { nativeImage } = electron;
   voiceState = { inCall: !!state.inCall, muted: !!state.muted, deafened: !!state.deafened };
-  tooltip = String(state.tooltip || brand.name);
+  // Windows shows at most 127 characters of a tray tooltip
+  tooltip = String(state.tooltip || brand.name).slice(0, 127);
   if (state.labels && typeof state.labels === "object") {
     for (const key of Object.keys(labels)) {
-      if (typeof state.labels[key] === "string" && state.labels[key]) labels[key] = state.labels[key];
+      if (typeof state.labels[key] === "string" && state.labels[key]) labels[key] = state.labels[key].slice(0, 200);
     }
   }
   if (tray && !tray.isDestroyed()) {

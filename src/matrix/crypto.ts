@@ -65,9 +65,10 @@ export function cryptoPrefix(deviceId: string): string {
   return `crypto-${deviceId}`;
 }
 
-export async function startCrypto(client: MatrixClient, deviceId: string): Promise<string> {
+export async function startCrypto(client: MatrixClient, deviceId: string, storeKey?: string): Promise<string> {
   try {
-    await client.initRustCrypto({ cryptoDatabasePrefix: cryptoPrefix(deviceId) });
+    const key = storeKey && /^[0-9a-f]{64}$/.test(storeKey) ? new Uint8Array(storeKey.match(/../g)!.map((h) => parseInt(h, 16))) : undefined;
+    await client.initRustCrypto({ cryptoDatabasePrefix: cryptoPrefix(deviceId), ...(key ? { storageKey: key } : {}) });
     return "";
   } catch (e) {
     // unencrypted rooms still work without crypto

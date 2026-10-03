@@ -102,27 +102,26 @@ export function cleanTile(raw: unknown): TileLook | null {
 
 /**
  * A screen stream through Sunshine, as the streamer's app announces it in the
- * call: where to connect (public address first, then local ones for people
- * on the same network), Sunshine's base port, the picture size and rate, and
- * the id of that Sunshine (a new one means pairing again).
+ * call: Sunshine's base port (the viewer's end of the tunnel stands in for
+ * it on the same ports), the picture size and rate, and the id of that
+ * Sunshine (a new one means pairing again). No address: a viewer gets the
+ * streamer's addresses only once let in. `v` 2 is the tunnel; the first
+ * Sunshine streams (direct connections) are not understood any more.
  */
-export type SunInfo = { addrs: string[]; port: number; w: number; h: number; fps: number; uid: string };
+export type SunInfo = { v: 2; port: number; w: number; h: number; fps: number; uid: string };
 
 /** A Sunshine announcement from outside, or null if it makes no sense. */
 export function cleanSun(raw: unknown): SunInfo | null {
   const v = raw as Partial<SunInfo> | null;
-  if (!v || typeof v !== "object" || !Array.isArray(v.addrs)) return null;
-  const addrs = v.addrs
-    .filter((a): a is string => typeof a === "string" && /^(?:\d{1,3}\.){3}\d{1,3}$|^[0-9a-f:]{2,39}$/i.test(a))
-    .slice(0, 6);
+  if (!v || typeof v !== "object" || v.v !== 2) return null;
   const port = Math.round(Number(v.port));
   const num = (n: unknown, lo: number, hi: number, d: number) => {
     const f = Math.round(Number(n));
     return Number.isFinite(f) && f >= lo && f <= hi ? f : d;
   };
-  if (!addrs.length || !(port >= 1024 && port <= 65000)) return null;
+  if (!(port >= 1030 && port <= 65000)) return null;
   return {
-    addrs,
+    v: 2,
     port,
     w: num(v.w, 320, 7680, 1920),
     h: num(v.h, 240, 4320, 1080),
@@ -417,13 +416,20 @@ type Packet =
   | SunPacket;
 
 /**
- * Sunshine pairing between a viewer and the streamer: the viewer asks with the
- * device name its pairing request carries and the PIN; the streamer answers
- * whether it was let in; a viewer that could not reach Sunshine says so.
+ * Getting a viewer to a streamer's Sunshine, by the name of the viewer's
+ * request (a one-time "astrum-..." name):
+ * - "sun-hello": the viewer wants to watch, with its tunnel key and
+ *   candidates, and a PIN when it still has to pair;
+ * - "sun-wait": the streamer was asked and has not answered yet;
+ * - "sun-offer": let in: the streamer's tunnel session, key and candidates;
+ * - "sun-answer": not let in ("denied"), or no Sunshine stream ("off");
+ * - "sun-fail": the viewer could not get through.
  */
 export type SunPacket =
-  | { t: "sun-pair"; name: string; pin: string }
-  | { t: "sun-answer"; name: string; ok: boolean }
+  | { t: "sun-hello"; name: string; pin: string; key: string; nat: string; cands: string[] }
+  | { t: "sun-wait"; name: string }
+  | { t: "sun-offer"; name: string; sid: number; key: string; nat: string; cands: string[] }
+  | { t: "sun-answer"; name: string; ok: boolean; reason?: string }
   | { t: "sun-fail"; reason: string };
 
 /** How long a watched share may deliver nothing decodable before the viewer asks for VP8. */
@@ -1240,6 +1246,8 @@ export class VoiceClient {
   /** Set by the app: plays a soundboard sound someone in the call sent. */
   onBoardSound: ((url: string, from: string) => void) | null = null;
   private boardLast = new Map<string, number>();
+  /** When each viewer's arrival last made a sound. */
+  private viewerSoundAt = new Map<string, number>();
 
   /** Play a soundboard sound for everyone in the call, the own speakers included. */
   sendBoardSound(url: string): void {
@@ -1281,13 +1289,24 @@ export class VoiceClient {
         if (this.watching.has(from.identity)) this.onSunWatch?.(from.identity, false);
       }
       this.refreshMembers(true);
-    } else if (packet.t === "sun-pair" || packet.t === "sun-answer" || packet.t === "sun-fail") {
+    } else if (
+      packet.t === "sun-hello" ||
+      packet.t === "sun-wait" ||
+      packet.t === "sun-offer" ||
+      packet.t === "sun-answer" ||
+      packet.t === "sun-fail"
+    ) {
       for (const cb of this.sunListeners) cb(packet, from.identity);
     } else if (packet.t === "watch") {
       if (!this.screenTrack && !this.ownSun) return;
       if (packet.on && !this.viewers.has(from.identity)) {
         this.viewers.add(from.identity);
-        this.sound("viewerJoin");
+        // watching on and off again and again must not turn into a stream of sounds
+        const now = performance.now();
+        if (now - (this.viewerSoundAt.get(from.identity) ?? -Infinity) > 10_000) {
+          this.viewerSoundAt.set(from.identity, now);
+          this.sound("viewerJoin");
+        }
       } else if (!packet.on) this.viewers.delete(from.identity);
       this.refreshMembers(true);
     } else if (packet.t === "codec") {

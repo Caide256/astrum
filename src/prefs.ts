@@ -398,12 +398,14 @@ export function setViewPrefs(patch: Partial<ViewPrefs>): void {
  * The size of the whole interface in percent, like the zoom of a browser.
  * It depends on the monitor, so it stays on this computer.
  */
-export const UI_SCALES = [75, 80, 90, 100, 110, 125, 150];
+export const UI_SCALE_MIN = 70;
+export const UI_SCALE_MAX = 150;
+export const UI_SCALE_STEP = 5;
 const SCALE_KEY = "app.ui-scale";
 
 function cleanScale(raw: unknown): number {
-  const n = Math.round(Number(raw));
-  return UI_SCALES.includes(n) ? n : 100;
+  const n = Math.round(Number(raw) / UI_SCALE_STEP) * UI_SCALE_STEP;
+  return Number.isFinite(n) && n >= UI_SCALE_MIN && n <= UI_SCALE_MAX ? n : 100;
 }
 
 const scale = cell<number>(cleanScale(typeof localStorage !== "undefined" ? localStorage.getItem(SCALE_KEY) : 100));

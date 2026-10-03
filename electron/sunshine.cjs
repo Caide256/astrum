@@ -5,7 +5,6 @@ const dns = require("node:dns").promises;
 const fs = require("node:fs");
 const http = require("node:http");
 const https = require("node:https");
-const os = require("node:os");
 const path = require("node:path");
 const netcheck = require("./netcheck.cjs");
 
@@ -15,15 +14,23 @@ const netcheck = require("./netcheck.cjs");
  * their GitHub release and checked against a pinned SHA-256, then kept in the
  * profile folder. The app writes its own config next to it: a separate port
  * range (its own Sunshine does not collide with one the user installed),
- * no web UI outside this computer, no tray icon, and no input from viewers:
- * keyboard, mouse and gamepads are off, a viewer only watches.
+ * no web UI outside this computer, no tray icon, no UPnP, and no input from
+ * viewers: keyboard, mouse and gamepads are off, a viewer only watches.
+ * Sunshine's own sound capture is off too: it would carry the call; the
+ * tunnel sends the computer's sound without the app's own.
  *
- * It runs only while the user streams, under the native helper, which stops
- * it with Ctrl+C so Sunshine can put back the driver settings it changes, and
- * takes it down if the app is gone. Viewers pair through the app: a viewer's
- * request carries a one-time device name, the streamer's app sees it in
- * Sunshine's list of pending pairings and lets it in only after the user
- * agrees. Everything else waiting there is turned away.
+ * Viewers do not connect to Sunshine's ports: nothing needs to be open on
+ * the router. The native helper's tunnel (native/helper/src/tunnel) punches
+ * a direct, encrypted path to each viewer the user let in and forwards it to
+ * Sunshine on this computer. The router may still be asked over UPnP to pass
+ * the tunnel's one UDP port, which helps behind a strict NAT.
+ *
+ * Sunshine runs only while the user streams, under the native helper, which
+ * stops it with Ctrl+C so Sunshine can put back the driver settings it
+ * changes, and takes it down if the app is gone. Viewers pair through the
+ * app: a viewer's request carries a one-time device name, the streamer's app
+ * sees it in Sunshine's list of pending pairings and lets it in only after
+ * the user agreed. Everything else waiting there is turned away.
  */
 
 const COMPONENT = {
@@ -42,6 +49,8 @@ let send = () => undefined;
 
 let child = null;
 let state = { running: false, ready: false, starting: false, error: "", port: DEFAULT_PORT, uid: "", startedAt: 0 };
+/** The streamer's end of the tunnel: the helper process, its candidates, answers awaited per viewer. */
+let tunnel = null;
 let installing = null;
 let pollTimer = null;
 let lastPairings = "";
@@ -104,6 +113,7 @@ function publicState() {
     error: state.error,
     port: state.port,
     uid: state.uid,
+    tunnel: tunnel?.ready ? { nat: tunnel.nat, cands: tunnel.cands } : null,
   };
 }
 
@@ -223,14 +233,16 @@ function runOnce(args, timeoutMs) {
 function cleanSettings(raw) {
   const s = raw && typeof raw === "object" ? raw : {};
   const text = (v, max) => (typeof v === "string" ? v.replace(/[\r\n]/g, "").slice(0, max) : "");
+  const udp = Math.round(Number(s.udpPort) || 0);
   return {
     output: text(s.output, 120),
-    audioSink: text(s.audioSink, 200),
     audio: s.audio !== false,
     encoder: ENCODERS.has(s.encoder) ? s.encoder : "",
     maxKbps: Math.max(0, Math.min(500_000, Math.round(Number(s.maxKbps) || 0))),
-    port: Number(s.port) >= 1100 && Number(s.port) <= 64000 ? Math.round(Number(s.port)) : DEFAULT_PORT,
+    viewers: Math.max(1, Math.min(8, Math.round(Number(s.viewers) || 4))),
+    udpPort: udp >= 1024 && udp <= 65535 ? udp : 0,
     upnp: s.upnp !== false,
+    address: text(s.address, 253).trim().toLowerCase(),
   };
 }
 
@@ -242,9 +254,11 @@ function writeConfig(settings) {
   writeJson(f("apps.json"), { env: {}, apps: [{ name: "Desktop", "image-path": "desktop.png" }] });
   const encoder = settings.encoder || meta().detectedEncoder || "";
   const lines = [
-    `sunshine_name = ${(os.hostname() || "Astrum").replace(/[^\w.-]/g, "").slice(0, 40) || "Astrum"}`,
-    `port = ${settings.port}`,
-    `upnp = ${settings.upnp ? "enabled" : "disabled"}`,
+    // the computer's own name would reach every viewer in Sunshine's server info
+    "sunshine_name = Astrum",
+    `port = ${DEFAULT_PORT}`,
+    // viewers come through the tunnel: no port of Sunshine is opened on the router
+    "upnp = disabled",
     "origin_web_ui_allowed = pc",
     "system_tray = disabled",
     "min_log_level = 2",
@@ -253,7 +267,10 @@ function writeConfig(settings) {
     "mouse = disabled",
     "install_steam_audio_drivers = disabled",
     "dd_configuration_option = disabled",
-    `stream_audio = ${settings.audio ? "enabled" : "disabled"}`,
+    // the tunnel carries the sound without the call: Sunshine's capture would take everything
+    "stream_audio = disabled",
+    // each viewer is a session of its own, with its own encoder
+    `channels = ${settings.viewers}`,
     `file_apps = ${f("apps.json")}`,
     `file_state = ${f("sunshine_state.json")}`,
     `credentials_file = ${f("credentials.json")}`,
@@ -261,7 +278,6 @@ function writeConfig(settings) {
     `cert = ${f("cert.pem")}`,
     `log_path = ${f("sunshine.log")}`,
   ];
-  if (settings.audioSink) lines.push(`audio_sink = ${settings.audioSink}`);
   if (settings.output) lines.push(`output_name = ${settings.output}`);
   if (encoder) lines.push(`encoder = ${encoder}`);
   if (settings.maxKbps) lines.push(`max_bitrate = ${settings.maxKbps}`);
@@ -304,7 +320,7 @@ async function start(raw) {
   const exe = helperPath();
   if (!exe) return { ok: false, error: "no-helper" };
   const settings = cleanSettings(raw);
-  setState({ starting: true, ready: false, error: "", port: settings.port, uid: "" });
+  setState({ starting: true, ready: false, error: "", port: DEFAULT_PORT, uid: "" });
   try {
     const login = credentials();
     const conf = writeConfig(settings);
@@ -327,7 +343,7 @@ async function start(raw) {
     const until = Date.now() + READY_TIMEOUT_MS;
     let info = null;
     while (!info && Date.now() < until && child === p) {
-      info = await serverInfo(settings.port);
+      info = await serverInfo(DEFAULT_PORT);
       if (!info) await new Promise((r) => setTimeout(r, 1000));
     }
     if (!info || child !== p) throw new Error(child === p ? "Sunshine did not start in time" : "Sunshine stopped while starting");
@@ -335,10 +351,12 @@ async function start(raw) {
     // disconnected session, a busy graphics card): there would be nothing to watch
     if (/Unable to find display or encoder/.test(readLog())) throw new Error("no-display");
     const uid = /<uniqueid>([^<]+)<\/uniqueid>/i.exec(info)?.[1]?.replace(/[^A-Za-z0-9-]/g, "") || "";
+    const t = await startTunnel(settings);
+    if (child !== p) throw new Error("Sunshine stopped while starting");
     setState({ ready: true, starting: false, uid });
     rememberEncoder();
     startPolling();
-    return { ok: true, port: settings.port, uid };
+    return { ok: true, port: DEFAULT_PORT, uid, nat: t.nat, cands: t.cands, encoder: meta().detectedEncoder || settings.encoder || "" };
   } catch (e) {
     const error = String(e?.message || e);
     await stop();
@@ -350,6 +368,7 @@ async function start(raw) {
 function stop() {
   const p = child;
   stopPolling();
+  stopTunnel();
   if (!p) {
     setState({ running: false, ready: false, starting: false });
     return Promise.resolve();
@@ -374,6 +393,187 @@ function stop() {
     } catch {
       p.kill();
     }
+  });
+}
+
+/* ------------------------------------------------------------------ tunnel */
+
+/** One line per event from the helper's tunnel: JSON, read as it comes. */
+function lines(stream, onLine) {
+  let rest = "";
+  stream.on("data", (d) => {
+    rest += d.toString("utf8");
+    let at;
+    while ((at = rest.indexOf("\n")) !== -1) {
+      const line = rest.slice(0, at).trim();
+      rest = rest.slice(at + 1);
+      if (line) onLine(line);
+    }
+    // a line that never ends is not one of ours
+    if (rest.length > 65536) rest = "";
+  });
+}
+
+const CAND = /^(?:(?:\d{1,3}\.){3}\d{1,3}|\[[0-9a-f:]{2,39}\]):\d{1,5}$/i;
+
+function cleanCands(list) {
+  const arr = Array.isArray(list) ? list : String(list || "").split(",");
+  return [...new Set(arr.map((c) => String(c).trim()).filter((c) => CAND.test(c)))].slice(0, 16);
+}
+
+/**
+ * The streamer's end of the tunnel: one UDP port for all viewers. Its
+ * candidates are the home network's addresses, IPv6, the outside address
+ * STUN saw, the router's when it agreed to pass the port over UPnP, and the
+ * address typed by the user for a port forwarded by hand.
+ */
+function startTunnel(settings) {
+  stopTunnel();
+  const exe = helperPath();
+  const lan = netcheck.lanAddresses();
+  const v6 = netcheck.v6Addresses();
+  const p = spawn(
+    exe,
+    ["tunnel", "host", String(DEFAULT_PORT), String(settings.udpPort), settings.audio ? "1" : "0", String(process.pid), lan.join(","), v6.join(",")],
+    { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
+  );
+  const t = { child: p, ready: false, stopping: false, nat: "", cands: [], waiting: new Map() };
+  tunnel = t;
+  p.stdin.on("error", () => undefined);
+  p.stderr.on("data", () => undefined);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("the stream tunnel did not start")), 15_000);
+    p.on("exit", () => {
+      clearTimeout(timer);
+      if (tunnel === t) tunnel = null;
+      for (const w of t.waiting.values()) w({ ok: false, error: "tunnel" });
+      t.waiting.clear();
+      if (!t.ready) reject(new Error("the stream tunnel did not start"));
+      else if (child && !t.stopping) emit({ type: "tunnel", ev: "gone" });
+    });
+    lines(p.stdout, async (line) => {
+      let ev;
+      try {
+        ev = JSON.parse(line);
+      } catch {
+        return;
+      }
+      if (ev.ev === "ready" && !t.ready) {
+        const cands = cleanCands(ev.cands);
+        const port = Number(ev.port) || 0;
+        if (settings.upnp && port) {
+          const outside = await netcheck.openPort(port).catch(() => "");
+          if (outside && CAND.test(outside)) cands.push(outside);
+        }
+        if (settings.udpPort && settings.address) {
+          const ip = await publicAddress(settings.address);
+          if (ip) cands.push(`${ip}:${settings.udpPort}`);
+        }
+        t.nat = String(ev.nat || "");
+        t.cands = cleanCands(cands);
+        t.ready = true;
+        clearTimeout(timer);
+        resolve({ nat: t.nat, cands: t.cands });
+      } else if ((ev.ev === "offer" || ev.ev === "refused") && typeof ev.id === "string") {
+        const w = t.waiting.get(ev.id);
+        t.waiting.delete(ev.id);
+        w?.(ev.ev === "offer" ? { ok: true, sid: Number(ev.sid) >>> 0, key: String(ev.key || "") } : { ok: false, error: String(ev.text || "refused") });
+      } else if (ev.ev === "up" || ev.ev === "down") {
+        emit({ type: "tunnel", ev: ev.ev, id: String(ev.id || ""), path: String(ev.path || ""), reason: String(ev.reason || "") });
+      } else if (ev.ev === "audio-error") {
+        emit({ type: "tunnel", ev: "audio-error" });
+      }
+    });
+  });
+}
+
+function stopTunnel() {
+  const t = tunnel;
+  tunnel = null;
+  void netcheck.closePort();
+  if (!t) return;
+  t.stopping = true;
+  try {
+    t.child.stdin.write("stop\n");
+  } catch {
+    // already gone
+  }
+  setTimeout(() => {
+    if (t.child.exitCode === null) t.child.kill();
+  }, 3000);
+}
+
+const VIEWER_ID = /^astrum-[0-9a-f]{8,32}$/;
+const KEY = /^[0-9a-f]{64}$/;
+const NATS = new Set(["open", "cone", "symmetric", "blocked", "unknown"]);
+
+/** A viewer the user let in: the tunnel makes a session for it and answers with its key. */
+function addViewer(id, key, nat, cands) {
+  const t = tunnel;
+  const list = cleanCands(cands);
+  if (!t?.ready || !VIEWER_ID.test(String(id)) || !KEY.test(String(key)) || !list.length) return Promise.resolve({ ok: false, error: "bad" });
+  const n = NATS.has(nat) ? nat : "unknown";
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      t.waiting.delete(id);
+      resolve({ ok: false, error: "timeout" });
+    }, 8000);
+    t.waiting.set(id, (res) => {
+      clearTimeout(timer);
+      resolve(res);
+    });
+    try {
+      t.child.stdin.write(`peer ${id} ${key} ${n} ${list.join(",")}\n`);
+    } catch {
+      t.waiting.delete(id);
+      clearTimeout(timer);
+      resolve({ ok: false, error: "tunnel" });
+    }
+  });
+}
+
+function dropViewer(id) {
+  if (!tunnel || !VIEWER_ID.test(String(id))) return;
+  try {
+    tunnel.child.stdin.write(`drop ${id}\n`);
+  } catch {
+    // gone with the tunnel
+  }
+}
+
+/** An address typed by the user (an IP or a DynDNS name) as a public IPv4 address, or "". */
+async function publicAddress(name) {
+  const host = String(name ?? "").trim().toLowerCase();
+  if (!/^[a-z0-9.-]{1,253}$/.test(host)) return "";
+  try {
+    const { address } = await dns.lookup(host, { family: 4 });
+    return netcheck.isPublic(address) ? address : "";
+  } catch {
+    return "";
+  }
+}
+
+/** The helper's STUN look from a fresh socket: the NAT this computer is behind. */
+function probe() {
+  return new Promise((resolve) => {
+    const exe = helperPath();
+    if (!exe) {
+      resolve(null);
+      return;
+    }
+    const p = spawn(exe, ["tunnel", "probe", netcheck.lanAddresses().join(",")], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+    let out = "";
+    const timer = setTimeout(() => p.kill(), 8000);
+    p.stdout.on("data", (d) => (out += d.toString()));
+    p.on("error", () => resolve(null));
+    p.on("exit", () => {
+      clearTimeout(timer);
+      try {
+        resolve(JSON.parse(out.trim()));
+      } catch {
+        resolve(null);
+      }
+    });
   });
 }
 
@@ -456,33 +656,6 @@ function stopPolling() {
 
 /* ---------------------------------------------------------------- devices */
 
-/** Sound outputs Sunshine can capture, from its own tool. */
-function audioDevices() {
-  return new Promise((resolve) => {
-    const tool = path.join(appDir(), "Sunshine", "tools", "audio-info.exe");
-    if (!fs.existsSync(tool)) {
-      resolve([]);
-      return;
-    }
-    const p = spawn(tool, [], { windowsHide: true });
-    let out = "";
-    const timer = setTimeout(() => p.kill(), 15_000);
-    p.stdout.on("data", (d) => (out += d.toString("utf8")));
-    p.on("error", () => resolve([]));
-    p.on("exit", () => {
-      clearTimeout(timer);
-      const list = [];
-      for (const block of out.split(/===== Device =====/).slice(1)) {
-        const id = /Device ID\s*:\s*(.+)/.exec(block)?.[1]?.trim();
-        const name = /Device name\s*:\s*(.+)/.exec(block)?.[1]?.trim();
-        const active = /Device state\s*:\s*Active/i.test(block);
-        if (id && active) list.push({ id, name: name || id });
-      }
-      resolve(list);
-    });
-  });
-}
-
 /**
  * Monitors as Sunshine names them, matched to the ones Electron knows by
  * their position on the desktop. Sunshine prints its list at start; before
@@ -542,10 +715,12 @@ function init(opts) {
   handle(ipcMain, "app:sun-install", () => install());
   handle(ipcMain, "app:sun-start", (_e, settings) => start(settings));
   handle(ipcMain, "app:sun-stop", () => stop());
-  handle(ipcMain, "app:sun-devices", async () => ({ audio: await audioDevices(), displays: displays() }));
+  handle(ipcMain, "app:sun-devices", () => ({ displays: displays() }));
+  handle(ipcMain, "app:sun-peer", (_e, id, key, nat, cands) => addViewer(String(id), String(key), String(nat), cands));
+  handle(ipcMain, "app:sun-drop", (_e, id) => dropViewer(String(id)));
   handle(ipcMain, "app:sun-approve", async (_e, id, pin, name) => {
     if (!PAIRING_ID.test(String(id)) || !/^\d{4}$/.test(String(pin))) return { ok: false };
-    const res = await api("POST", "/api/pin", { pairing_id: String(id), pin: String(pin), name: String(name ?? "").slice(0, 60) });
+    const res = await api("POST", "/api/pin", { pairing_id: String(id), pin: String(pin), name: String(name ?? "").slice(0, 255) });
     return { ok: res?.status === true };
   });
   handle(ipcMain, "app:sun-deny", async (_e, id) => {
@@ -556,7 +731,7 @@ function init(opts) {
   handle(ipcMain, "app:sun-clients", async () => {
     const res = await api("GET", "/api/clients/list");
     return Array.isArray(res?.named_certs)
-      ? res.named_certs.map((c) => ({ uuid: String(c.uuid ?? ""), name: String(c.name ?? "").slice(0, 80) })).filter((c) => UUID.test(c.uuid))
+      ? res.named_certs.map((c) => ({ uuid: String(c.uuid ?? ""), name: String(c.name ?? "").slice(0, 255) })).filter((c) => UUID.test(c.uuid))
       : null;
   });
   handle(ipcMain, "app:sun-unpair", async (_e, uuid) => {
@@ -564,18 +739,7 @@ function init(opts) {
     if (!UUID.test(String(uuid))) return { ok: false };
     return { ok: (await api("POST", "/api/clients/unpair", { uuid: String(uuid) }))?.status === true };
   });
-  handle(ipcMain, "app:net-check", () => netcheck.check());
-  // a host name typed by the user (a DynDNS name) becomes the public address viewers get
-  handle(ipcMain, "app:resolve-public", async (_e, name) => {
-    const host = String(name ?? "").trim().toLowerCase();
-    if (!/^[a-z0-9.-]{1,253}$/.test(host)) return "";
-    try {
-      const { address } = await dns.lookup(host, { family: 4 });
-      return netcheck.isPublic(address) ? address : "";
-    } catch {
-      return "";
-    }
-  });
+  handle(ipcMain, "app:net-check", () => netcheck.check(probe));
 }
 
-module.exports = { init, stop, isRunning: () => !!child };
+module.exports = { init, stop, isRunning: () => !!child, probe };

@@ -10,11 +10,14 @@
 //!   native-helper ctrlc <pid>     ask a console program to quit as on Ctrl+C
 //!   native-helper sunshine <exe> <config>
 //!                                 run Sunshine for the app, see sunshine.rs
+//!   native-helper tunnel host|view|probe ...
+//!                                 the direct tunnel for Sunshine streams, see tunnel/mod.rs
 
 mod audio;
 mod keys;
 mod moonlight;
 mod sunshine;
+mod tunnel;
 
 use std::process::ExitCode;
 
@@ -57,7 +60,8 @@ fn main() -> ExitCode {
         "moonlight" => moonlight::run(&args[2..]),
         "ctrlc" if target > 0 => ctrl_c(target as u32),
         "sunshine" if args.len() >= 4 => sunshine::run(&args[2], &args[3]),
-        _ => Err("usage: native-helper exclude|include <pid> | window <hwnd> | keys | press <vk,...> | moonlight ... | ctrlc <pid>".into()),
+        "tunnel" => tunnel::run(&args[2..]),
+        _ => Err("usage: native-helper exclude|include <pid> | window <hwnd> | keys | press <vk,...> | moonlight ... | ctrlc <pid> | sunshine ... | tunnel ...".into()),
     };
 
     match result {
