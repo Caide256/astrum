@@ -5,6 +5,24 @@ GitHub uses the same two sections, and the app shows the one of its language in
 the update window. Mentions like `@everyone` always go in backticks: GitHub takes
 a bare mention for a GitHub user and lists that user as a contributor of the release.
 
+## 0.9.6
+
+<details>
+<summary>English</summary>
+
+- **A viewer who joins while the streamer's Sunshine is still warming up gets the stream.** Sunshine keeps one launch waiting for its client at a time and quietly ignores the next: a viewer who came in during the warm-up (a quarter of a minute after the start on a slow computer) got the warm-up's keys, and the stream failed at the RTSP handshake. The streamer now lets viewers in once the warm-up is done, and a viewer whose start fails at the RTSP handshake tries again by itself (after 1.5, 3 and 6 seconds): this also covers two viewers joining at the same moment.
+- An accepted pairing is not sent to Sunshine a second time.
+
+</details>
+
+<details>
+<summary>Русский</summary>
+
+- **Зритель, зашедший, пока Sunshine стримера ещё прогревается, получает стрим.** Sunshine держит только один запуск, ждущий своего клиента, а следующий молча игнорирует. Зритель, пришедший во время прогрева (на медленном компе это секунд 15 после старта), получал ключи прогрева, и стрим падал на RTSP. Теперь стример пускает зрителей после прогрева, а зритель, у которого старт упал на RTSP, сам пробует ещё раз (через 1.5, 3 и 6 секунд): это же спасает, когда два зрителя заходят одновременно.
+- Подтверждённое спаривание больше не отправляется в Sunshine второй раз.
+
+</details>
+
 ## 0.9.5
 
 <details>

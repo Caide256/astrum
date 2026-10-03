@@ -358,6 +358,10 @@ function rememberEncoder() {
 let run = null;
 let warmTimer = null;
 const WARM_MS = 3 * 60_000;
+/** The desktop warm-up while it runs (see warmDesktop): viewers are let in after it. */
+let warming = null;
+/** The longest a viewer waits for the warm-up: it takes a quarter of a minute on a slow start. */
+const WARMING_WAIT_MS = 30_000;
 
 function start(raw, warm = false) {
   const settings = cleanSettings(raw);
@@ -421,7 +425,12 @@ async function launch(settings) {
     setState({ ready: true, starting: false, uid });
     rememberEncoder();
     startPolling();
-    void warmDesktop(port, p);
+    const w = warmDesktop(port, p)
+      .catch(() => undefined)
+      .finally(() => {
+        if (warming === w) warming = null;
+      });
+    warming = w;
     return { ok: true, port, uid, nat: t.nat, cands: t.cands, encoder: meta().detectedEncoder || settings.encoder || "" };
   } catch (e) {
     const error = String(e?.message || e);
@@ -435,6 +444,7 @@ async function launch(settings) {
 function stop() {
   const p = child;
   run = null;
+  warming = null;
   clearTimeout(warmTimer);
   warmTimer = null;
   stopPolling();
@@ -653,11 +663,21 @@ const VIEWER_ID = /^astrum-[0-9a-f]{8,32}$/;
 const KEY = /^[0-9a-f]{64}$/;
 const NATS = new Set(["open", "cone", "symmetric", "blocked", "unknown"]);
 
-/** A viewer the user let in: the tunnel makes a session for it and answers with its key. */
-function addViewer(id, key, nat, cands) {
-  const t = tunnel;
+/**
+ * A viewer the user let in: the tunnel makes a session for it and answers
+ * with its key. Not while the desktop warms up: Sunshine keeps one launch
+ * waiting for its client at a time and ignores the next, so a viewer
+ * launching then would get the warm-up's keys and fail the RTSP handshake.
+ */
+async function addViewer(id, key, nat, cands) {
   const list = cleanCands(cands);
-  if (!t?.ready || !VIEWER_ID.test(String(id)) || !KEY.test(String(key)) || !list.length) return Promise.resolve({ ok: false, error: "bad" });
+  if (!VIEWER_ID.test(String(id)) || !KEY.test(String(key)) || !list.length) return { ok: false, error: "bad" };
+  if (warming) {
+    streamLog("host", `viewer ${id} waits for the desktop warm-up`);
+    await Promise.race([warming, new Promise((r) => setTimeout(r, WARMING_WAIT_MS))]);
+  }
+  const t = tunnel;
+  if (!t?.ready) return { ok: false, error: "bad" };
   const n = NATS.has(nat) ? nat : "unknown";
   return new Promise((resolve) => {
     const timer = setTimeout(() => {

@@ -199,6 +199,9 @@ export type MlFail = "tunnel" | "off" | "timeout" | "denied" | "busy" | "punch" 
 type Answer = { ok: true; sid: number; key: string; nat: string; cands: string[] } | { ok: false; reason: string };
 
 const HEX64 = /^[0-9a-f]{64}$/;
+/** A start that failed the RTSP handshake is tried again after 1.5, 3 and 6 s. */
+const RETRY_MS = 1500;
+const MAX_RETRIES = 3;
 
 type Generator = MediaStreamTrack & { writable: WritableStream<VideoFrame> };
 
@@ -220,6 +223,9 @@ class Session {
   private startArgs: Parameters<NonNullable<typeof bridge>["start"]>[1] | null = null;
   private started = false;
   private repaired = false;
+  /** The stage the last start failed at, and how many starts were tried again after it. */
+  private failedStage = "";
+  private retries = 0;
 
   private decoder: VideoDecoder | null = null;
   private decoderCodec = "";
@@ -457,9 +463,20 @@ class Session {
       this.log("stream started");
       this.started = true;
       this.set({ status: "live", stage: "" });
-    } else if (ev.event === "stageFailed") this.set({ status: "error", error: `start:${ev.text ?? ""} (${ev.code ?? 0})` });
-    else if (ev.event === "terminated" || ev.event === "ended") {
+    } else if (ev.event === "stageFailed") {
+      this.failedStage = ev.text ?? "";
+      if (!this.retryable()) this.set({ status: "error", error: `start:${ev.text ?? ""} (${ev.code ?? 0})` });
+    } else if (ev.event === "terminated" || ev.event === "ended") {
       const text = ev.text ?? "";
+      if (this.retryable()) {
+        this.retries += 1;
+        this.log(`${this.failedStage} failed: trying again (${this.retries})`);
+        this.failedStage = "";
+        void timeout(RETRY_MS * 2 ** (this.retries - 1), null).then(() => {
+          if (this.alive) void this.startStream();
+        });
+        return;
+      }
       // the streamer's Sunshine does not know this computer (any more): pair, then once more
       if (!this.started && !this.repaired && /not paired|not authorized|401/i.test(text)) {
         this.log(`stream refused (${text.slice(0, 120)}): pairing again`);
@@ -477,6 +494,16 @@ class Session {
       if (w && w.status !== "error") this.set({ status: ev.code ? "error" : "ended", error: ev.code ? `start:${text || String(ev.code)}` : "" });
       this.teardown();
     }
+  }
+
+  /**
+   * Sunshine keeps one launch waiting for its client at a time and ignores
+   * the next: a viewer launching while another one connects (the streamer's
+   * own warm-up, a second viewer at the same moment) gets the other's keys,
+   * and its RTSP handshake fails. A moment later the way is clear.
+   */
+  private retryable(): boolean {
+    return !this.started && this.failedStage === "RTSP handshake" && this.retries < MAX_RETRIES;
   }
 
   /* ----------------------------------------------------------------- video */

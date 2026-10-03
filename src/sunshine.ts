@@ -247,7 +247,7 @@ type Hello = { identity: string; userId: string; pin: string; key: string; nat: 
 /** Hellos of viewers, by the name of their request, until they are let in or turned away. */
 const hellos = new Map<string, Hello>();
 /** Viewers let in, by the name of their request: their pairing in Sunshine is accepted with their PIN. */
-const admitted = new Map<string, { userId: string; pin: string; at: number; approving?: boolean }>();
+const admitted = new Map<string, { userId: string; pin: string; at: number; approving?: boolean; approved?: string }>();
 /** Pairing requests in Sunshine with no viewer behind them: since when, to turn them away. */
 const strangers = new Map<string, number>();
 let pending: SunPairing[] = [];
@@ -290,7 +290,8 @@ function matchPairings(): void {
     const a = admitted.get(p.name);
     if (a) {
       strangers.delete(p.id);
-      if (a.approving) continue;
+      // Sunshine lists an accepted request until the next poll: it is not accepted twice
+      if (a.approving || a.approved === p.id) continue;
       a.approving = true;
       // the viewer's account is the name Sunshine keeps for it: access can be taken back by account.
       // Sunshine may refuse for a moment (a session being set up): the request is tried again
@@ -298,7 +299,10 @@ function matchPairings(): void {
       // comes back under the same one-time name
       void bridge.approve(p.id, a.pin, a.userId).then((res) => {
         a.approving = false;
-        if (res.ok) void refreshClients();
+        if (res.ok) {
+          a.approved = p.id;
+          void refreshClients();
+        }
       });
       continue;
     }
