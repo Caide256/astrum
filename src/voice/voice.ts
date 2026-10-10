@@ -32,6 +32,7 @@ import {
   type MicState,
   type PcmFeed,
 } from "./audio.ts";
+import { canMirror, MirrorProcessor } from "./mirror.ts";
 
 /**
  * Voice channel client on top of LiveKit.
@@ -254,6 +255,8 @@ export type AudioSettings = {
   /** Camera picture height and frame rate. */
   camHeight: number;
   camFps: number;
+  /** The camera flipped left to right for everyone; the own tile shows exactly what is sent. */
+  camMirror: boolean;
 };
 
 export type ShareCodec = "auto" | "h264" | "vp8";
@@ -372,6 +375,7 @@ const DEFAULT_SETTINGS: AudioSettings = {
   shareCodec: "auto",
   camHeight: 720,
   camFps: 30,
+  camMirror: false,
 };
 
 /**
@@ -575,6 +579,8 @@ export class VoiceClient {
   private watching = new Set<string>();
   private peeking = new Set<string>();
   private lostAt = new Map<string, number>();
+  /** Until then, people "leaving" and "joining" are the reconnect's doing: no sounds for them. */
+  private quietUntil = 0;
   private holdTimer = 0;
   private speakHold = new Map<string, number>();
   private mutedBeforeDeaf = false;
@@ -1232,6 +1238,33 @@ export class VoiceClient {
     this.send({ t: "state", deaf: this.state.deafened, ...(this.ownTile ? { tile: this.ownTile } : {}), sun: this.ownSun }, to);
   }
 
+  private reconnecting(): boolean {
+    return (!!this.room && this.room.state !== ConnectionState.Connected) || performance.now() < this.quietUntil;
+  }
+
+  /**
+   * Back after the connection dropped. A full reconnect looks to the others
+   * like this side leaving and joining again: they dropped what it had said,
+   * the Sunshine stream among it, which then kept running here for nobody.
+   * So the own state goes out again, and the streams watched are asked for
+   * again. A packet to someone the server is still adding back can get
+   * lost: the same goes out twice more a moment later.
+   */
+  private afterReconnect(): void {
+    const room = this.room;
+    this.quietUntil = performance.now() + 4000;
+    const again = () => {
+      if (this.room !== room || room?.state !== ConnectionState.Connected) return;
+      this.sendState();
+      for (const id of this.watching) if (room.remoteParticipants.has(id)) this.send({ t: "watch", on: true }, id);
+    };
+    again();
+    window.setTimeout(again, 1500);
+    window.setTimeout(again, 5000);
+    this.applyPolicy();
+    this.refreshMembers(true);
+  }
+
   /* --------------------------------------------------------------- sunshine */
 
   /** Set by moonlight.ts: a Sunshine stream is to be watched, or not any more. */
@@ -1318,7 +1351,12 @@ export class VoiceClient {
       const had = this.remoteSun.has(from.identity);
       if (sun) this.remoteSun.set(from.identity, sun);
       else this.remoteSun.delete(from.identity);
-      if (sun && !had) this.sound("streamStart");
+      if (sun && !had) {
+        if (!this.reconnecting()) this.sound("streamStart");
+        // a stream that was watched before its streamer dropped out for a moment (a reconnect,
+        // on either side) or restarted Sunshine: watched again, nothing left hanging
+        if (this.watching.has(from.identity) && !this.hasLiveShare(from.identity)) this.onSunWatch?.(from.identity, true);
+      }
       if (!sun && had) {
         this.sound("streamStop");
         if (this.watching.has(from.identity)) this.onSunWatch?.(from.identity, false);
@@ -1662,12 +1700,12 @@ export class VoiceClient {
       })
       .on(RoomEvent.ParticipantConnected, (participant) => {
         this.applyVolumes();
-        this.sound("userJoin");
+        if (!this.reconnecting()) this.sound("userJoin");
         this.sendState(participant.identity);
         force();
       })
       .on(RoomEvent.ParticipantDisconnected, (participant) => {
-        this.sound("userLeave");
+        if (!this.reconnecting()) this.sound("userLeave");
         this.remoteDeaf.delete(participant.identity);
         this.remoteTile.delete(participant.identity);
         this.viewers.delete(participant.identity);
@@ -1690,6 +1728,7 @@ export class VoiceClient {
         force();
       })
       .on(RoomEvent.MediaDevicesChanged, () => void this.refreshDevices())
+      .on(RoomEvent.Reconnected, () => this.afterReconnect())
       .on(RoomEvent.Disconnected, () => {
         this.patch({ connected: false, connecting: false, members: [], videos: [], streams: [] });
       });
@@ -1838,9 +1877,31 @@ export class VoiceClient {
         this.patch({ settings });
       }
       this.patch({ error: "" });
+      if (on) await this.applyMirror();
     } catch (e) {
       this.patch({ error: isNoPublishRight(e) ? t("voice.err.noPublishRight", { host: this.serverHost }) : t("voice.err.camera", { error: String(e) }) });
     }
+    this.refreshMembers(true);
+  }
+
+  /** The running camera mirrored or not, as set: the flipping step goes on or off it. */
+  private async applyMirror(): Promise<void> {
+    const pub = this.room?.localParticipant.getTrackPublication(Track.Source.Camera);
+    const track = pub?.track instanceof LocalVideoTrack ? pub.track : null;
+    if (!track) return;
+    const want = !!this.state.settings.camMirror && canMirror();
+    const has = track.getProcessor()?.name === "mirror";
+    try {
+      if (want && !has) await track.setProcessor(new MirrorProcessor());
+      else if (!want && has) await track.stopProcessor();
+    } catch (e) {
+      this.patch({ error: t("voice.err.camera", { error: String(e) }) });
+    }
+  }
+
+  async setCameraMirror(on: boolean): Promise<void> {
+    await this.applySettings({ camMirror: on });
+    if (this.state.camera) await this.applyMirror();
     this.refreshMembers(true);
   }
 

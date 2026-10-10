@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { avatarMxc, displayName, flashNotice } from "../app.ts";
 import { openLogs } from "../desktop.ts";
 import { fmtDateTime, t, type Key } from "../i18n/index.ts";
-import { ML_CODECS, ML_FPS, ML_HEIGHTS, autoKbps, forgetHost, hasMoonlight, ml, pictureFor, setQuality, type MlCodec, type MlWatch } from "../moonlight.ts";
+import { ML_CODECS, ML_FPS, ML_HEIGHTS, autoKbps, forgetHost, hasMoonlight, ml, pictureFor, setQuality, type MlCodec, type MlStep, type MlWatch } from "../moonlight.ts";
 import { setPlayerPrefs, usePlayerPrefs } from "../prefs.ts";
 import { useStore } from "../store.ts";
 import {
@@ -548,42 +548,84 @@ function punchText(detail: string): string {
 }
 
 /** Where watching a Sunshine stream stands, on its tile until the picture comes. */
+const STEPS: { id: MlStep; name: Key }[] = [
+  { id: "prep", name: "sun.step.prep" },
+  { id: "ask", name: "sun.step.ask" },
+  { id: "punch", name: "sun.step.punch" },
+  { id: "start", name: "sun.step.start" },
+  { id: "picture", name: "sun.step.picture" },
+];
+
+/** Moonlight's stage names, in words; one not listed shows as it is. */
+const STAGES: Record<string, Key> = {
+  "platform initialization": "sun.stage.prepare",
+  "name resolution": "sun.stage.prepare",
+  "audio stream initialization": "sun.stage.prepare",
+  "RTSP handshake": "sun.stage.rtsp",
+  "control stream initialization": "sun.stage.channels",
+  "video stream initialization": "sun.stage.channels",
+  "input stream initialization": "sun.stage.channels",
+  "control stream establishment": "sun.stage.control",
+  "video stream establishment": "sun.stage.video",
+  "audio stream establishment": "sun.stage.audio",
+  "input stream establishment": "sun.stage.audio",
+};
+
+/** Joining a stream, step by step: done ones ticked, the current one turning, its detail under the list. */
+function ConnectSteps({ w, who }: { w: MlWatch; who: string }) {
+  const current: MlStep = w.status === "live" ? "picture" : w.step;
+  const at = Math.max(0, STEPS.findIndex((s) => s.id === current));
+  const detail =
+    w.status === "approval"
+      ? t("sun.watch.approval", { who })
+      : current === "start" && w.stage === "pair"
+        ? t("sun.watch.pairingNow")
+        : current === "start" && w.stage
+          ? STAGES[w.stage]
+            ? t(STAGES[w.stage])
+            : w.stage
+          : "";
+  return (
+    <div className="ml-connect">
+      <div className="ml-connect-head">{t("sun.step.title", { who })}</div>
+      <ol className="ml-steps">
+        {STEPS.map((s, i) => (
+          <li key={s.id} className={i < at ? "done" : i === at ? "now" : ""}>
+            <span className="ml-step-mark" />
+            <span className="ellipsis">{t(s.name)}</span>
+          </li>
+        ))}
+      </ol>
+      {/* with no detail the step's own name stands in, seen only where the list is hidden (a small tile) */}
+      <div className={`ml-connect-detail ellipsis ${detail ? "" : "fallback"}`}>{detail || t(STEPS[at].name)}</div>
+      <div className="ml-connect-bar">
+        <i style={{ width: `${(((at + 0.5) / STEPS.length) * 100).toFixed(1)}%` }} />
+      </div>
+    </div>
+  );
+}
+
 export function SunWatchStatus({ identity, userId }: { identity: string; userId: string }) {
   const w = useStore(ml, (s) => s.watches[identity]);
   const who = displayName(userId);
-  if (!w) {
-    return (
-      <div className="ml-status">
-        <span>{t("sun.watch.idle")}</span>
-      </div>
-    );
-  }
   const retry = () => {
     voice.unwatch(identity);
     voice.watch(identity);
   };
+  if (!w) {
+    // watched, but nothing runs (the stream came back after a reconnect): one click away
+    return (
+      <div className="ml-status">
+        <span>{t("sun.watch.idle")}</span>
+        <button className="ghost small" onClick={retry}>
+          {t("sun.watch.connect")}
+        </button>
+      </div>
+    );
+  }
   return (
     <div className="ml-status">
-      {(w.status === "connecting" || (w.status === "live" && !w.fps)) && (
-        <>
-          <div className="spinner" />
-          <span>
-            {w.stage === "pair"
-              ? t("sun.watch.pairingNow")
-              : w.stage
-                ? t("ml.stage", { stage: w.stage })
-                : w.path
-                  ? t("ml.connecting")
-                  : t("sun.watch.punching")}
-          </span>
-        </>
-      )}
-      {w.status === "approval" && (
-        <>
-          <div className="spinner" />
-          <span>{t("sun.watch.approval", { who })}</span>
-        </>
-      )}
+      {(w.status === "connecting" || w.status === "approval" || (w.status === "live" && !w.fps)) && <ConnectSteps w={w} who={who} />}
       {w.status === "ended" && (
         <>
           <span>{t("ml.ended")}</span>

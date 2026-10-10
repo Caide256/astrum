@@ -79,11 +79,6 @@ contextBridge.exposeInMainWorld("desktop", {
     ipcRenderer.on("app:tun-event", handler);
     return () => ipcRenderer.removeListener("app:tun-event", handler);
   },
-  onTunPcm: (cb) => {
-    const handler = (_e, wid, chunk) => cb(wid, chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength));
-    ipcRenderer.on("app:tun-pcm", handler);
-    return () => ipcRenderer.removeListener("app:tun-pcm", handler);
-  },
 
   windowAction: (action) => ipcRenderer.invoke("app:window", action),
   onWindowState: (cb) => listen("app:window-state", cb),
@@ -122,4 +117,10 @@ contextBridge.exposeInMainWorld("desktop", {
 // a global hotkey or a tray menu item fired in the main process
 ipcRenderer.on("app:hotkey", (_e, detail) => {
   window.dispatchEvent(new CustomEvent("app:hotkey", { detail }));
+});
+
+// The port carrying a watched stream's sound: handed to the page's own world,
+// which passes it on to its audio worklet (a port cannot cross the bridge itself)
+ipcRenderer.on("app:tun-pcm-port", (e, wid) => {
+  if (e.ports[0]) window.postMessage({ astrumPcmPort: String(wid) }, "*", [e.ports[0]]);
 });

@@ -52,9 +52,9 @@ export function TrackView({
   );
 }
 
-/** Video of a call participant. */
+/** Video of a call participant. The own camera shows as it is sent: mirrored only when set so, for everyone. */
 export function VideoView({ video, fit = "contain" }: { video: VoiceVideo; fit?: "contain" | "cover" }) {
-  return <TrackView track={video.track} fit={fit} mirror={video.local && !video.screen} />;
+  return <TrackView track={video.track} fit={fit} />;
 }
 
 /* ------------------------------------------------- source and quality picker */

@@ -3005,9 +3005,6 @@ button.file-chip .state {
   left: 0;
   right: 0;
   bottom: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
   padding: 16px 8px 6px;
   background: linear-gradient(transparent, rgba(0, 0, 0, 0.75));
   color: #fff;
@@ -3098,6 +3095,46 @@ button.file-chip .state {
   width: 70px;
   opacity: 1;
   margin-right: 4px;
+}
+
+/* A narrow video (a phone clip held upright) has no room for one row: the
+   seek bar goes on top, the buttons below, and the volume slider takes only
+   the room that is left. The bar's own width decides: it spans the player. */
+.player-bar {
+  container-type: inline-size;
+}
+
+.player-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.player-volume {
+  min-width: 28px;
+  flex-shrink: 1;
+}
+
+.player-volume input {
+  min-width: 0;
+  flex-shrink: 1;
+}
+
+@container (max-width: 360px) {
+  .player-row {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+
+  .player-seek {
+    order: -1;
+    flex: 1 0 100%;
+    margin: 0 2px 4px;
+  }
+
+  .player-time {
+    margin-right: auto;
+  }
 }
 
 .player.audio {
@@ -7537,6 +7574,150 @@ button.unread-bar:active:not(:disabled) {
   text-align: center;
   color: var(--text);
   background: radial-gradient(circle at 50% 40%, color-mix(in srgb, #f0b232 10%, var(--bg-1)), var(--bg-0));
+  container-type: size;
+}
+
+/* joining a Sunshine stream, step by step: done ones ticked, the current one turning */
+.ml-connect {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: min(260px, 100%);
+  text-align: left;
+  animation: fade-in 0.2s ease-out;
+}
+
+.ml-connect-head {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.ml-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ml-steps li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 16px;
+  opacity: 0.5;
+  transition:
+    opacity 0.2s ease,
+    color 0.2s ease;
+}
+
+.ml-steps li.done {
+  opacity: 0.85;
+}
+
+.ml-steps li.now {
+  color: var(--text);
+  font-weight: 600;
+  opacity: 1;
+}
+
+.ml-step-mark {
+  position: relative;
+  flex: none;
+  box-sizing: border-box;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--bg-3);
+  border-radius: 50%;
+}
+
+.ml-steps li.done .ml-step-mark {
+  border-color: #f0b232;
+  background: #f0b232;
+}
+
+.ml-steps li.done .ml-step-mark::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 3px;
+  height: 7px;
+  border: solid var(--bg-0);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.ml-steps li.now .ml-step-mark {
+  border-color: color-mix(in srgb, #f0b232 25%, transparent);
+  border-top-color: #f0b232;
+  animation: spin 0.8s linear infinite;
+}
+
+.ml-connect-detail {
+  min-height: 1.4em;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.ml-connect-detail.fallback {
+  visibility: hidden;
+}
+
+.ml-connect-bar {
+  height: 3px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--bg-3);
+}
+
+.ml-connect-bar i {
+  position: relative;
+  display: block;
+  height: 100%;
+  overflow: hidden;
+  border-radius: inherit;
+  background: #f0b232;
+  transition: width 0.4s ease;
+}
+
+.ml-connect-bar i::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  animation: ml-shimmer 1.2s linear infinite;
+}
+
+@keyframes ml-shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* a small tile: the current step and the bar only */
+@container (max-height: 160px) {
+  .ml-steps {
+    display: none;
+  }
+
+  .ml-connect-detail {
+    color: var(--text);
+  }
+
+  .ml-connect-detail.fallback {
+    visibility: visible;
+  }
 }
 
 /* the interface scale slider */

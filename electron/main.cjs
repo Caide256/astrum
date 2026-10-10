@@ -297,6 +297,12 @@ function startTunnel(sender, wid, base) {
   child.stderr.on("data", (d) => {
     errText = (errText + d).slice(-300);
   });
+  // The stream's sound goes straight to the page's audio thread over a port
+  // of its own. Through the page's main thread, which also decodes the
+  // picture and draws, it came in bursts and crackled.
+  const pcm = new electron.MessageChannelMain();
+  if (!sender.isDestroyed()) sender.postMessage("app:tun-pcm-port", String(wid), [pcm.port2]);
+  child.on("exit", () => pcm.port1.close());
   return new Promise((resolve) => {
     let ready = false;
     const timer = setTimeout(() => {
@@ -304,7 +310,10 @@ function startTunnel(sender, wid, base) {
     }, 15_000);
     readRecords(child, (kind, payload) => {
       if (kind === 4) {
-        if (!sender.isDestroyed()) sender.send("app:tun-pcm", wid, Buffer.from(payload));
+        // a copy of its own: a pooled Buffer would carry its whole pool across
+        const frame = new ArrayBuffer(payload.length);
+        new Uint8Array(frame).set(payload);
+        pcm.port1.postMessage(frame);
         return;
       }
       if (kind !== 2) return;
@@ -635,11 +644,14 @@ function shellBridge() {
     if (win && !win.isDestroyed() && !win.isFocused()) win.flashFrame(true);
   });
   guard.handle(ipcMain, "app:copy", (_e, text) => electron.clipboard.writeText(String(text ?? "")));
-  guard.handle(ipcMain, "app:copy-image", (_e, png) => {
+  guard.handle(ipcMain, "app:copy-image", async (_e, png) => {
     if (!(png instanceof Uint8Array) || png.byteLength > 64 * 1024 * 1024) throw new Error("not an image");
+    // decoded here first: only a real picture goes in, written anew
     const image = electron.nativeImage.createFromBuffer(Buffer.from(png));
     if (image.isEmpty()) throw new Error("not an image");
-    electron.clipboard.writeImage(image);
+    // the clipboard is asynchronous since Electron 44 (writeImage is gone): one item, a PNG,
+    // which Windows programs also get as a bitmap
+    await electron.clipboard.write([new electron.ClipboardItem({ "image/png": new Blob([image.toPNG()], { type: "image/png" }) })]);
   });
   linkPreviews();
 }
@@ -1179,8 +1191,11 @@ if (process.platform === "win32") app.setAppUserModelId(brand.appId);
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  // a second launch, including while hidden in the tray, shows the window
-  app.on("second-instance", () => showWindow());
+  // a second launch, including while hidden in the tray, shows the window; an autostart that
+  // comes while the app already runs (a second autostart entry, an old one) stays in the tray
+  app.on("second-instance", (_e, argv) => {
+    if (!argv.includes("--hidden")) showWindow();
+  });
 
   app.on("before-quit", (e) => {
     quitting = true;

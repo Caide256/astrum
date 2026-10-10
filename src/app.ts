@@ -684,10 +684,12 @@ export async function doLogout(): Promise<void> {
 }
 
 function wire(c: MatrixClient): void {
-  c.on(RoomEvent.Timeline, (event: MatrixEvent, room: Room | undefined) => {
+  c.on(RoomEvent.Timeline, (event: MatrixEvent, room: Room | undefined, toStart: boolean | undefined, _removed, data) => {
     if (!room) return;
     if (room.roomId === app.get().activeChannel) {
-      if (!chatAtBottom && !app.get().unreadFrom && event.getType() === "m.room.message" && event.getSender() !== c.getUserId()) {
+      // older history paged in while scrolling up comes through here too: only a live message is new
+      const live = !toStart && data?.liveEvent !== false;
+      if (live && !chatAtBottom && !app.get().unreadFrom && event.getType() === "m.room.message" && event.getSender() !== c.getUserId()) {
         app.set({ unreadFrom: event.getId() ?? null });
       }
       scheduleMessages();
@@ -3494,7 +3496,7 @@ export async function setServerProfile(spaceId: string, name: string, avatar: Fi
 export function bannerOf(userId: string, roomId?: string | null): TileLook | null {
   if (!userId) return null;
   if (userId === me()) return getTileLook();
-  return withoutPicture(theirBanner(userId, roomId));
+  return theirBanner(userId, roomId);
 }
 
 function theirBanner(userId: string, roomId?: string | null): TileLook | null {
@@ -3511,10 +3513,15 @@ function theirBanner(userId: string, roomId?: string | null): TileLook | null {
   return null;
 }
 
-/** Pictures of other people's banners can be turned off: the avatar color stands in, the emoji stay. */
-export function withoutPicture(look: TileLook | null): TileLook | null {
-  if (!look || look.mode !== "image" || getViewPrefs().bannerImages) return look;
-  return { mode: "dominant", color: look.color, ...(look.emoji ? { emoji: look.emoji } : {}) };
+/**
+ * Other people's banners on call tiles can be made plain: no picture (the
+ * avatar color stands in) and no emoji. A chosen color stays. Profiles
+ * always show the banner as its owner made it.
+ */
+export function plainInCall(look: TileLook | null): TileLook | null {
+  if (!look || getViewPrefs().bannerImages) return look;
+  if (look.mode === "image") return { mode: "dominant", color: look.color };
+  return look.emoji ? { mode: look.mode, color: look.color } : look;
 }
 
 export function sessions(): Promise<people.SessionRow[]> {

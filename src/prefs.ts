@@ -369,7 +369,7 @@ export function setTileLook(patch: Partial<TileLook>): void {
 
 /* ------------------------------------------------------------- view prefs */
 
-/** `bannerImages`: other people's banner pictures are shown; off, their banners use the avatar color. */
+/** `bannerImages`: other people's banners on call tiles show their pictures and emoji; off, plain avatar color there (profiles always show them). */
 export type ViewPrefs = { bannerImages: boolean };
 
 const VIEW_KEY = "app.view";

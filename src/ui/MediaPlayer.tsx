@@ -237,20 +237,22 @@ export function VideoPlayer({ media }: { media: Media }) {
       )}
       {file.url && (
         <div className="player-bar" onDoubleClick={(e) => e.stopPropagation()}>
-          <button className="player-btn" title={st.playing ? t("player.pause") : t("player.play")} onClick={() => void toggle()}>
-            {st.playing ? <IconPause /> : <IconPlay />}
-          </button>
-          <span className="player-time">
-            {clock(st.at)} / {clock(st.length || media.duration / 1000)}
-          </span>
-          <Seek at={st.at} length={st.length} onSeek={(s) => el && (el.currentTime = s)} />
-          <VolumeControl el={el} />
-          <button className="player-btn" title={t("common.download")} onClick={() => saveFile(file.url, media.name)}>
-            <IconDownload />
-          </button>
-          <button className="player-btn" title={t("call.fullscreen")} onClick={fullscreen}>
-            <IconFullscreen />
-          </button>
+          <div className="player-row">
+            <button className="player-btn" title={st.playing ? t("player.pause") : t("player.play")} onClick={() => void toggle()}>
+              {st.playing ? <IconPause /> : <IconPlay />}
+            </button>
+            <span className="player-time">
+              {clock(st.at)} / {clock(st.length || media.duration / 1000)}
+            </span>
+            <Seek at={st.at} length={st.length} onSeek={(s) => el && (el.currentTime = s)} />
+            <VolumeControl el={el} />
+            <button className="player-btn" title={t("common.download")} onClick={() => saveFile(file.url, media.name)}>
+              <IconDownload />
+            </button>
+            <button className="player-btn" title={t("call.fullscreen")} onClick={fullscreen}>
+              <IconFullscreen />
+            </button>
+          </div>
         </div>
       )}
     </div>

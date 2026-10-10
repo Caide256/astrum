@@ -133,8 +133,22 @@ export function moonlightBridge() {
     tunStart: b.tunStart,
     tunPeer: b.tunPeer ?? (async () => ({ ok: false })),
     onTunEvent: b.onTunEvent ?? (() => () => undefined),
-    onTunPcm: b.onTunPcm ?? (() => () => undefined),
+    onTunPcmPort,
   };
+}
+
+/**
+ * The port a watched stream's sound comes on, straight from the main process
+ * (the preload passes it on with a window message: ports do not cross the
+ * bridge). Only messages of this window itself count.
+ */
+function onTunPcmPort(cb: (wid: string, port: MessagePort) => void): () => void {
+  const handler = (e: MessageEvent) => {
+    const wid = (e.data as { astrumPcmPort?: unknown } | null)?.astrumPcmPort;
+    if (e.source === window && typeof wid === "string" && e.ports[0]) cb(wid, e.ports[0]);
+  };
+  window.addEventListener("message", handler);
+  return () => window.removeEventListener("message", handler);
 }
 
 /* Sunshine bundled with the app: own streams, sent to viewers through the tunnel (electron/sunshine.cjs). */
@@ -268,7 +282,6 @@ type Bridge = {
   tunStart?: (wid: string, base: number) => Promise<TunReady>;
   tunPeer?: (wid: string, sid: number, key: string, nat: string, cands: string[]) => Promise<{ ok: boolean }>;
   onTunEvent?: (cb: (wid: string, json: string) => void) => () => void;
-  onTunPcm?: (cb: (wid: string, frame: ArrayBuffer) => void) => () => void;
   sunApprove?: (id: string, pin: string, name: string) => Promise<{ ok: boolean }>;
   sunDeny?: (id: string) => Promise<{ ok: boolean }>;
   sunClients?: () => Promise<SunClient[] | null>;

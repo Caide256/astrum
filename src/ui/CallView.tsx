@@ -12,7 +12,7 @@ import {
   screenButton,
   toggleCallChat,
   toggleCamera,
-  withoutPicture,
+  plainInCall,
 } from "../app.ts";
 import { useViewPrefs } from "../prefs.ts";
 import { t, tn } from "../i18n/index.ts";
@@ -178,8 +178,8 @@ function TileView({
   const person = tile.kind === "member" ? tile.member : null;
   const sunInfo = useSunWatchInfo(tile.kind === "stream" ? tile.stream.identity : "");
   useViewPrefs();
-  // a banner sent in the call wins over the stored one; pictures of others follow the switch in settings
-  const look = person ? (person.local ? bannerOf(person.userId, roomId) : (withoutPicture(person.tile) ?? bannerOf(person.userId, roomId))) : null;
+  // a banner sent in the call wins over the stored one; pictures and emoji of others follow the switch in settings
+  const look = person ? (person.local ? bannerOf(person.userId, roomId) : plainInCall(person.tile ?? bannerOf(person.userId, roomId))) : null;
   const bannerStyle = useBannerStyle(look, person ? avatarMxc(person.userId, roomId) : "", person ? tint(person.userId || person.id) : "");
 
   if (tile.kind === "stream") {

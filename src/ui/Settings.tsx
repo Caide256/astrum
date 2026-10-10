@@ -109,6 +109,7 @@ import {
   type Limiter,
   type TileLook,
 } from "../voice/voice.ts";
+import { canMirror } from "../voice/mirror.ts";
 import { Avatar, AvatarDrop, useMxc } from "./Avatar.tsx";
 import { Banner, splitEmoji } from "./Banner.tsx";
 import { BannerFramer } from "./BannerFramer.tsx";
@@ -194,30 +195,35 @@ function Picker({ label, value, list, onPick }: { label: string; value: string; 
   );
 }
 
-/** Camera picture size and frame rate; a running camera restarts with them. */
+/** Camera picture size and frame rate; a running camera restarts with them. Mirroring goes along. */
 export function CameraQuality() {
   const state = useSyncExternalStore(voice.subscribe, voice.getState, voice.getState);
   const s = state.settings;
   return (
-    <div className="field">
-      <label>{t("camera.quality")}</label>
-      <div className="cam-quality">
-        <select value={s.camHeight} onChange={(e) => void voice.setCameraQuality(Number(e.target.value), s.camFps)}>
-          {CAMERA_HEIGHTS.map((h) => (
-            <option key={h} value={h}>
-              {h}p
-            </option>
-          ))}
-        </select>
-        <select value={s.camFps} onChange={(e) => void voice.setCameraQuality(s.camHeight, Number(e.target.value))}>
-          {CAMERA_FPS.map((f) => (
-            <option key={f} value={f}>
-              {t("net.fps", { n: f })}
-            </option>
-          ))}
-        </select>
+    <>
+      <div className="field">
+        <label>{t("camera.quality")}</label>
+        <div className="cam-quality">
+          <select value={s.camHeight} onChange={(e) => void voice.setCameraQuality(Number(e.target.value), s.camFps)}>
+            {CAMERA_HEIGHTS.map((h) => (
+              <option key={h} value={h}>
+                {h}p
+              </option>
+            ))}
+          </select>
+          <select value={s.camFps} onChange={(e) => void voice.setCameraQuality(s.camHeight, Number(e.target.value))}>
+            {CAMERA_FPS.map((f) => (
+              <option key={f} value={f}>
+                {t("net.fps", { n: f })}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
-    </div>
+      {canMirror() && (
+        <Toggle checked={!!s.camMirror} onChange={(on) => void voice.setCameraMirror(on)} title={t("camera.mirror")} hint={t("camera.mirror.hint")} />
+      )}
+    </>
   );
 }
 

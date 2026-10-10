@@ -84,7 +84,7 @@ import {
   type Media,
   type Message,
 } from "../app.ts";
-import { fmtDateTime, fmtTime, t, tn } from "../i18n/index.ts";
+import { fmtDateTime, fmtMsgTime, fmtTime, t, tn } from "../i18n/index.ts";
 import { encryptedMediaUrl } from "../media.ts";
 import type { UserHit } from "../matrix/people.ts";
 import { hasOwnOrder, idsHidden, isMuted, setChannelOrder, setMuted, useChannelOrders, useMutes } from "../prefs.ts";
@@ -1326,7 +1326,9 @@ const MessageRow = memo(function MessageRow({ m, roomId, lit }: { m: Message; ro
           >
             {m.senderName}
           </span>
-          <span className="when">{fmtTime(m.ts)}</span>
+          <span className="when" title={fmtDateTime(m.ts)}>
+            {fmtMsgTime(m.ts)}
+          </span>
           {m.edited && <span className="when">{t("chat.edited")}</span>}
           {m.pinned && (
             <span className="when pin-mark" title={t("pins.pinned")}>
@@ -1471,12 +1473,8 @@ function nearBottom(el: HTMLElement): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
 }
 
-/** The first message whose lower edge is inside the view; messages are in order, so a binary search does. */
-function markScroll(roomId: string, el: HTMLElement): void {
-  if (nearBottom(el)) {
-    scrollMarks.set(roomId, { bottom: true });
-    return;
-  }
+/** The first message whose lower edge is inside the view, and how far its top is from the view's; messages are in order, so a binary search does. */
+function firstVisible(el: HTMLElement): { node: HTMLElement; offset: number } | null {
   const top = el.getBoundingClientRect().top;
   const nodes = el.querySelectorAll<HTMLElement>(".msg");
   let lo = 0;
@@ -1489,9 +1487,17 @@ function markScroll(roomId: string, el: HTMLElement): void {
       hi = mid - 1;
     } else lo = mid + 1;
   }
-  if (found === -1) return;
-  const node = nodes[found];
-  scrollMarks.set(roomId, { bottom: false, anchor: node.id.slice(4), offset: node.getBoundingClientRect().top - top });
+  if (found === -1) return null;
+  return { node: nodes[found], offset: nodes[found].getBoundingClientRect().top - top };
+}
+
+function markScroll(roomId: string, el: HTMLElement): void {
+  if (nearBottom(el)) {
+    scrollMarks.set(roomId, { bottom: true });
+    return;
+  }
+  const seen = firstVisible(el);
+  if (seen) scrollMarks.set(roomId, { bottom: false, anchor: seen.node.id.slice(4), offset: seen.offset });
 }
 
 function typingLine(names: string[]): string {
@@ -1530,6 +1536,8 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
   const stick = useRef(true);
   // the place to return to, applied once the chat's messages are drawn
   const restore = useRef<ScrollMark | null>(null);
+  // the message at the top of the view when older history was asked for: it stays put once the history is in
+  const keep = useRef<{ id: string; offset: number } | null>(null);
 
   const direct = directs.find((d) => d.roomId === activeChannel);
   const channel =
@@ -1615,6 +1623,24 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
     if (el.scrollHeight - el.clientHeight < 80) void loadMore();
   }, [firstId, messages.length, activeChannel, history]);
 
+  // Older history came in above: the message that was on top goes back to
+  // where it was. Measured, not added up: Chromium may have moved the view
+  // by itself already (scroll anchoring), and adding the new height on top
+  // of that threw the chat far down.
+  useLayoutEffect(() => {
+    const k = keep.current;
+    const el = scroller.current;
+    if (!k || !el) return;
+    keep.current = null;
+    const node = document.getElementById(k.id);
+    if (!node || !el.contains(node)) return;
+    el.scrollTop += node.getBoundingClientRect().top - el.getBoundingClientRect().top - k.offset;
+  }, [firstId]);
+
+  useEffect(() => {
+    keep.current = null;
+  }, [activeChannel]);
+
   const onScroll = (e: UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget;
     const at = nearBottom(el);
@@ -1626,13 +1652,11 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
     // where the chat stands is noted right away: Chromium fires scroll at most
     // once a frame, and a mark left for a later frame could miss the last move
     if (activeChannel && app.get().activeChannel === activeChannel) markScroll(activeChannel, el);
-    if (el.scrollTop < 80) {
-      const before = el.scrollHeight;
+    if (el.scrollTop < 80 && !keep.current) {
+      const seen = firstVisible(el);
+      if (seen) keep.current = { id: seen.node.id, offset: seen.offset };
       void loadMore().then((got) => {
-        if (got && scroller.current) {
-          // keep the same message in view after older history is prepended
-          scroller.current.scrollTop += scroller.current.scrollHeight - before;
-        }
+        if (!got) keep.current = null;
       });
     }
   };

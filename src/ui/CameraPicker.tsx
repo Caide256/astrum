@@ -8,7 +8,7 @@ import { useEscape, useLinger } from "./controls.tsx";
 import { CameraQuality } from "./Settings.tsx";
 
 /** Live preview of one camera: it is obvious which one looks at you. */
-function Preview({ cam, current, onPick }: { cam: DeviceInfo; current: boolean; onPick: () => void }) {
+function Preview({ cam, current, mirror, onPick }: { cam: DeviceInfo; current: boolean; mirror: boolean; onPick: () => void }) {
   const ref = useRef<HTMLVideoElement>(null);
   const [failed, setFailed] = useState("");
 
@@ -35,7 +35,7 @@ function Preview({ cam, current, onPick }: { cam: DeviceInfo; current: boolean; 
   return (
     <button className={`cam-preview ${current ? "current" : ""}`} onClick={onPick}>
       <div className="cam-frame">
-        {failed ? <span className="state">{failed}</span> : <video ref={ref} autoPlay playsInline muted className="mirror" />}
+        {failed ? <span className="state">{failed}</span> : <video ref={ref} autoPlay playsInline muted className={mirror ? "mirror" : ""} />}
       </div>
       <span className="ellipsis">{cam.label}</span>
     </button>
@@ -67,6 +67,7 @@ export function CameraPicker() {
               key={c.id}
               cam={c}
               current={c.id === state.settings.camId}
+              mirror={!!state.settings.camMirror}
               onPick={() => void pickCamera(c.id)}
             />
           ))}

@@ -42,10 +42,19 @@ export type MlCodec = "h264" | "hevc" | "av1";
 /** 0 height means the size of the source. */
 export type MlQuality = { height: number; fps: number; codec: MlCodec };
 
+/**
+ * Where joining a stream is: this side's end of the tunnel, the streamer's
+ * answer (and permission), the direct connection, starting the stream
+ * (pairing and Moonlight's stages), the first picture.
+ */
+export type MlStep = "prep" | "ask" | "punch" | "start" | "picture";
+
 export type MlWatch = {
   identity: string;
   userId: string;
   status: "connecting" | "approval" | "live" | "ended" | "error";
+  step: MlStep;
+  /** Within a step: "pair", or the stage of Moonlight it is at. */
   stage: string;
   error: string;
   width: number;
@@ -237,9 +246,8 @@ class Session {
   private fpsCount = 0;
   private fpsTimer = 0;
   private player: PcmPlayer | null = null;
-  private opening = false;
-  private lastSeq = -1;
-  private lastFrame: Int16Array | null = null;
+  /** The port the stream's sound comes on, until the player takes it. */
+  private pcmPort: MessagePort | null = null;
   private offVoice: (() => void) | null = null;
   readonly track: LocalVideoTrack;
 
@@ -306,6 +314,7 @@ class Session {
     }
     const mine = ready.nat ?? "";
     this.log(`tunnel ready: nat ${mine}, candidates ${(ready.cands ?? []).join(",")}`);
+    this.set({ step: "ask" });
 
     // ask the streamer
     const answer = await Promise.race([
@@ -324,7 +333,7 @@ class Session {
     this.log(`let in: streamer nat ${answer.nat}, candidates ${answer.cands.join(",")}`);
 
     // punch through
-    this.set({ status: "connecting", stage: "" });
+    this.set({ status: "connecting", step: "punch", stage: "" });
     const path = await Promise.race([
       new Promise<TunEvent>((resolve) => {
         this.tunnelWait = resolve;
@@ -341,7 +350,7 @@ class Session {
       else this.fail("punch", `${mine || "unknown"}:${answer.nat || "unknown"}`);
       return;
     }
-    this.set({ path: path.path, rtt: path.rtt });
+    this.set({ path: path.path, rtt: path.rtt, step: "start" });
     this.log(`tunnel up: ${path.path}, ${path.rtt} ms`);
     this.host = `${this.key}@${path.local}:${info.port}`;
     rememberHost({ key: this.key, userId: this.userId, uid: info.uid, at: Date.now() });
@@ -462,7 +471,7 @@ class Session {
     else if (ev.event === "started") {
       this.log("stream started");
       this.started = true;
-      this.set({ status: "live", stage: "" });
+      this.set({ status: "live", step: "picture", stage: "" });
     } else if (ev.event === "stageFailed") {
       this.failedStage = ev.text ?? "";
       if (!this.retryable()) this.set({ status: "error", error: `start:${ev.text ?? ""} (${ev.code ?? 0})` });
@@ -602,43 +611,33 @@ class Session {
     this.player.setGain(off ? 0 : voice.streamVolume(this.userId) / 100);
   }
 
+  /**
+   * The port of the stream's sound: 5 ms frames of PCM through the tunnel,
+   * numbered, straight from the main process into the player's worklet,
+   * which covers a lost frame and evens out the rest (pcm-feed.worklet.js).
+   */
+  onPcmPort(port: MessagePort): void {
+    this.pcmPort?.close();
+    this.pcmPort = port;
+    if (this.player) this.takePort(this.player);
+    else void this.openSound();
+  }
+
+  private takePort(p: PcmPlayer): void {
+    const port = this.pcmPort;
+    this.pcmPort = null;
+    if (port) p.listen(port);
+  }
+
   private async openSound(): Promise<void> {
-    this.opening = true;
     const p = await openPcmPlayer(voice.getState().settings.spkId).catch(() => null);
-    this.opening = false;
-    if (!p || !this.alive) {
+    if (!p || !this.alive || this.player) {
       void p?.close();
       return;
     }
     this.player = p;
     this.applyGain();
-  }
-
-  /**
-   * 5 ms frames of PCM through the tunnel, numbered. A lost frame is covered
-   * by the one before it, fading, so a gap does not click.
-   */
-  onPcm(buf: ArrayBuffer): void {
-    if (buf.byteLength < 8) return;
-    const player = this.player;
-    if (!player) {
-      if (!this.opening) void this.openSound();
-      return;
-    }
-    const seq = new DataView(buf).getUint32(0, false);
-    if (this.lastSeq >= 0 && seq <= this.lastSeq && this.lastSeq - seq < 1_000_000) return;
-    const gap = this.lastSeq >= 0 ? seq - this.lastSeq - 1 : 0;
-    if (gap > 0 && gap <= 8 && this.lastFrame) {
-      for (let i = 0; i < gap; i += 1) {
-        const fade = new Int16Array(this.lastFrame.length);
-        const k = 0.5 ** (i + 1);
-        for (let j = 0; j < fade.length; j += 1) fade[j] = this.lastFrame[j] * k;
-        player.push(fade.buffer);
-      }
-    }
-    this.lastSeq = seq;
-    this.lastFrame = new Int16Array(buf.slice(4));
-    player.push(buf.slice(4));
+    this.takePort(p);
   }
 
   /* ------------------------------------------------------------------- end */
@@ -655,6 +654,8 @@ class Session {
     this.resetDecoder();
     void this.player?.close();
     this.player = null;
+    this.pcmPort?.close();
+    this.pcmPort = null;
     void bridge?.stop(this.wid);
     byWid.delete(this.wid);
   }
@@ -688,6 +689,7 @@ function watchSunshine(identity: string): void {
         identity,
         userId: s.userId,
         status: "connecting",
+        step: "prep",
         stage: "",
         error: "",
         width: 0,
@@ -719,7 +721,11 @@ export function stopSunshineWatch(identity: string): void {
 if (bridge) {
   bridge.onFrame((wid, buf) => byWid.get(wid)?.onFrame(buf));
   bridge.onEvent((wid, json) => byWid.get(wid)?.onEvent(json));
-  bridge.onTunPcm((wid, buf) => byWid.get(wid)?.onPcm(buf));
+  bridge.onTunPcmPort((wid, port) => {
+    const s = byWid.get(wid);
+    if (s) s.onPcmPort(port);
+    else port.close();
+  });
   bridge.onTunEvent((wid, json) => {
     try {
       byWid.get(wid)?.onTunnel(JSON.parse(json) as TunEvent);

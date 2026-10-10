@@ -100,6 +100,16 @@ export function fmtDateTime(ts: number): string {
   return new Date(ts).toLocaleString(locale(), { dateStyle: "medium", timeStyle: "short" });
 }
 
+/** When a message was sent: the time alone today, "yesterday at" then, the date with the time before that. */
+export function fmtMsgTime(ts: number, now = Date.now()): string {
+  const day = (v: number) => new Date(v).toDateString();
+  if (day(ts) === day(now)) return fmtTime(ts);
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (day(ts) === yesterday.toDateString()) return t("chat.yesterdayAt", { time: fmtTime(ts) });
+  return new Date(ts).toLocaleString(locale(), { dateStyle: "short", timeStyle: "short" });
+}
+
 export function compareText(a: string, b: string): number {
   return a.localeCompare(b, locale());
 }

@@ -5,6 +5,40 @@ GitHub uses the same two sections, and the app shows the one of its language in
 the update window. Mentions like `@everyone` always go in backticks: GitHub takes
 a bare mention for a GitHub user and lists that user as a contributor of the release.
 
+## 0.9.7
+
+<details>
+<summary>English</summary>
+
+- **Joining a stream through Sunshine shows its steps:** preparing the connection, the streamer's answer, the direct connection, starting the stream, the first picture. Done steps are ticked, the current one turns, and under the list stands what is happening right now (waiting for the streamer to let you in, pairing, the stage of the stream). A small tile shows the current step and the progress bar.
+- **Chats no longer jump.** Scrolling up to older messages kept the view where it was only some of the time, and older messages loaded while scrolling counted as new ones: the bar said there were new messages when there were none, and the "new" line popped up in the middle of history.
+- **The sound of Sunshine streams is smooth.** It goes straight to the audio thread instead of through the page, which also decodes the picture; the reserve holds itself by playing a fraction of a percent faster or slower instead of skipping, grows after a dropout and shrinks again when calm; breaks fade instead of clicking.
+- Messages not sent today show their date: "yesterday at 14:05", or the date with the time. The full date is on hover.
+- **Copying a picture to the clipboard works again** (Electron 44 changed the clipboard).
+- **"Mirror the camera" in the camera settings.** Your own camera used to look mirrored to you and not to the others; now your tile shows exactly what is sent, mirrored for everyone when the setting is on.
+- **After the connection drops and comes back, streams through Sunshine go on.** The streamer announces the stream again (the others had lost it while the streamer still saw it running), and a viewer joins it again by itself instead of being left with an empty tile. Join and leave sounds of the reconnect itself are not played.
+- The switch for backgrounds is about calls now: off, call tiles of others show neither pictures nor emoji. Profiles always show backgrounds as their owners made them.
+- The controls of a narrow (upright) video no longer stick out of it: the seek bar goes above the buttons.
+- An autostart while the app already runs leaves it in the tray.
+
+</details>
+
+<details>
+<summary>Русский</summary>
+
+- **Подключение к стриму через Sunshine показывает этапы:** подготовка соединения, ответ стримера, прямое подключение, запуск стрима, первый кадр. Пройденные отмечены галочкой, текущий крутится, а под списком написано, что происходит прямо сейчас: ждём разрешения стримера, спаривание, этап запуска. На маленькой плитке видно текущий этап и полосу прогресса.
+- **Чаты больше не прыгают.** При прокрутке вверх к старым сообщениям лента держалась на месте только иногда. А подгруженные старые сообщения считались новыми: полоса писала про новые сообщения, которых нет, и посреди истории вылезала линия «Новые».
+- **Звук стримов через Sunshine идёт ровно.** Он теперь идёт сразу в аудиопоток, а не через страницу, которая ещё и декодирует картинку. Запас держится сам: воспроизведение идёт на доли процента быстрее или медленнее, вместо того чтобы перескакивать. После провала запас растёт, в спокойные моменты снова ужимается, обрывы затухают вместо щелчков.
+- У сообщений, отправленных не сегодня, есть дата: «вчера в 14:05» или дата со временем. Полная дата при наведении.
+- **Копирование картинки в буфер обмена снова работает** (в Electron 44 поменялся буфер обмена).
+- **«Отзеркалить камеру» в настройках камеры.** Раньше ты видел свою камеру зеркально, а остальные нет. Теперь на твоей плитке ровно то, что уходит другим: с настройкой зеркально у всех, без неё ни у кого.
+- **После того как связь пропала и вернулась, стримы через Sunshine продолжаются.** Стример заново объявляет стрим: остальные его теряли, хотя у стримера он висел как живой. Зритель сам подключается к нему снова, а не остаётся с пустой плиткой. Звуки входа и выхода от самого переподключения не играют.
+- Переключатель фонов теперь про звонки: выключен, и на плитках других в звонке нет ни картинок, ни смайлов. В профилях фоны видны всегда, как их сделали владельцы.
+- Кнопки узкого (вертикального) видео больше не вылезают за его край: полоса перемотки уходит над кнопками.
+- Автозапуск, когда приложение уже работает, оставляет его в трее.
+
+</details>
+
 ## 0.9.6
 
 <details>
