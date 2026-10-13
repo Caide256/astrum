@@ -282,16 +282,25 @@ export type PcmPlayer = {
   push: (chunk: ArrayBuffer) => void;
   /** Numbered frames from this port go to the worklet directly, past this thread. */
   listen: (port: MessagePort) => void;
+  /** What the worklet saw over the last ten seconds: dropouts, lost frames, cuts, the reserve. */
+  onStats: (cb: (stats: PcmStats) => void) => void;
   /** 0..2, 1 is the stream as it came. */
   setGain: (gain: number) => void;
   setSink: (deviceId: string) => void;
   close: () => Promise<void>;
 };
 
+export type PcmStats = { dropouts: number; lost: number; cuts: number; frames: number; reserveMs: number; targetMs: number };
+
 export async function openPcmPlayer(sinkId: string): Promise<PcmPlayer> {
   const ctx = new AudioContext({ sampleRate: 48000, latencyHint: "interactive" });
   await addWorklet(ctx, feedWorkletUrl);
   const node = new AudioWorkletNode(ctx, "pcm-feed", { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
+  let statsCb: ((stats: PcmStats) => void) | null = null;
+  node.port.onmessage = (e) => {
+    const stats = (e.data as { stats?: PcmStats } | null)?.stats;
+    if (stats) statsCb?.(stats);
+  };
   const gain = ctx.createGain();
   node.connect(gain).connect(ctx.destination);
   const setSink = (id: string) => {
@@ -303,6 +312,9 @@ export async function openPcmPlayer(sinkId: string): Promise<PcmPlayer> {
   return {
     push: (chunk) => node.port.postMessage(chunk, [chunk]),
     listen: (port) => node.port.postMessage({ port }, [port]),
+    onStats: (cb) => {
+      statsCb = cb;
+    },
     setGain: (v) => gain.gain.setTargetAtTime(Math.max(0, Math.min(2, v)), ctx.currentTime, 0.03),
     setSink,
     close: async () => {
@@ -328,10 +340,12 @@ export type Blip =
   | "streamStop"
   | "viewerJoin"
   | "message"
-  | "mention";
+  | "mention"
+  | "ring"
+  | "ringback";
 
-/** Sounds that belong to message notifications and follow their volume. */
-const NOTIFY_SOUNDS = new Set<Blip>(["message", "mention"]);
+/** Sounds that belong to notifications and follow their volume: a call ringing is one. */
+const NOTIFY_SOUNDS = new Set<Blip>(["message", "mention", "ring"]);
 
 /** One tone: `bell` adds the octave partial that makes it ring instead of beep. */
 type Note = { f: number; at: number; len: number; wave?: OscillatorType; vol?: number; bell?: number };
@@ -357,6 +371,13 @@ const SOUNDS: Record<Blip, Note[]> = {
   viewerJoin: seq([1319, 1760, 2093], 0.06, 0.16, "sine", 0.1, 0.2),
   message: seq([880, 1175], 0.07, 0.14, "sine", 0.12, 0.2),
   mention: seq([1175, 1568, 1175], 0.09, 0.2, "sine", 0.15, 0.35),
+  // a call coming in: a trill, played again every couple of seconds until answered
+  ring: [...seq([1319, 1047, 1319, 1047, 1319, 1047], 0.08, 0.11, "sine", 0.13, 0.3), ...seq([1319, 1047, 1319, 1047], 0.08, 0.11, "sine", 0.11, 0.3).map((n) => ({ ...n, at: n.at + 0.75 }))],
+  // the caller hears the other side ringing: the two tones of a phone line
+  ringback: [
+    { f: 440, at: 0, len: 1.1, wave: "sine", vol: 0.05 },
+    { f: 480, at: 0, len: 1.1, wave: "sine", vol: 0.05 },
+  ],
 };
 
 /* ------------------------------------------------------------- soundboard */

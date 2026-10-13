@@ -369,35 +369,42 @@ function start(raw, warm = false) {
   clearTimeout(warmTimer);
   warmTimer = warm ? setTimeout(() => void stop(), WARM_MS) : null;
   if (run && run.key === key && (state.running || state.starting)) return run.promise;
-  const promise = (async () => {
+  // each start knows itself: one that a newer start replaced steps aside and leaves the new one alone
+  const r = { key, promise: null };
+  run = r;
+  r.promise = (async () => {
     if (state.running || state.starting) await stop();
-    return launch(settings);
+    if (run !== r) return { ok: false, error: "replaced" };
+    return launch(settings, r);
   })();
-  run = { key, promise };
-  return promise;
+  return r.promise;
 }
 
-async function launch(settings) {
+async function launch(settings, r) {
   if (process.platform !== "win32") return { ok: false, error: "windows-only" };
   if (!installed()) return { ok: false, error: "not-installed" };
   const exe = helperPath();
   if (!exe) return { ok: false, error: "no-helper" };
   const port = await pickPort();
+  if (run !== r) return { ok: false, error: "replaced" };
   streamLog("sunshine", `start: port ${port}, encoder ${settings.encoder || meta().detectedEncoder || "auto"}, viewers ${settings.viewers}, upnp ${settings.upnp}`);
   setState({ starting: true, ready: false, error: "", port, uid: "" });
+  let p = null;
   try {
     const login = credentials();
     const conf = writeConfig(settings, port);
     if (login.fresh || !fs.existsSync(path.join(stateDir(), "credentials.json"))) {
       if (!(await runOnce([conf, "--creds", login.user, login.pass], 60_000))) throw new Error("Sunshine did not accept its login");
+      if (run !== r) return { ok: false, error: "replaced" };
     }
-    const p = spawn(exe, ["sunshine", exePath(), conf], { stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
+    p = spawn(exe, ["sunshine", exePath(), conf], { stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
+    const self = p;
     child = p;
     p.stdin.on("error", () => undefined);
     p.on("exit", () => {
-      if (child !== p) return;
+      if (child !== self) return;
       child = null;
-      run = null;
+      if (run === r) run = null;
       stopPolling();
       stopTunnel();
       setState({ running: false, ready: false, starting: false });
@@ -434,8 +441,13 @@ async function launch(settings) {
     return { ok: true, port, uid, nat: t.nat, cands: t.cands, encoder: meta().detectedEncoder || settings.encoder || "" };
   } catch (e) {
     const error = String(e?.message || e);
+    // a newer start stopped this one on purpose: it is not a failure, and whatever runs now is the newer one's
+    if (run !== r) {
+      streamLog("sunshine", `start replaced by a newer one (${error})`);
+      return { ok: false, error: "replaced" };
+    }
     streamLog("sunshine", `start failed: ${error}`);
-    await stop();
+    if (!p || child === p) await stop();
     setState({ starting: false, error });
     return { ok: false, error };
   }

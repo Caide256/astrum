@@ -176,11 +176,16 @@ export function setMuted(kind: keyof Mutes, id: string, on: boolean): void {
 
 /* ----------------------------------------------------------------- sounds */
 
-/** Volumes in percent: interface sounds (calls, mute), message notifications and the soundboard. */
-export type SoundPrefs = { ui: number; notify: number; notifyOn: boolean; board: number };
+/**
+ * Volumes in percent: interface sounds (calls, mute), message notifications
+ * and the soundboard. `boardOff`: the soundboard is off altogether, sounds of
+ * others are not heard and its button is gone; `boardButton`: the button is
+ * shown (hidden, sounds of others are still heard, none are played).
+ */
+export type SoundPrefs = { ui: number; notify: number; notifyOn: boolean; board: number; boardOff: boolean; boardButton: boolean };
 
 const SOUND_KEY = "app.sound-prefs";
-const SOUND_DEFAULTS: SoundPrefs = { ui: 70, notify: 60, notifyOn: true, board: 60 };
+const SOUND_DEFAULTS: SoundPrefs = { ui: 70, notify: 60, notifyOn: true, board: 60, boardOff: false, boardButton: true };
 
 function cleanSound(raw: Partial<SoundPrefs> | null | undefined): SoundPrefs {
   const pct = (v: unknown, d: number) => (Number.isFinite(Number(v)) ? Math.max(0, Math.min(100, Math.round(Number(v)))) : d);
@@ -189,7 +194,15 @@ function cleanSound(raw: Partial<SoundPrefs> | null | undefined): SoundPrefs {
     notify: pct(raw?.notify, SOUND_DEFAULTS.notify),
     notifyOn: typeof raw?.notifyOn === "boolean" ? raw.notifyOn : SOUND_DEFAULTS.notifyOn,
     board: pct(raw?.board, SOUND_DEFAULTS.board),
+    boardOff: typeof raw?.boardOff === "boolean" ? raw.boardOff : SOUND_DEFAULTS.boardOff,
+    boardButton: typeof raw?.boardButton === "boolean" ? raw.boardButton : SOUND_DEFAULTS.boardButton,
   };
+}
+
+/** Whether the own app may play soundboard sounds into the call: the button is there. */
+export function canPlayBoard(): boolean {
+  const p = sound.get();
+  return !p.boardOff && p.boardButton;
 }
 
 const sound = cell<SoundPrefs>(cleanSound(loadJson<Partial<SoundPrefs>>(SOUND_KEY, SOUND_DEFAULTS)));

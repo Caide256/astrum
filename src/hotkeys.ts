@@ -410,13 +410,22 @@ function localMatch(b: Binding): boolean {
   return [...held].filter(isModifier).every((m) => parts.some((p) => covers(p, m)));
 }
 
+/**
+ * The same choice as the native helper's: a binding fires with more keys
+ * held than its own, unless another one asks for exactly what is held; of
+ * several then, the one with the most keys. Push-to-talk fires whenever its
+ * keys are held.
+ */
 function localPress(name: string): void {
   if (held.has(name)) return;
   held.add(name);
-  for (const b of current) {
-    if (!active.has(b.id) && splitCombo(b.combo).some((p) => covers(p, name)) && localMatch(b)) {
-      fire(b, true);
-    }
+  const ready = current.filter((b) => !active.has(b.id) && splitCombo(b.combo).some((p) => covers(p, name)) && splitCombo(b.combo).every(satisfied));
+  const strict = ready.filter((b) => b.action !== "ptt");
+  const exact = strict.filter(localMatch);
+  const most = Math.max(0, ...strict.map((b) => splitCombo(b.combo).length));
+  const chosen = exact.length ? exact : strict.filter((b) => splitCombo(b.combo).length === most);
+  for (const b of ready) {
+    if (b.action === "ptt" || chosen.includes(b)) fire(b, true);
   }
 }
 

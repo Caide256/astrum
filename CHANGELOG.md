@@ -5,6 +5,38 @@ GitHub uses the same two sections, and the app shows the one of its language in
 the update window. Mentions like `@everyone` always go in backticks: GitHub takes
 a bare mention for a GitHub user and lists that user as a contributor of the release.
 
+## 0.9.8
+
+<details>
+<summary>English</summary>
+
+- **Calls in direct messages.** A phone button in the header of a direct chat calls the person: their app rings (a card with the caller, Accept and Decline, a ringtone, a system notification while the window is in the background) until they answer, decline, or 40 seconds pass. The caller hears the line ringing and sees "Calling", "The call was declined" or "No answer" with "Call again". A call already going on in a chat shows a phone mark in the list of direct chats and "Join the call" in its header. Do not disturb and muted people ring without a sound. The call itself is the same as in a voice channel: cameras, screen and Sunshine streams, the soundboard.
+- **The steps of joining a Sunshine stream now really show.** The tile of such a stream holds its (still empty) picture from the first moment, and the steps were drawn only when there was no picture: now they lie over it until the first frame arrives.
+- **The sound of Sunshine streams:** a viewer whose network loses sound frames tells the streamer, and for a minute each frame goes out twice, so a single lost frame is there after all instead of a click; silence goes out as tiny packets; the reserve grows up to 300 ms on a network that holds sound back behind bursts of the picture, and shrinks again when it is calm. The stream log now notes lost frames, dropouts and the reserve every ten seconds when something went wrong.
+- **Starting a Sunshine stream no longer fails the first time.** Opening the share dialog warms Sunshine up; a start with other settings replaced that warm-up, and the warm-up, dying, stopped the new start too.
+- Hotkeys work with other keys held: the microphone on the right Alt also toggles with Shift held. When another binding asks for exactly the keys held (Ctrl+M and Ctrl+Shift+M), that one wins.
+- **The soundboard can be turned off** in Voice and video: altogether (sounds of others are not heard, no button), or only its button (sounds of others are heard, none of your own are played).
+- The volume of a narrow video no longer makes its buttons jump: the slider opens upward over the picture.
+
+</details>
+
+<details>
+<summary>Русский</summary>
+
+- **Звонки в личных сообщениях.** Кнопка с трубкой в шапке лички звонит человеку. У него звонит, пока он не ответит, не отклонит или не пройдут 40 секунд. Он видит карточку со звонящим, кнопки «Принять» и «Отклонить», слышит мелодию, а если окно в фоне, получает системное уведомление. Звонящий слышит гудки и видит «Звоню», «Звонок отклонён» или «Нет ответа» с кнопкой «Позвонить ещё раз». Если в чате уже идёт звонок, в списке личек у него значок трубки, а в шапке кнопка «Присоединиться к звонку». В режиме «Не беспокоить» и от заглушённых людей звонок приходит без звука. Сам звонок такой же, как в голосовом канале: камеры, демонстрация экрана и Sunshine, звуковая панель.
+- **Этапы подключения к стриму Sunshine теперь правда видно.** Плитка такого стрима с первой секунды держит его (ещё пустую) картинку, а этапы рисовались только когда картинки не было. Теперь они лежат поверх неё до первого кадра.
+- **Звук стримов через Sunshine.**
+  - Если у зрителя теряются звуковые кадры, он сообщает стримеру, и минуту каждый кадр уходит дважды: одиночная потеря восстанавливается, а не щёлкает.
+  - Тишина уходит крошечными пакетами.
+  - Если сеть придерживает звук за пачками картинки, запас растёт до 300 мс, а в спокойной сети снова ужимается.
+  - Если что-то пошло не так, в лог стримов раз в десять секунд пишутся потерянные кадры, провалы и запас.
+- **Стрим через Sunshine больше не падает с первого раза.** Окно демонстрации заранее прогревает Sunshine. Старт с другими настройками заменял этот прогрев, а прогрев, умирая, гасил и новый старт.
+- Горячие клавиши срабатывают при зажатых других клавишах: микрофон на правом Alt переключается и с зажатым Shift. Если другая привязка просит ровно то, что зажато (Ctrl+M и Ctrl+Shift+M), срабатывает она.
+- **Звуковую панель можно выключить** в «Голос и видео»: полностью (звуков других не слышно, кнопки нет) или только кнопку (звуки других слышно, свои не проиграть).
+- Громкость узкого видео больше не дёргает его кнопки: ползунок открывается вверх, поверх картинки.
+
+</details>
+
 ## 0.9.7
 
 <details>

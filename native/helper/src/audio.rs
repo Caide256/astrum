@@ -39,7 +39,15 @@ pub fn capture(pid: u32, include_tree: bool) -> Result<(), String> {
     capture_to(pid, include_tree, &mut |chunk| out.write_all(chunk).and_then(|_| out.flush()).is_ok())
 }
 
+/// After this long without a packet the source is taken to be silent.
+const QUIET_AFTER: std::time::Duration = std::time::Duration::from_millis(40);
+
 /// The same capture handed over in 10 ms chunks; `sink` returns false to stop.
+///
+/// Process loopback delivers nothing at all while nothing plays. The other
+/// end would take every pause for a dropout of the network and build up a
+/// reserve on each, the sound falling further behind. So silence goes out
+/// as zeros at the pace of the clock, starting a little after the last packet.
 pub fn capture_to(pid: u32, include_tree: bool, sink: &mut dyn FnMut(&[u8]) -> bool) -> Result<(), String> {
     initialize_mta().ok().map_err(|e| format!("COM init failed: {e}"))?;
 
@@ -62,6 +70,9 @@ pub fn capture_to(pid: u32, include_tree: bool, sink: &mut dyn FnMut(&[u8]) -> b
     let mut queue: VecDeque<u8> = VecDeque::with_capacity(RATE * BLOCK);
     let chunk = CHUNK;
     let mut buf = vec![0u8; chunk];
+    let silence = vec![0u8; chunk];
+    let mut last_packet = std::time::Instant::now();
+    let mut silent_sent: u128 = 0;
 
     let debug = std::env::var_os("HELPER_AUDIO_DEBUG").is_some();
     loop {
@@ -72,6 +83,8 @@ pub fn capture_to(pid: u32, include_tree: bool, sink: &mut dyn FnMut(&[u8]) -> b
                 break;
             }
             let info = capture.read_from_device_to_deque(&mut queue).map_err(|e| e.to_string())?;
+            last_packet = std::time::Instant::now();
+            silent_sent = 0;
             if debug {
                 eprintln!("packet {frames} frames, flags {:?}, queue {}", info.flags, queue.len());
             }
@@ -83,6 +96,18 @@ pub fn capture_to(pid: u32, include_tree: bool, sink: &mut dyn FnMut(&[u8]) -> b
             if !sink(&buf) {
                 let _ = client.stop_stream();
                 return Ok(());
+            }
+        }
+        // nothing plays: 10 ms of silence for every 10 ms that passes
+        let quiet = last_packet.elapsed();
+        if queue.is_empty() && quiet > QUIET_AFTER {
+            let due = (quiet - QUIET_AFTER).as_millis() / 10 + 1;
+            while silent_sent < due {
+                silent_sent += 1;
+                if !sink(&silence) {
+                    let _ = client.stop_stream();
+                    return Ok(());
+                }
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(10));

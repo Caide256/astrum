@@ -4,6 +4,7 @@ import {
   app,
   avatarMxc,
   bannerOf,
+  callPlaceName,
   displayName,
   leaveVoice,
   openShareSettings,
@@ -24,10 +25,13 @@ import { Chat } from "./Main.tsx";
 import { useLinger } from "./controls.tsx";
 import { popOut } from "./popout.ts";
 import { SunWatchStatus, useSunWatchInfo } from "./Moonlight.tsx";
+import { ml } from "../moonlight.ts";
 import { SoundboardButton } from "./Soundboard.tsx";
+import { CallingBanner } from "./DirectCall.tsx";
 import { VideoView } from "./Stage.tsx";
 import {
   IconChat,
+  IconPhone,
   IconChevron,
   IconClose,
   IconEye,
@@ -177,6 +181,7 @@ function TileView({
   // the banner the person chose: sent by their app in the call, or read from their server membership
   const person = tile.kind === "member" ? tile.member : null;
   const sunInfo = useSunWatchInfo(tile.kind === "stream" ? tile.stream.identity : "");
+  const sunWatch = useStore(ml, (s) => (tile.kind === "stream" ? s.watches[tile.stream.identity] : undefined));
   useViewPrefs();
   // a banner sent in the call wins over the stored one; pictures and emoji of others follow the switch in settings
   const look = person ? (person.local ? bannerOf(person.userId, roomId) : plainInCall(person.tile ?? bannerOf(person.userId, roomId))) : null;
@@ -186,7 +191,23 @@ function TileView({
     const { stream, video } = tile;
     const who = displayName(stream.userId, roomId);
     let body: ReactNode;
-    if (video) {
+    // A Sunshine stream's picture track is there from the start, empty: until
+    // the first picture (or once it ended or failed) the steps of joining, or
+    // what went wrong, lie over it
+    const joining = !!video && stream.sunshine && !stream.local && (!sunWatch || sunWatch.status !== "live" || !sunWatch.shown);
+    if (video && joining) {
+      body = (
+        <>
+          <VideoView video={video} />
+          <SunWatchStatus identity={stream.identity} userId={stream.userId} />
+          <div className="tile-tools" onClick={(e) => e.stopPropagation()}>
+            <button className="icon" title={t("share.stopWatching")} onClick={() => voice.unwatch(stream.identity)}>
+              <IconClose />
+            </button>
+          </div>
+        </>
+      );
+    } else if (video) {
       body = (
         <>
           <VideoView video={video} />
@@ -361,6 +382,7 @@ export function CallView() {
   const state = useSyncExternalStore(voice.subscribe, voice.getState, voice.getState);
   const voiceChannel = useStore(app, (s) => s.voiceChannel);
   const servers = useStore(app, (s) => s.servers);
+  const directs = useStore(app, (s) => s.directs);
   const requested = useStore(app, (s) => s.callFocus);
   const chatOpen = useStore(app, (s) => s.callChat);
   const chatPanel = useLinger(chatOpen, 220);
@@ -380,6 +402,8 @@ export function CallView() {
   }, [focus]);
 
   const channel = servers.flatMap((g) => g.channels).find((c) => c.roomId === voiceChannel);
+  // a call in a direct chat: the person's name and that chat's unread messages
+  const direct = directs.find((d) => d.roomId === voiceChannel);
 
   const videoOf = (identity: string, screen: boolean) =>
     state.videos.find((v) => v.identity === identity && v.screen === screen);
@@ -428,15 +452,15 @@ export function CallView() {
     );
   }
 
-  const unread = channel?.unread ?? 0;
+  const unread = channel?.unread ?? direct?.unread ?? 0;
 
   return (
     <div className={`call-wrap ${chatOpen ? "with-chat" : ""}`}>
       <section className="call">
         <header className="call-head">
-          <IconSpeaker />
-          <b className="ellipsis">{channel?.name ?? t("channels.kind.voice")}</b>
-          <span className="state">{state.connected ? tn("call.inChannel", state.members.length) : t("dock.connecting")}</span>
+          {direct ? <IconPhone /> : <IconSpeaker />}
+          <b className="ellipsis">{callPlaceName(voiceChannel) || t("channels.kind.voice")}</b>
+          <span className="state">{state.connected ? tn(direct ? "call.inDirect" : "call.inChannel", state.members.length) : t("dock.connecting")}</span>
           <button
             className={`ghost icon head-tool call-chat-btn ${chatOpen ? "on-soft" : ""}`}
             title={chatOpen ? t("call.chatHide") : t("call.chat")}
@@ -448,6 +472,7 @@ export function CallView() {
         </header>
         <div className="call-stage" ref={stageRef}>
           {size.w > 0 && stage}
+          <CallingBanner />
         </div>
         <Controls />
       </section>

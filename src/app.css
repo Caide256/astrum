@@ -3135,6 +3135,43 @@ button.file-chip .state {
   .player-time {
     margin-right: auto;
   }
+
+  /* the volume slider opens upward over the picture: growing in the row it
+     moved the buttons, slipped out from under the mouse, closed, and again */
+  .player-volume {
+    position: relative;
+  }
+
+  .player-volume input,
+  .player-volume:hover input {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    width: 28px;
+    margin: 0;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 8px;
+    background: rgba(24, 25, 30, 0.95);
+    accent-color: var(--accent);
+    transform: translateX(-50%);
+    writing-mode: vertical-lr;
+    direction: rtl;
+  }
+
+  .player-volume input {
+    height: 0;
+    pointer-events: none;
+    transition:
+      height 0.18s ease,
+      opacity 0.18s ease;
+  }
+
+  .player-volume:hover input {
+    height: 96px;
+    padding: 10px 0;
+    pointer-events: auto;
+  }
 }
 
 .player.audio {
@@ -7844,4 +7881,237 @@ button.unread-bar:active:not(:disabled) {
 
 .framer-zoom .state {
   min-width: 110px;
+}
+
+/* ------------------------------------------------------------- direct calls */
+
+/* a call ringing in: a card on top of everything, the caller's picture pulsing */
+.incoming-call {
+  position: fixed;
+  top: 52px;
+  left: 50%;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: min(380px, calc(100vw - 32px));
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--pop-2, var(--bg-1));
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  transform: translateX(-50%);
+  animation: incoming-in 0.25s ease-out;
+}
+
+@keyframes incoming-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -12px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+.incoming-avatar {
+  position: relative;
+  flex: none;
+  border-radius: 50%;
+}
+
+.incoming-avatar::before,
+.incoming-avatar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--ok);
+  animation: incoming-pulse 1.6s ease-out infinite;
+}
+
+.incoming-avatar::after {
+  animation-delay: 0.8s;
+}
+
+@keyframes incoming-pulse {
+  from {
+    opacity: 0.8;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.55);
+  }
+}
+
+.incoming-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.incoming-text b {
+  font-size: 15px;
+}
+
+.incoming-text span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.incoming-buttons {
+  display: flex;
+  flex: none;
+  gap: 10px;
+}
+
+.incoming-buttons button {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  color: #fff;
+  cursor: pointer;
+  transition:
+    transform 0.12s ease,
+    background 0.12s ease;
+}
+
+.incoming-buttons button:hover {
+  transform: scale(1.08);
+}
+
+.incoming-decline {
+  background: var(--danger);
+}
+
+.incoming-decline:hover {
+  background: var(--danger-hover);
+}
+
+.incoming-accept {
+  background: var(--ok);
+  animation: incoming-shake 1.3s ease-in-out infinite;
+}
+
+.incoming-accept:hover {
+  background: var(--ok-hover);
+}
+
+@keyframes incoming-shake {
+  0%,
+  60%,
+  100% {
+    rotate: 0deg;
+  }
+  70% {
+    rotate: -14deg;
+  }
+  80% {
+    rotate: 14deg;
+  }
+  90% {
+    rotate: -8deg;
+  }
+}
+
+/* over the call while the other person is rung */
+.calling-banner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 22px 28px;
+  min-width: 260px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--bg-1);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
+  text-align: center;
+  transform: translate(-50%, -50%);
+  animation: fade-in 0.2s ease-out;
+}
+
+.calling-banner b {
+  font-size: 15px;
+}
+
+.calling-banner .row {
+  display: flex;
+  gap: 8px;
+}
+
+.calling-banner .row button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.calling-dots {
+  display: flex;
+  gap: 6px;
+}
+
+.calling-dots i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  animation: calling-dot 1.2s ease-in-out infinite;
+}
+
+.calling-dots i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.calling-dots i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes calling-dot {
+  0%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-4px);
+  }
+}
+
+/* a direct chat with a call going on */
+.call-mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  color: var(--ok);
+  margin-left: auto;
+}
+
+.call-mark.mine {
+  animation: calling-dot 1.6s ease-in-out infinite;
+}
+
+.join-call {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--ok);
+  color: #fff;
+}
+
+.join-call:hover:not(:disabled) {
+  background: var(--ok-hover);
 }

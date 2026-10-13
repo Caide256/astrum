@@ -87,6 +87,9 @@ function BoardPop({ anchor, onClose }: { anchor: DOMRect; onClose: () => void })
 /** The soundboard button of the call controls and of the voice dock. */
 export function SoundboardButton({ className }: { className: string }) {
   const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  const prefs = useSoundPrefs();
+  // turned off in settings: the soundboard altogether, or just its button
+  if (prefs.boardOff || !prefs.boardButton) return null;
   return (
     <>
       <button

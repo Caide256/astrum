@@ -20,6 +20,8 @@ import {
   app,
   askNotifyPermission,
   avatarMxc,
+  callDirect,
+  callPlaceName,
   channelMembers,
   closeMenus,
   closePlaceMenu,
@@ -152,7 +154,9 @@ import {
   IconVideo,
   IconVideoOff,
   IconVolume,
+  IconPhone,
 } from "./icons.tsx";
+import { IncomingCall } from "./DirectCall.tsx";
 
 /** Right click on a person opens the user menu. */
 function menuHandler(userId: string, roomId: string | null = null, voiceCtx = false) {
@@ -380,6 +384,8 @@ function PeopleSearch({ term, onDone }: { term: string; onDone: () => void }) {
 function DirectList() {
   useMutes();
   const directs = useStore(app, (s) => s.directs);
+  const occupants = useStore(app, (s) => s.occupants);
+  const voiceChannel = useStore(app, (s) => s.voiceChannel);
   const invites = useStore(app, (s) => s.invites);
   const activeChannel = useStore(app, (s) => s.activeChannel);
   const [term, setTerm] = useState("");
@@ -445,6 +451,11 @@ function DirectList() {
               >
                 <Avatar mxc={d.avatar} name={d.name} size={24} status={presenceOf(d.userId)} />
                 <span className="ellipsis">{d.name}</span>
+                {(occupants[d.roomId]?.length ?? 0) > 0 && (
+                  <span className={`call-mark ${d.roomId === voiceChannel ? "mine" : ""}`} title={t("call.direct.live")}>
+                    <IconPhone size={13} />
+                  </span>
+                )}
                 {isMuted("users", d.userId) && <IconBellOff className="mute-mark" />}
                 {d.unread > 0 && d.roomId !== activeChannel && <span className="count">{d.unread}</span>}
               </button>
@@ -769,12 +780,14 @@ function ChannelList() {
 function VoiceDock() {
   const state = useSyncExternalStore(voice.subscribe, voice.getState, voice.getState);
   const voiceChannel = useStore(app, (s) => s.voiceChannel);
-  const servers = useStore(app, (s) => s.servers);
+  // the name of the call place is read through callPlaceName(); these redraw the dock when it changes
+  useStore(app, (s) => s.servers);
   const myName = useStore(app, (s) => s.myName);
   const myAvatar = useStore(app, (s) => s.myAvatar);
   const myPresence = useStore(app, (s) => s.myPresence);
 
-  const channelName = servers.flatMap((g) => g.channels).find((c) => c.roomId === voiceChannel)?.name;
+  useStore(app, (s) => s.directs);
+  const channelName = callPlaceName(voiceChannel);
   const ptt = state.settings.inputMode === "ptt";
   const [netOpen, setNetOpen] = useState(false);
   const hint = voiceChannel ? state.hint : "";
@@ -1510,6 +1523,7 @@ function typingLine(names: string[]): string {
 function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () => void }) {
   useMutes();
   const messages = useStore(app, (s) => s.messages);
+  const occupants = useStore(app, (s) => s.occupants);
   const activeChannel = useStore(app, (s) => s.activeChannel);
   const voiceChannel = useStore(app, (s) => s.voiceChannel);
   const view = useStore(app, (s) => s.view);
@@ -1709,10 +1723,22 @@ function Chat({ embedded = false, onClose }: { embedded?: boolean; onClose?: () 
         <b className="ellipsis">{title}</b>
         {channel?.topic && !embedded && <span className="topic">{channel.topic}</span>}
         <span className="head-gap" />
-        {voiceHere && activeChannel === voiceChannel && !embedded && (
+        {(voiceHere || direct) && activeChannel === voiceChannel && !embedded && (
           <button className="ghost small head-tool back-to-call" onClick={showCall}>
-            <IconSpeaker /> {t("chat.backToCall")}
+            {direct ? <IconPhone /> : <IconSpeaker />} {t("chat.backToCall")}
           </button>
+        )}
+        {direct && !direct.deleted && activeChannel !== voiceChannel && !embedded && (
+          // someone is in the call of this chat already: join it; otherwise ring the person
+          (occupants[activeChannel] ?? []).some((u) => u !== me()) ? (
+            <button className="small head-tool join-call" onClick={() => void callDirect(activeChannel)}>
+              <IconPhone /> {t("call.direct.join")}
+            </button>
+          ) : (
+            <button className="ghost icon head-tool" title={t("call.direct")} onClick={() => void callDirect(activeChannel)}>
+              <IconPhone />
+            </button>
+          )
         )}
         {embedded ? (
           <button className="ghost icon head-tool" title={t("common.close")} onClick={onClose}>
@@ -2437,6 +2463,7 @@ export function Main() {
       <MiniStream />
       <SunRequests />
       <StreamPeek />
+      <IncomingCall />
       <Toast />
       <OfflineBar />
       <AddServerModal />

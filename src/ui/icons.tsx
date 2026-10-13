@@ -274,6 +274,12 @@ export const IconShield = (p: Props) => (
 );
 
 /** Handset for leaving a call. */
+export const IconPhone = (p: Props) => (
+  <Svg {...p}>
+    <path d="M3.2 1.8h2.3l1.2 3-1.6 1.1a8.6 8.6 0 0 0 5 5l1.1-1.6 3 1.2v2.3a1.5 1.5 0 0 1-1.6 1.5A12.2 12.2 0 0 1 1.7 3.4a1.5 1.5 0 0 1 1.5-1.6z" />
+  </Svg>
+);
+
 export const IconHangup = (p: Props) => (
   <Svg {...p}>
     <path d="M1.8 9.6c3.4-3.1 9-3.1 12.4 0l-1.4 1.9c-.2.3-.6.4-.9.2l-1.7-.9c-.3-.2-.5-.5-.4-.8l.2-1.2c-1.3-.5-2.7-.5-4 0l.2 1.2c.1.3-.1.6-.4.8l-1.7.9c-.3.2-.7.1-.9-.2z" />

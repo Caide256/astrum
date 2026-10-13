@@ -13,15 +13,24 @@
  * computer's own sound), or numbered frames, [sequence u32 BE][PCM], on a
  * port handed to the node (a stream's sound, straight from the main process,
  * past the page's busy thread). A lost numbered frame is covered by the one
- * before it, fading.
+ * before it, fading; a frame of the number alone is 5 ms of silence (the
+ * streamer sends those while nothing plays, so pauses are not dropouts).
+ *
+ * Every ten seconds the port of the node gets what happened meanwhile, for
+ * the stream log: dropouts, lost frames, cuts after a stall, the reserve.
  */
 
 const MIN_TARGET_S = 0.06;
-const START_TARGET_S = 0.08;
-const MAX_TARGET_S = 0.16;
+const START_TARGET_S = 0.1;
+/** A network that holds sound back behind bursts of the picture needs this much at worst. */
+const MAX_TARGET_S = 0.3;
+const GROW_S = 0.04;
+const CALM_S = 15;
 /** At most this much faster or slower: well under what an ear notices. */
 const MAX_SKEW = 0.004;
 const FADE_SAMPLES = 96;
+/** 5 ms at 48 kHz, stereo: a silent numbered frame stands for this. */
+const SILENT = new Int16Array(480);
 
 class PcmFeed extends AudioWorkletProcessor {
   constructor() {
@@ -41,6 +50,8 @@ class PcmFeed extends AudioWorkletProcessor {
     this.lastR = 0;
     this.lastSeq = -1;
     this.lastFrame = null;
+    this.stats = { dropouts: 0, lost: 0, cuts: 0, frames: 0 };
+    this.statsAt = currentTime;
 
     this.port.onmessage = (e) => {
       const d = e.data;
@@ -54,11 +65,13 @@ class PcmFeed extends AudioWorkletProcessor {
 
   /** A numbered frame: one seen before is dropped, a gap of a few is covered. */
   frame(data) {
-    if (!(data instanceof ArrayBuffer) || data.byteLength < 8) return;
+    if (!(data instanceof ArrayBuffer) || data.byteLength < 4) return;
     const seq = new DataView(data).getUint32(0, false);
     if (this.lastSeq >= 0 && seq <= this.lastSeq && this.lastSeq - seq < 1000000) return;
-    const pcm = new Int16Array(data, 4, (data.byteLength - 4) >> 1);
+    const pcm = data.byteLength < 8 ? SILENT : new Int16Array(data, 4, (data.byteLength - 4) >> 1);
     const gap = this.lastSeq >= 0 ? seq - this.lastSeq - 1 : 0;
+    this.stats.frames += 1;
+    if (gap > 0) this.stats.lost += Math.min(gap, 1000);
     if (gap > 0 && gap <= 8 && this.lastFrame) {
       for (let i = 0; i < gap; i += 1) this.chunk(this.lastFrame, 0.5 ** (i + 1));
     }
@@ -78,6 +91,7 @@ class PcmFeed extends AudioWorkletProcessor {
       this.read = (this.write - Math.round(this.target) + this.size) % this.size;
       this.fill = this.target;
       this.fadeIn = FADE_SAMPLES;
+      this.stats.cuts += 1;
     }
   }
 
@@ -125,8 +139,9 @@ class PcmFeed extends AudioWorkletProcessor {
         // ran dry: fade out, then wait for a bigger reserve than before
         this.silence(l, r, i);
         this.primed = false;
-        this.target = Math.min(MAX_TARGET_S * sampleRate, this.target + 0.02 * sampleRate);
+        this.target = Math.min(MAX_TARGET_S * sampleRate, this.target + GROW_S * sampleRate);
         this.calmSince = currentTime;
+        this.stats.dropouts += 1;
         return true;
       }
       const frac = this.read - at;
@@ -147,9 +162,14 @@ class PcmFeed extends AudioWorkletProcessor {
     }
 
     // calm for a while: a smaller reserve, the sound closer to the picture
-    if (currentTime - this.calmSince > 10 && this.target > MIN_TARGET_S * sampleRate) {
+    if (currentTime - this.calmSince > CALM_S && this.target > MIN_TARGET_S * sampleRate) {
       this.target = Math.max(MIN_TARGET_S * sampleRate, this.target - 0.01 * sampleRate);
       this.calmSince = currentTime;
+    }
+    if (currentTime - this.statsAt >= 10 && this.stats.frames > 0) {
+      this.port.postMessage({ stats: { ...this.stats, reserveMs: Math.round((this.fill / sampleRate) * 1000), targetMs: Math.round((this.target / sampleRate) * 1000) } });
+      this.stats = { dropouts: 0, lost: 0, cuts: 0, frames: 0 };
+      this.statsAt = currentTime;
     }
     return true;
   }

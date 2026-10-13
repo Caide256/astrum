@@ -32,6 +32,8 @@ pub const RST: u8 = 9;
 pub const PCM: u8 = 10;
 pub const BYE: u8 = 11;
 pub const SELECT: u8 = 12;
+/// Viewer to streamer: sound frames went missing ([count u16 BE]); the streamer sends each one twice for a while.
+pub const SOUND_LOSS: u8 = 14;
 
 /// Microseconds since the helper started: probe timestamps, echoed back for the round trip.
 pub fn now_us() -> u64 {

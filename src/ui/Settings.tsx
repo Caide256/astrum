@@ -886,6 +886,17 @@ function AudioTab() {
           </button>
         ))}
       </div>
+
+      <div className="section-title">{t("sounds.title")}</div>
+      <Toggle checked={!sounds.boardOff} onChange={(on) => setSoundPrefs({ boardOff: !on })} title={t("sounds.enabled")} hint={t("sounds.enabled.hint")} />
+      <Toggle
+        checked={sounds.boardButton && !sounds.boardOff}
+        disabled={sounds.boardOff}
+        onChange={(on) => setSoundPrefs({ boardButton: on })}
+        title={t("sounds.button")}
+        hint={t("sounds.button.hint")}
+      />
+      <Volume label={t("sounds.volume")} value={sounds.board} disabled={sounds.boardOff} onChange={(v) => setSoundPrefs({ board: v })} />
     </>
   );
 }

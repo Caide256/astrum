@@ -28,10 +28,14 @@ use std::time::{Duration, Instant};
 use rand::Rng;
 
 use super::stream::Streams;
-use super::wire::{self, Link, Socks, BYE, KEEPALIVE, PCM, PROBE, PROBE_ACK, SEG, ACK, RST, UDP};
+use super::wire::{self, Link, Socks, BYE, KEEPALIVE, PCM, PROBE, PROBE_ACK, SEG, ACK, RST, SOUND_LOSS, UDP};
 use super::{json_line, path_of, predictions, stun, tcp_port, udp_port, Heard, Prober};
 
 const MAX_SESSIONS: usize = 16;
+/// How long sound goes out twice after a viewer reported lost frames.
+const SOUND_TWICE: Duration = Duration::from_secs(60);
+/// Samples this quiet or quieter are silence (the system mix dithers by one or two).
+const QUIET_SAMPLE: u16 = 2;
 /// How long the streamer waits for a viewer to knock first (see `Prober`).
 /// The viewer's probes and these answers make the path, so a long wait
 /// slows nothing down; the streamer's own probes are for when that fails.
@@ -46,6 +50,14 @@ struct Session {
     flows: Vec<Arc<UdpSocket>>,
     up: AtomicBool,
     born: Instant,
+    /// Until then each sound frame goes out twice: this viewer's network loses some.
+    sound_twice: Mutex<Option<Instant>>,
+}
+
+impl Session {
+    fn sound_twice(&self) -> bool {
+        self.sound_twice.lock().ok().and_then(|t| *t).is_some_and(|t| Instant::now() < t)
+    }
 }
 
 struct Host {
@@ -107,6 +119,8 @@ impl Host {
         let host = self.clone();
         std::thread::spawn(move || {
             let mut idle_since: Option<Instant> = None;
+            // the last frame with sound, sent again before the next one to viewers who lose frames
+            let mut prev: Option<Vec<u8>> = None;
             let res = crate::audio::capture_to(host.pid, false, &mut |chunk| {
                 let up: Vec<Arc<Session>> = host.list().into_iter().filter(|s| s.up.load(Ordering::Relaxed)).collect();
                 if up.is_empty() {
@@ -114,16 +128,29 @@ impl Host {
                     return since.elapsed() < Duration::from_secs(2);
                 }
                 idle_since = None;
-                // 5 ms frames: one packet each, well under the path's MTU
+                // 5 ms frames: one packet each, well under the path's MTU. A silent
+                // one goes out as its number alone: the viewer plays 5 ms of silence.
+                // A viewer whose network loses frames gets the one before each frame
+                // again just ahead of it: a single lost frame is there after all.
                 for frame in chunk.chunks(crate::audio::CHUNK / 2) {
                     let seq = host.pcm_seq.fetch_add(1, Ordering::Relaxed);
-                    let mut p = Vec::with_capacity(5 + frame.len());
-                    p.push(PCM);
-                    p.extend_from_slice(&seq.to_be_bytes());
-                    p.extend_from_slice(frame);
+                    let silent = frame.chunks_exact(2).all(|s| i16::from_le_bytes([s[0], s[1]]).unsigned_abs() <= QUIET_SAMPLE);
+                    let packet = |seq: u32, data: &[u8]| {
+                        let mut p = Vec::with_capacity(5 + data.len());
+                        p.push(PCM);
+                        p.extend_from_slice(&seq.to_be_bytes());
+                        p.extend_from_slice(data);
+                        p
+                    };
+                    let now = packet(seq, if silent { &[] } else { frame });
+                    let again = prev.as_ref().map(|data| packet(seq.wrapping_sub(1), data));
                     for s in &up {
-                        s.link.send(&host.socks, &p);
+                        if let Some(a) = again.as_ref().filter(|_| s.sound_twice()) {
+                            s.link.send(&host.socks, a);
+                        }
+                        s.link.send(&host.socks, &now);
                     }
+                    prev = if silent { None } else { Some(frame.to_vec()) };
                 }
                 true
             });
@@ -172,6 +199,16 @@ impl Host {
             }
             ACK => s.streams.on_ack(body),
             RST => s.streams.on_rst(body),
+            SOUND_LOSS if body.len() >= 3 => {
+                let lost = u16::from_be_bytes([body[1], body[2]]);
+                let was = s.sound_twice();
+                if let Ok(mut t) = s.sound_twice.lock() {
+                    *t = Some(Instant::now() + SOUND_TWICE);
+                }
+                if !was {
+                    json_line(&format!("{{\"ev\":\"sound-twice\",\"id\":\"{}\",\"lost\":{lost}}}", s.id));
+                }
+            }
             BYE => {
                 self.close(sid, "bye");
                 return;
@@ -239,6 +276,7 @@ impl Host {
                 flows,
                 up: AtomicBool::new(false),
                 born: Instant::now(),
+                sound_twice: Mutex::new(None),
             });
             map.insert(sid, s.clone());
             s

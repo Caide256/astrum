@@ -47,6 +47,7 @@ import {
   getNotifyMode,
   getNotifyPrefs,
   getServerProfiles,
+  canPlayBoard,
   getSoundPrefs,
   getTileLook,
   getViewPrefs,
@@ -181,6 +182,10 @@ export type AppState = {
   messages: Message[];
   occupants: Record<string, string[]>;
   voiceChannel: string | null;
+  /** A call ringing in from a direct chat. */
+  ringing: DirectRing | null;
+  /** The own call ringing out in a direct chat, and how it went. */
+  calling: OutgoingCall | null;
   addServerOpen: boolean;
   serverCard: ServerCard | null;
   profileUser: string | null;
@@ -289,6 +294,8 @@ export const app = createStore<AppState>({
   messages: [],
   occupants: {},
   voiceChannel: null,
+  ringing: null,
+  calling: null,
   addServerOpen: false,
   serverCard: null,
   profileUser: null,
@@ -668,6 +675,8 @@ export async function doLogout(): Promise<void> {
     activeChannel: null,
     messages: [],
     occupants: {},
+    ringing: null,
+    calling: null,
     profileUser: null,
     userMenu: null,
     settingsOpen: false,
@@ -686,9 +695,10 @@ export async function doLogout(): Promise<void> {
 function wire(c: MatrixClient): void {
   c.on(RoomEvent.Timeline, (event: MatrixEvent, room: Room | undefined, toStart: boolean | undefined, _removed, data) => {
     if (!room) return;
+    // older history paged in while scrolling up comes through here too: only a live event is new
+    const live = !toStart && data?.liveEvent !== false;
+    if (live) onCallEvent(event);
     if (room.roomId === app.get().activeChannel) {
-      // older history paged in while scrolling up comes through here too: only a live message is new
-      const live = !toStart && data?.liveEvent !== false;
       if (live && !chatAtBottom && !app.get().unreadFrom && event.getType() === "m.room.message" && event.getSender() !== c.getUserId()) {
         app.set({ unreadFrom: event.getId() ?? null });
       }
@@ -714,6 +724,8 @@ function wire(c: MatrixClient): void {
     // an encrypted message is only a message once decrypted: notify now
     const room = c.getRoom(ev.getRoomId() ?? "");
     if (room && ev.getType() === "m.room.message" && !ev.isDecryptionFailure()) notify(ev, room);
+    // a call ringing in an encrypted direct chat is readable only now
+    if (!ev.isDecryptionFailure()) onCallEvent(ev);
   });
   c.on(RoomStateEvent.Events, (ev) => {
     const type = ev.getType();
@@ -965,7 +977,15 @@ export function refreshOccupants(): void {
       occupants[channel.roomId] = rtc.participantsInCall(room, (m) => ghosts.has(ghostKey(m)));
     }
   }
+  // calls in direct chats: who is in one, for the list and to stop a ring the caller gave up
+  for (const d of app.get().directs) {
+    const room = client.getRoom(d.roomId);
+    if (!room) continue;
+    if (d.roomId === live) checkGhosts(room);
+    occupants[d.roomId] = rtc.participantsInCall(room, (m) => ghosts.has(ghostKey(m)));
+  }
   app.set({ occupants });
+  checkRing(occupants);
 }
 
 function replyPreview(room: Room, eventId: string, quoted?: unknown): ReplyPreview | null {
@@ -1483,10 +1503,12 @@ export async function selectChannel(channel: Channel): Promise<void> {
 export function showCall(): void {
   const roomId = app.get().voiceChannel;
   if (!roomId) return;
-  // the call lives on its own server: switch there if another one is open
+  // the call lives on its own server, or in a direct chat: switch there if something else is open
   const home = app.get().servers.find((g) => g.channels.some((c) => c.roomId === roomId));
   if (home && (app.get().view !== "server" || app.get().activeServer !== home.spaceId)) {
     app.set({ view: "server", activeServer: home.spaceId });
+  } else if (!home && app.get().directs.some((d) => d.roomId === roomId) && app.get().view !== "direct") {
+    app.set({ view: "direct" });
   }
   if (app.get().activeChannel !== roomId) void openChat(roomId);
   app.set({ callView: true });
@@ -2729,7 +2751,7 @@ export async function addChannel(name: string, kind: "text" | "voice"): Promise<
 
 /* -------------------------------------------------------------------- voice */
 
-export async function joinVoice(channel: Channel): Promise<void> {
+export async function joinVoice(channel: Pick<Channel, "roomId" | "name"> & Partial<Pick<Channel, "joined" | "voiceLocked">>): Promise<void> {
   if (!client) return;
   if (channel.voiceLocked) {
     app.set({ error: t("voice.err.noAccess", { channel: channel.name }) });
@@ -2865,6 +2887,7 @@ onBeforeQuit(() => leaveVoice().catch(() => undefined));
 setBeforeInstall(() => leaveVoice().catch(() => undefined));
 
 export async function leaveVoice(): Promise<void> {
+  stopCalling();
   const info = membershipInfo;
   membershipInfo = null;
   if (info) stopMembership(info);
@@ -2874,6 +2897,200 @@ export async function leaveVoice(): Promise<void> {
   }
   app.set({ voiceChannel: null, callView: false, cameraPickerOpen: false, lastFocus: null });
   refreshOccupants();
+}
+
+/* ------------------------------------------------------------- direct calls */
+
+/**
+ * A call in a direct chat is the same call as in a voice channel, held in
+ * the direct chat's room. Starting one rings the other person: a
+ * notification event (MSC4075, what Element sends too) makes their app ring
+ * until they answer or decline, the caller hangs up, or the ring runs out.
+ * A decline (MSC4310) tells the caller.
+ */
+export type DirectRing = { roomId: string; userId: string; eventId: string; until: number };
+export type OutgoingCall = { roomId: string; userId: string; eventId: string; status: "ringing" | "declined" | "missed" };
+
+const RING_TYPE = "org.matrix.msc4075.rtc.notification";
+const RING_TYPE_OLD = "org.matrix.msc4075.call.notify";
+const DECLINE_TYPE = "org.matrix.msc4310.rtc.decline";
+const RING_MS = 40_000;
+
+let ringTimer = 0;
+let ringEnd = 0;
+let ringbackTimer = 0;
+let callingEnd = 0;
+/** Rings already handled here: one decrypted again later must not ring a second time. */
+const ringsSeen = new Set<string>();
+
+function directOf(roomId: string): people.Direct | null {
+  return app.get().directs.find((d) => d.roomId === roomId) ?? null;
+}
+
+/** The name a call place goes by: the voice channel's, or the person's of a direct chat. */
+export function callPlaceName(roomId: string | null): string {
+  if (!roomId) return "";
+  return app.get().servers.flatMap((g) => g.channels).find((c) => c.roomId === roomId)?.name ?? directOf(roomId)?.name ?? "";
+}
+
+/** Call the person of a direct chat, join the call already there, or go back to it. */
+export async function callDirect(roomId: string): Promise<void> {
+  const d = directOf(roomId);
+  if (!client || !d) return;
+  if (app.get().voiceChannel !== roomId) {
+    // the other person is in the call already: joining is enough, nothing to ring
+    const waiting = (app.get().occupants[roomId] ?? []).some((u) => u !== me());
+    if (app.get().ringing?.roomId === roomId) stopRinging();
+    await joinVoice({ roomId, name: d.name });
+    if (app.get().voiceChannel !== roomId) return;
+    if (!waiting) void ringOut(roomId, d.userId);
+  }
+  showCall();
+}
+
+/** Ring the other person once more: the last ring was missed or declined. */
+export function ringAgain(): void {
+  const cur = app.get().calling;
+  if (cur && app.get().voiceChannel === cur.roomId) void ringOut(cur.roomId, cur.userId);
+}
+
+async function ringOut(roomId: string, userId: string): Promise<void> {
+  const c = client;
+  if (!c) return;
+  stopCalling();
+  app.set({ calling: { roomId, userId, eventId: "", status: "ringing" } });
+  const tone = () => blip("ringback", voice.getState().settings.spkId);
+  tone();
+  ringbackTimer = window.setInterval(tone, 3000);
+  callingEnd = window.setTimeout(() => {
+    const cur = app.get().calling;
+    if (cur?.roomId !== roomId || cur.status !== "ringing") return;
+    stopRingback();
+    app.set({ calling: { ...cur, status: "missed" } });
+  }, RING_MS);
+  const content = {
+    "m.mentions": { user_ids: [userId], room: false },
+    notification_type: "ring",
+    sender_ts: Date.now(),
+    lifetime: RING_MS,
+  };
+  try {
+    const res = await c.sendEvent(roomId, RING_TYPE as never, content as never);
+    const cur = app.get().calling;
+    if (cur?.roomId === roomId) app.set({ calling: { ...cur, eventId: res.event_id } });
+  } catch {
+    // the ring did not go out: the call is still there, the other person sees it in the chat list
+  }
+}
+
+function stopRingback(): void {
+  window.clearInterval(ringbackTimer);
+  ringbackTimer = 0;
+}
+
+function stopCalling(): void {
+  stopRingback();
+  window.clearTimeout(callingEnd);
+  if (app.get().calling) app.set({ calling: null });
+}
+
+// the person picked up: the ringing out is over
+voice.subscribe(() => {
+  const cur = app.get().calling;
+  if (cur && voice.getState().members.some((m) => !m.local && m.userId === cur.userId)) stopCalling();
+});
+
+/** A ring or a decline in a direct chat. Old ones (history, a late decryption) are left alone. */
+function onCallEvent(ev: MatrixEvent): void {
+  const c = client;
+  const type = ev.getType();
+  const roomId = ev.getRoomId() ?? "";
+  const sender = ev.getSender() ?? "";
+  if (!c || !roomId || sender === c.getUserId()) return;
+  if (type === DECLINE_TYPE) {
+    const cur = app.get().calling;
+    const ref = (ev.getContent()?.["m.relates_to"] as { event_id?: unknown } | undefined)?.event_id;
+    if (cur?.status === "ringing" && cur.roomId === roomId && cur.userId === sender && (!cur.eventId || ref === cur.eventId)) {
+      stopRingback();
+      window.clearTimeout(callingEnd);
+      app.set({ calling: { ...cur, status: "declined" } });
+    }
+    return;
+  }
+  if (type !== RING_TYPE && type !== RING_TYPE_OLD) return;
+  const content = ev.getContent() ?? {};
+  if ((content.notification_type ?? content.notify_type) !== "ring") return;
+  const id = ev.getId() ?? "";
+  if (!id || ringsSeen.has(id) || !directOf(roomId) || app.get().voiceChannel === roomId) return;
+  const lifetime = Math.max(5000, Math.min(120_000, Number(content.lifetime) || 30_000));
+  const until = ev.getTs() + lifetime;
+  if (until <= Date.now()) return;
+  // the caller is in the call while ringing; gone already, the ring is over too
+  const room = c.getRoom(roomId);
+  if (room && !rtc.participantsInCall(room, (m) => ghosts.has(ghostKey(m))).includes(sender)) return;
+  ringsSeen.add(id);
+  if (ringsSeen.size > 200) ringsSeen.clear();
+  startRinging({ roomId, userId: sender, eventId: id, until });
+}
+
+function startRinging(r: DirectRing): void {
+  stopRinging();
+  app.set({ ringing: r });
+  // do not disturb and a muted person ring without a sound
+  const silent = quietMode() || isMuted("users", r.userId);
+  if (!silent) {
+    const play = () => blip("ring", voice.getState().settings.spkId);
+    play();
+    ringTimer = window.setInterval(play, 2600);
+  }
+  ringEnd = window.setTimeout(() => {
+    if (app.get().ringing?.eventId === r.eventId) stopRinging();
+  }, r.until - Date.now());
+  if (silent || (!document.hidden && document.hasFocus())) return;
+  flashWindow();
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  try {
+    const n = new Notification(t("call.incoming", { name: displayName(r.userId, r.roomId) }), { tag: `call-${r.roomId}`, icon: "./icon.png", silent: true });
+    n.onclick = () => {
+      showWindow();
+      n.close();
+    };
+  } catch {
+    // notifications blocked by the system
+  }
+}
+
+export function stopRinging(): void {
+  window.clearInterval(ringTimer);
+  window.clearTimeout(ringEnd);
+  ringTimer = 0;
+  if (app.get().ringing) app.set({ ringing: null });
+}
+
+/** The caller hung up, or this account answered on another device: no more ringing here. */
+function checkRing(occupants: Record<string, string[]>): void {
+  const r = app.get().ringing;
+  if (!r) return;
+  const there = occupants[r.roomId] ?? [];
+  if (!there.includes(r.userId) || there.includes(me())) stopRinging();
+}
+
+export async function acceptCall(): Promise<void> {
+  const r = app.get().ringing;
+  if (!r) return;
+  stopRinging();
+  showWindow();
+  app.set({ view: "direct" });
+  await openChat(r.roomId);
+  await callDirect(r.roomId);
+}
+
+export function declineCall(): void {
+  const r = app.get().ringing;
+  const c = client;
+  stopRinging();
+  if (!r || !c) return;
+  void c.sendEvent(r.roomId, DECLINE_TYPE as never, { "m.relates_to": { rel_type: "m.reference", event_id: r.eventId } } as never).catch(() => undefined);
 }
 
 /**
@@ -3424,8 +3641,9 @@ export async function removeSound(spaceId: string, id: string): Promise<void> {
   }
 }
 
-/** Play a sound for the whole call. */
+/** Play a sound for the whole call: not with the soundboard or its button turned off (hotkeys included). */
 export function playSound(sound: Sound): void {
+  if (!canPlayBoard()) return;
   voice.sendBoardSound(sound.url);
 }
 
@@ -3438,9 +3656,9 @@ function playLocal(url: string): void {
   void playBoardSound(url, async () => (await fetch(await mediaUrl(url))).arrayBuffer(), getSoundPrefs().board, voice.getState().settings.spkId);
 }
 
-// someone in the call pressed a sound: heard here unless the sound is off
+// someone in the call pressed a sound: heard here unless the sound or the whole soundboard is off
 voice.onBoardSound = (url) => {
-  if (voice.getState().deafened) return;
+  if (voice.getState().deafened || getSoundPrefs().boardOff) return;
   if (!serverSounds(callServerId()).some((s) => s.url === url)) return;
   playLocal(url);
 };

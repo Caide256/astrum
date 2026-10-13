@@ -56,6 +56,8 @@ export type MlWatch = {
   step: MlStep;
   /** Within a step: "pair", or the stage of Moonlight it is at. */
   stage: string;
+  /** A picture has been shown: the steps of joining are over. */
+  shown: boolean;
   error: string;
   width: number;
   height: number;
@@ -232,6 +234,7 @@ class Session {
   private startArgs: Parameters<NonNullable<typeof bridge>["start"]>[1] | null = null;
   private started = false;
   private repaired = false;
+  private shownOnce = false;
   /** The stage the last start failed at, and how many starts were tried again after it. */
   private failedStage = "";
   private retries = 0;
@@ -526,6 +529,10 @@ class Session {
 
   private show(frame: VideoFrame): void {
     this.fpsCount += 1;
+    if (!this.shownOnce) {
+      this.shownOnce = true;
+      this.set({ shown: true });
+    }
     if (this.writer) {
       // the writer takes the frame over and closes it
       void this.writer.write(frame).catch(() => frame.close());
@@ -637,6 +644,12 @@ class Session {
     }
     this.player = p;
     this.applyGain();
+    p.onStats((st) => {
+      // into the stream log when something went wrong: dropouts, lost frames, cuts after a stall
+      if (st.dropouts || st.lost || st.cuts) {
+        this.log(`sound: ${st.frames} frames, ${st.lost} lost, ${st.dropouts} dropouts, ${st.cuts} cuts, reserve ${st.reserveMs} ms (aim ${st.targetMs} ms)`);
+      }
+    });
     this.takePort(p);
   }
 
@@ -691,6 +704,7 @@ function watchSunshine(identity: string): void {
         status: "connecting",
         step: "prep",
         stage: "",
+        shown: false,
         error: "",
         width: 0,
         height: 0,

@@ -9,13 +9,13 @@
 //!   bind <id> <part>,<part>,... [loose]
 //!                                add a binding; a part is one or more key
 //!                                codes in hex joined by '|', any of which
-//!                                satisfies the part. "loose": other held
-//!                                modifiers do not get in the way (push-to-talk
-//!                                in a game, with Shift or Alt held for running)
+//!                                satisfies the part. "loose": it fires whenever
+//!                                its keys are held, even when another binding
+//!                                asks for exactly the keys held (push-to-talk)
 //! Events on stdout:
 //!   ready                        hooks are installed
-//!   down <id>                    every part is held and no extra modifier is
-//!                                (any extra modifier for a loose binding)
+//!   down <id>                    every part is held (see `press` for which
+//!                                bindings fire when more keys are held)
 //!   up <id>                      a part of an active binding was released
 //!
 //! Key codes are Windows virtual-key codes with two exceptions: numpad keys are
@@ -123,10 +123,32 @@ fn uses(b: &Binding, key: u16) -> bool {
     b.parts.iter().any(|p| p.contains(&key))
 }
 
-/// All parts held and, unless the binding is loose, no modifier held that it does not ask for.
-fn matches(b: &Binding, held: &[bool; KEY_SPACE]) -> bool {
+fn all_held(b: &Binding, held: &[bool; KEY_SPACE]) -> bool {
     b.parts.iter().all(|p| part_held(p, held))
-        && (b.loose || MODIFIERS.iter().all(|&m| !held[m as usize] || uses(b, m)))
+}
+
+/// All parts held and no modifier held that the binding does not ask for.
+fn exactly(b: &Binding, held: &[bool; KEY_SPACE]) -> bool {
+    all_held(b, held) && MODIFIERS.iter().all(|&m| !held[m as usize] || uses(b, m))
+}
+
+/// Which of the bindings the key completes fire. With only their own keys
+/// held, those. With more held (Shift for running, Alt in a game) a binding
+/// still fires, unless another one asks for exactly what is held: Ctrl+M and
+/// Ctrl+Shift+M stay apart, a lone right Alt works with Shift held. Of
+/// several then, the one with the most keys. A loose binding (push-to-talk)
+/// fires whenever its keys are held.
+fn firing(bindings: &[Binding], key: u16, held: &[bool; KEY_SPACE]) -> Vec<usize> {
+    let ready: Vec<usize> = (0..bindings.len()).filter(|&i| !bindings[i].active && uses(&bindings[i], key) && all_held(&bindings[i], held)).collect();
+    let strict: Vec<usize> = ready.iter().copied().filter(|&i| !bindings[i].loose).collect();
+    let exact: Vec<usize> = strict.iter().copied().filter(|&i| exactly(&bindings[i], held)).collect();
+    let chosen = if !exact.is_empty() {
+        exact
+    } else {
+        let most = strict.iter().map(|&i| bindings[i].parts.len()).max().unwrap_or(0);
+        strict.into_iter().filter(|&i| bindings[i].parts.len() == most).collect()
+    };
+    ready.into_iter().filter(|i| bindings[*i].loose || chosen.contains(i)).collect()
 }
 
 fn press(state: &mut State, key: u16) {
@@ -142,11 +164,9 @@ fn press(state: &mut State, key: u16) {
         }
     }
     held[key as usize] = true;
-    for b in bindings.iter_mut() {
-        if !b.active && uses(b, key) && matches(b, held) {
-            b.active = true;
-            emit(format!("down {}", b.id));
-        }
+    for i in firing(bindings, key, held) {
+        bindings[i].active = true;
+        emit(format!("down {}", bindings[i].id));
     }
 }
 
@@ -342,22 +362,48 @@ pub fn press_keys(spec: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn binding(parts: &[&[u16]], loose: bool) -> Binding {
-        Binding { id: "b".into(), parts: parts.iter().map(|p| p.to_vec()).collect(), active: false, loose }
+    fn named(id: &str, parts: &[&[u16]], loose: bool) -> Binding {
+        Binding { id: id.into(), parts: parts.iter().map(|p| p.to_vec()).collect(), active: false, loose }
+    }
+
+    fn fired(bindings: &[Binding], key: u16, held: &[bool; KEY_SPACE]) -> Vec<String> {
+        firing(bindings, key, held).into_iter().map(|i| bindings[i].id.clone()).collect()
     }
 
     #[test]
-    fn extra_modifiers_block_strict_bindings_only() {
+    fn a_lone_key_fires_with_other_keys_held() {
+        // the microphone on the right Alt, pressed with Shift held
+        let list = [named("mute", &[&[0xA5]], false)];
         let mut held = [false; KEY_SPACE];
-        held[0x56] = true; // V
-        held[0xA0] = true; // left Shift, held for running
-        assert!(!matches(&binding(&[&[0x56]], false), &held));
-        assert!(matches(&binding(&[&[0x56]], true), &held));
-        // a loose binding still needs its own keys
-        held[0x56] = false;
-        assert!(!matches(&binding(&[&[0x56]], true), &held));
-        // a binding that asks for the modifier matches either way
+        held[0xA0] = true;
+        held[0xA5] = true;
+        assert_eq!(fired(&list, 0xA5, &held), ["mute"]);
+    }
+
+    #[test]
+    fn an_exact_binding_wins_over_a_shorter_one() {
+        let list = [named("mute", &[&[0xA2, 0xA3], &[0x4D]], false), named("deafen", &[&[0xA2, 0xA3], &[0xA0, 0xA1], &[0x4D]], false)];
+        let mut held = [false; KEY_SPACE];
+        held[0xA2] = true;
+        held[0x4D] = true;
+        assert_eq!(fired(&list, 0x4D, &held), ["mute"]);
+        held[0xA0] = true;
+        assert_eq!(fired(&list, 0x4D, &held), ["deafen"]);
+        // Ctrl+Alt+M: nothing asks for exactly that, the one that fits fires
+        held[0xA0] = false;
+        held[0xA4] = true;
+        assert_eq!(fired(&list, 0x4D, &held), ["mute"]);
+    }
+
+    #[test]
+    fn push_to_talk_fires_whenever_its_keys_are_held() {
+        let list = [named("ptt", &[&[0x56]], true), named("other", &[&[0xA0, 0xA1], &[0x56]], false)];
+        let mut held = [false; KEY_SPACE];
+        held[0xA0] = true;
         held[0x56] = true;
-        assert!(matches(&binding(&[&[0xA0, 0xA1], &[0x56]], false), &held));
+        assert_eq!(fired(&list, 0x56, &held), ["ptt", "other"]);
+        // a binding still needs its own keys
+        held[0x56] = false;
+        assert!(fired(&list, 0x56, &held).is_empty());
     }
 }

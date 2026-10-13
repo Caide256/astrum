@@ -7,7 +7,7 @@
 //! stream. Kind 2 is an event as JSON ("ready" with this side's key and
 //! candidates, "up" with the local address once a path works, "fail",
 //! "down"); kind 4 is a sound frame: [sequence u32 BE] and 5 ms of PCM,
-//! 48 kHz stereo 16-bit. Lines on stdin:
+//! 48 kHz stereo 16-bit, or the number alone for 5 ms of silence. Lines on stdin:
 //!   peer <session> <host key> <nat> <candidates>   the streamer's answer
 //!   stop                                            (or the end of input) end it
 //!
@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use rand::Rng;
 
 use super::stream::Streams;
-use super::wire::{self, Link, Socks, ACK, BYE, KEEPALIVE, PCM, PROBE, PROBE_ACK, RST, SEG, SELECT, UDP};
+use super::wire::{self, Link, Socks, ACK, BYE, KEEPALIVE, PCM, PROBE, PROBE_ACK, RST, SEG, SELECT, SOUND_LOSS, UDP};
 use super::{path_of, predictions, stun, tcp_port, udp_port, Heard, Prober};
 
 static OUT: Mutex<()> = Mutex::new(());
@@ -63,6 +63,15 @@ struct View {
     flows: OnceLock<Vec<Arc<Flow>>>,
     selected: AtomicBool,
     started: Instant,
+    /// The newest sound frame and how many went missing since the last report to the streamer.
+    sound: Mutex<SoundCount>,
+}
+
+#[derive(Default)]
+struct SoundCount {
+    last: Option<u32>,
+    lost: u32,
+    reported: Option<Instant>,
 }
 
 fn bye(view: &View) -> ! {
@@ -120,7 +129,19 @@ impl View {
             ACK => self.streams.on_ack(body),
             RST => self.streams.on_rst(body),
             // 5 ms of 48 kHz stereo is 960 bytes: anything far bigger is not a sound frame
-            PCM if body.len() > 5 && body.len() <= 4096 => record(4, &body[1..]),
+            PCM if body.len() >= 5 && body.len() <= 4096 => {
+                let seq = u32::from_be_bytes([body[1], body[2], body[3], body[4]]);
+                if let Ok(mut c) = self.sound.lock() {
+                    match c.last {
+                        // seen already: a frame sent twice
+                        Some(l) if seq <= l && l - seq < 1_000_000 => return,
+                        Some(l) if seq > l.wrapping_add(1) => c.lost += (seq - l - 1).min(1000),
+                        _ => {}
+                    }
+                    c.last = Some(seq);
+                }
+                record(4, &body[1..]);
+            }
             BYE => {
                 event("{\"ev\":\"down\",\"reason\":\"bye\"}".into());
                 std::process::exit(0);
@@ -236,6 +257,17 @@ impl View {
         if self.link.idle_tx() > Duration::from_secs(2) {
             self.link.send(&self.socks, &[KEEPALIVE]);
         }
+        // sound frames go missing on the way: the streamer is told, every two seconds at most
+        if let Ok(mut c) = self.sound.lock() {
+            if c.lost > 0 && c.reported.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
+                let n = c.lost.min(u16::MAX as u32) as u16;
+                c.lost = 0;
+                c.reported = Some(Instant::now());
+                let mut p = [SOUND_LOSS, 0, 0];
+                p[1..3].copy_from_slice(&n.to_be_bytes());
+                self.link.send(&self.socks, &p);
+            }
+        }
         if self.link.idle_rx() > Duration::from_secs(20) {
             event("{\"ev\":\"down\",\"reason\":\"timeout\"}".into());
             bye(self);
@@ -345,6 +377,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         flows: OnceLock::new(),
         selected: AtomicBool::new(false),
         started: Instant::now(),
+        sound: Mutex::new(SoundCount::default()),
     });
 
     for v6 in [false, true] {
