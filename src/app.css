@@ -1926,6 +1926,17 @@ button.hangup:hover:not(:disabled) {
   gap: 6px;
 }
 
+/* the picture is in a window of its own */
+.ctile-offer.in-window {
+  gap: 8px;
+  color: var(--muted);
+}
+
+.ctile-offer.in-window .state {
+  color: var(--text);
+  font-size: 13px;
+}
+
 .ctile-actions {
   display: flex;
   gap: 6px;
@@ -4680,6 +4691,82 @@ h3.md-h {
   opacity: 1;
 }
 
+/* syntax colors (src/highlight.ts), as VS Code paints them: Dark+ and Light+ */
+:root {
+  --hl-kw: #c586c0;
+  --hl-store: #569cd6;
+  --hl-lit: #569cd6;
+  --hl-type: #4ec9b0;
+  --hl-str: #ce9178;
+  --hl-num: #b5cea8;
+  --hl-com: #6a9955;
+  --hl-fn: #dcdcaa;
+  --hl-var: #9cdcfe;
+  --hl-prop: #9cdcfe;
+  --hl-tag: #569cd6;
+  --hl-attr: #9cdcfe;
+  --hl-meta: #d7ba7d;
+  --hl-punc: #808080;
+  --hl-esc: #d7ba7d;
+  --hl-head: #569cd6;
+  --hl-ins: #81c784;
+  --hl-del: #f48771;
+}
+
+:root.light {
+  --hl-kw: #af00db;
+  --hl-store: #0000ff;
+  --hl-lit: #0000ff;
+  --hl-type: #267f99;
+  --hl-str: #a31515;
+  --hl-num: #098658;
+  --hl-com: #008000;
+  --hl-fn: #795e26;
+  --hl-var: #001080;
+  --hl-prop: #001080;
+  --hl-tag: #800000;
+  --hl-attr: #e50000;
+  --hl-meta: #795e26;
+  --hl-punc: #800000;
+  --hl-esc: #ee0000;
+  --hl-head: #0451a5;
+  --hl-ins: #098658;
+  --hl-del: #a31515;
+}
+
+.hl-kw { color: var(--hl-kw); }
+.hl-store { color: var(--hl-store); }
+.hl-lit { color: var(--hl-lit); }
+.hl-type { color: var(--hl-type); }
+.hl-str { color: var(--hl-str); }
+.hl-num { color: var(--hl-num); }
+.hl-com { color: var(--hl-com); }
+.hl-fn { color: var(--hl-fn); }
+.hl-var { color: var(--hl-var); }
+.hl-prop { color: var(--hl-prop); }
+.hl-tag { color: var(--hl-tag); }
+.hl-attr { color: var(--hl-attr); }
+.hl-meta { color: var(--hl-meta); }
+.hl-punc { color: var(--hl-punc); }
+.hl-esc { color: var(--hl-esc); }
+
+.hl-head {
+  color: var(--hl-head);
+  font-weight: 600;
+}
+
+/* diff lines: the whole line tinted */
+.hl-ins,
+.hl-del {
+  color: var(--hl-ins);
+  background: color-mix(in srgb, var(--hl-ins) 12%, transparent);
+}
+
+.hl-del {
+  color: var(--hl-del);
+  background: color-mix(in srgb, var(--hl-del) 12%, transparent);
+}
+
 .md-pre pre {
   max-height: 420px;
   margin: 0;
@@ -4710,6 +4797,11 @@ h3.md-h {
 
 .md-list li + li {
   margin-top: 2px;
+}
+
+/* room for the widest number: "107." would hang out of the message on the left */
+ol.md-list {
+  padding-left: max(22px, calc(var(--md-digits, 1) * 1ch + 1.1em));
 }
 
 .md-list.tasks {
@@ -8170,6 +8262,12 @@ button.unread-bar:active:not(:disabled) {
 /* servers put in an own order by dragging: the dragged one faded, a line where it lands */
 .server-item.dragging {
   opacity: 0.45;
+}
+
+/* a server's picture is not dragged by itself: the server is */
+.server-item img {
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 .server-item.drop-before::before,

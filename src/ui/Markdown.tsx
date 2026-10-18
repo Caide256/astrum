@@ -1,6 +1,7 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 
 import { copyToClipboard } from "../desktop.ts";
+import { highlight } from "../highlight.ts";
 import { t } from "../i18n/index.ts";
 import { GROUP_MENTIONS, parse, parseInline, type Block, type Inline, type Item, type MentionResolver } from "../markdown.ts";
 import { idsHidden } from "../prefs.ts";
@@ -42,11 +43,13 @@ function Spoiler({ children }: { children: ReactNode }) {
 
 function CodeBlock({ lang, code }: { lang: string; code: string }) {
   const [copied, setCopied] = useState(false);
+  // colored as in a code editor: the language from the fence, or guessed from the code
+  const view = useMemo(() => highlight(code, lang), [code, lang]);
   return (
     <div className="md-pre">
       {/* the language and the copy button sit in the corner over the code, not on a line of their own */}
       <div className="md-pre-bar">
-        {lang && <span>{lang}</span>}
+        {view.label && <span>{view.label}</span>}
         <button
           className="ghost icon tiny"
           title={copied ? t("md.copied") : t("md.copy")}
@@ -62,7 +65,17 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
         </button>
       </div>
       <pre>
-        <code>{code}</code>
+        <code className={view.lang ? `hl lang-${view.lang}` : undefined}>
+          {view.tokens.map((tk, i) =>
+            tk.k ? (
+              <span key={i} className={`hl-${tk.k}`}>
+                {tk.v}
+              </span>
+            ) : (
+              tk.v
+            ),
+          )}
+        </code>
       </pre>
     </div>
   );
@@ -189,8 +202,9 @@ function block(b: Block, ctx: Ctx, k: string): ReactNode {
         ),
       );
       const tasky = b.items.some((it) => it.task !== null);
+      const digits = String(b.start + b.items.length - 1).length;
       return b.ordered ? (
-        <ol key={k} className="md-list" start={b.start}>
+        <ol key={k} className="md-list" start={b.start} style={{ "--md-digits": digits } as CSSProperties}>
           {items}
         </ol>
       ) : (

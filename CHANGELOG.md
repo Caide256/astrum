@@ -5,6 +5,28 @@ GitHub uses the same two sections, and the app shows the one of its language in
 the update window. Mentions like `@everyone` always go in backticks: GitHub takes
 a bare mention for a GitHub user and lists that user as a contributor of the release.
 
+## 0.9.11
+
+<details>
+<summary>English</summary>
+
+- **Code is colored as in a code editor:** keywords, strings, numbers, comments, types, calls, in the colors of VS Code (its dark and light palettes follow the theme). The language comes from the block (` ```py `) or is recognized from the code itself: Python, JavaScript, TypeScript, C#, Java, Kotlin, Swift, Go, Rust, C, C++, PHP, Ruby, Lua, Bash, PowerShell, Batch, SQL, Dockerfile, JSON, YAML, TOML, INI, HTML, XML, CSS, SCSS, Diff, Markdown. Text that looks like no language stays plain, and the corner of the block names the language found.
+- A stream (or a camera) popped out into a window of its own is not drawn in the call a second time: its tile says it is in a separate window and has a button to bring it back.
+- Servers with a picture can be dragged to another place too: before, the picture itself was grabbed and the dragging broke off.
+- A numbered list with long numbers ("107. ...") no longer sticks out of the message on the left.
+
+</details>
+
+<details>
+<summary>Русский</summary>
+
+- **Код раскрашивается как в редакторе кода:** ключевые слова, строки, числа, комментарии, типы, вызовы, в цветах VS Code (тёмная и светлая палитра идут за темой). Язык берётся из блока (` ```py `) или узнаётся по самому коду: Python, JavaScript, TypeScript, C#, Java, Kotlin, Swift, Go, Rust, C, C++, PHP, Ruby, Lua, Bash, PowerShell, Batch, SQL, Dockerfile, JSON, YAML, TOML, INI, HTML, XML, CSS, SCSS, Diff, Markdown. Текст, не похожий ни на какой язык, остаётся простым, а в углу блока подписан найденный язык.
+- Стрим (или камера), вынесенный в отдельное окно, не рисуется в звонке второй раз: на его плитке написано, что он в отдельном окне, и есть кнопка вернуть его.
+- Серверы с картинкой тоже перетаскиваются: раньше цеплялась сама картинка, и перетаскивание срывалось.
+- Нумерованный список с длинными номерами («107. ...») больше не вылезает из сообщения влево.
+
+</details>
+
 ## 0.9.10
 
 <details>

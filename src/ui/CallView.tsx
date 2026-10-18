@@ -23,7 +23,7 @@ import { Avatar } from "./Avatar.tsx";
 import { BannerPicture, EmojiDeco, useBannerStyle } from "./Banner.tsx";
 import { Chat } from "./Main.tsx";
 import { useLinger } from "./controls.tsx";
-import { popOut } from "./popout.ts";
+import { closePopout, popOut, usePoppedOut } from "./popout.ts";
 import { SunWatchStatus, useSunWatchInfo } from "./Moonlight.tsx";
 import { ml } from "../moonlight.ts";
 import { SoundboardButton } from "./Soundboard.tsx";
@@ -105,25 +105,43 @@ function toggleFullscreen(el: Element | null | undefined): void {
 
 /* ------------------------------------------------------------------- tile */
 
-function VideoTools({ video, title, children }: { video: VoiceVideo; title: string; children?: ReactNode }) {
+function VideoTools({ video, title, windowed, children }: { video: VoiceVideo; title: string; windowed?: boolean; children?: ReactNode }) {
   const box = useRef<HTMLDivElement>(null);
   return (
     <div className="tile-tools" ref={box} onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
       {children}
-      <button className="icon" title={t("share.popout")} onClick={() => popOut(video.key, video.track, title)}>
+      <button className="icon" title={windowed ? t("share.toWindow") : t("share.popout")} onClick={() => popOut(video.key, video.track, title)}>
         <IconPopout />
       </button>
-      <button className="icon" title={t("call.fullscreen")} onClick={() => toggleFullscreen(box.current?.closest(".ctile"))}>
-        <IconFullscreen />
+      {!windowed && (
+        <button className="icon" title={t("call.fullscreen")} onClick={() => toggleFullscreen(box.current?.closest(".ctile"))}>
+          <IconFullscreen />
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The picture is in a window of its own: the tile says so instead of drawing
+ * the same video a second time, and can bring it back.
+ */
+function InWindow({ videoKey }: { videoKey: string }) {
+  return (
+    <div className="ctile-offer in-window">
+      <IconPopout size={28} />
+      <span className="state">{t("share.inWindow")}</span>
+      <button className="small" onClick={(e) => (e.stopPropagation(), closePopout(videoKey))}>
+        {t("share.backHere")}
       </button>
     </div>
   );
 }
 
-function StreamTools({ stream, video }: { stream: VoiceStream; video: VoiceVideo }) {
+function StreamTools({ stream, video, windowed }: { stream: VoiceStream; video: VoiceVideo; windowed?: boolean }) {
   const who = displayName(stream.userId);
   return (
-    <VideoTools video={video} title={t("share.windowTitle", { who })}>
+    <VideoTools video={video} title={t("share.windowTitle", { who })} windowed={windowed}>
       {!stream.local && stream.hasAudio && (
         <>
           <button
@@ -182,6 +200,8 @@ function TileView({
   const person = tile.kind === "member" ? tile.member : null;
   const sunInfo = useSunWatchInfo(tile.kind === "stream" ? tile.stream.identity : "");
   const sunWatch = useStore(ml, (s) => (tile.kind === "stream" ? s.watches[tile.stream.identity] : undefined));
+  const popped = usePoppedOut();
+  const windowed = !!tile.video && popped.includes(tile.video.key);
   useViewPrefs();
   // a banner sent in the call wins over the stored one; pictures and emoji of others follow the switch in settings
   const look = person ? (person.local ? bannerOf(person.userId, roomId) : plainInCall(person.tile ?? bannerOf(person.userId, roomId))) : null;
@@ -205,6 +225,13 @@ function TileView({
               <IconClose />
             </button>
           </div>
+        </>
+      );
+    } else if (video && windowed) {
+      body = (
+        <>
+          <InWindow videoKey={video.key} />
+          <StreamTools stream={stream} video={video} windowed />
         </>
       );
     } else if (video) {
@@ -261,7 +288,7 @@ function TileView({
         className={`ctile stream ${focused ? "focused" : ""}`}
         style={style}
         onClick={onFocus}
-        onDoubleClick={() => video && toggleFullscreen(box.current)}
+        onDoubleClick={() => video && !windowed && toggleFullscreen(box.current)}
         onContextMenu={(e) => {
           e.preventDefault();
           openStreamMenu(stream.identity, e.clientX, e.clientY);
@@ -286,16 +313,21 @@ function TileView({
     <div
       ref={box}
       className={`ctile member ${member.speaking ? "speaking" : ""} ${focused ? "focused" : ""}`}
-      style={{ ...style, ...(video ? { background: "#000" } : bannerStyle) }}
+      style={{ ...style, ...(video && !windowed ? { background: "#000" } : bannerStyle) }}
       onClick={onFocus}
-      onDoubleClick={() => video && toggleFullscreen(box.current)}
+      onDoubleClick={() => video && !windowed && toggleFullscreen(box.current)}
       onContextMenu={(e) => {
         if (!member.userId) return;
         e.preventDefault();
         openUserMenu(member.userId, e.clientX, e.clientY, roomId, true);
       }}
     >
-      {video ? (
+      {video && windowed ? (
+        <>
+          <InWindow videoKey={video.key} />
+          <VideoTools video={video} title={who} windowed />
+        </>
+      ) : video ? (
         <>
           <VideoView video={video} fit="cover" />
           <VideoTools video={video} title={who} />

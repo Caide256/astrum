@@ -306,6 +306,8 @@ function apply(): void {
   for (const [k, v] of Object.entries(tokens(def))) root.style.setProperty(k, v);
   root.dataset.theme = def.id;
   root.style.colorScheme = def.dark ? "dark" : "light";
+  // the colors of code that follow the theme's brightness (syntax colors)
+  root.classList.toggle("light", !def.dark);
   root.classList.toggle("gradient", !!def.gradient);
 }
 

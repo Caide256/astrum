@@ -346,6 +346,8 @@ function ServerBar() {
             data-id={g.spaceId}
             className={`server-item ${on ? "active" : ""} ${fresh ? "unread" : ""} ${muted ? "muted" : ""} ${drag.mark(g.spaceId)}`}
             onPointerDown={drag.onPointerDown(g.spaceId)}
+            // the picture of a server would start the browser's own dragging and cancel this one
+            onDragStart={(e) => e.preventDefault()}
           >
             <span className="server-pill" />
             <button
