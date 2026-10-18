@@ -61,6 +61,9 @@ export const en = {
   "voice.err.shareNoVideo": "Screen share did not start: the system returned no picture",
   "voice.err.switchFailed": "Could not switch the window: {error}",
   "voice.err.noRoom": "The channel room is unavailable",
+  "voice.err.media": "The media server {host} did not take the connection: {error}",
+  "voice.err.triedOthers": "The backup servers did not work either ({n}), the details are in the logs.",
+  "voice.err.otherServer": "The server of this call, {host}, did not answer, you are connected through {via}. Those connected through {host} may not be heard.",
   "voice.err.noFocus": "No voice server address found: neither in your homeserver's well-known nor with those already in the call",
   "voice.kick": "Disconnect from voice",
   "voice.kickConfirm": "Disconnect {who} from the voice channel?",
@@ -305,8 +308,11 @@ export const en = {
 
   "rtc.err.membership": "The homeserver did not accept the call membership: {error}",
   "rtc.err.notAllowed": "Your homeserver is probably not allowed by this server's lk-jwt-service.",
-  "rtc.err.jwt": "lk-jwt-service answered {status}: {body}.",
-  "rtc.err.jwtEmpty": "The lk-jwt-service answer has no url or jwt",
+  "rtc.err.jwt": "lk-jwt-service at {host} answered {status}: {body}.",
+  "rtc.err.jwtEmpty": "The answer of lk-jwt-service at {host} has no url or jwt",
+  "rtc.err.unreachable": "The call server {host} did not answer ({error})",
+  "rtc.err.timeout": "no answer in {s} s",
+  "rtc.err.noAnswer": "no answer, or an answer without CORS headers",
 
   "media.err.corrupt": "The file is damaged or was tampered with",
 
@@ -367,6 +373,7 @@ export const en = {
   "busy.creatingServer": "Creating the server...",
   "busy.leavingServer": "Leaving the server...",
   "busy.connecting": "Connecting to {name}...",
+  "busy.connectingVia": "Connecting to {name} through {host}...",
   "busy.name": "Changing the name...",
   "busy.avatar": "Changing the picture...",
 
@@ -544,6 +551,7 @@ export const en = {
   "common.decline": "Decline",
   "common.cancel": "Cancel",
   "common.close": "Close",
+  "common.showLogs": "Show logs",
   "common.delete": "Delete",
   "common.download": "Download",
   "common.loading": "Loading...",

@@ -4226,6 +4226,29 @@ button.wide-button {
   color: inherit;
 }
 
+/* "Show logs" on a connection error */
+.toast button.toast-action {
+  flex: none;
+  margin: -3px 0;
+  padding: 3px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  white-space: nowrap;
+  color: inherit;
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line));
+}
+
+.toast button.toast-action:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 26%, transparent);
+}
+
+.error button.error-logs {
+  display: block;
+  margin-top: 6px;
+  color: inherit;
+}
+
 /* ------------------------------------------------------------ dock name line */
 
 .me-name {

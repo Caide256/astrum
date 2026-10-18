@@ -36,6 +36,7 @@ import {
   deleteMessage,
   discard,
   displayName,
+  errorHasLogs,
   jumpTo,
   leaveInfo,
   leaveServer,
@@ -89,6 +90,7 @@ import {
   type Media,
   type Message,
 } from "../app.ts";
+import { hasLogs, openLogs } from "../desktop.ts";
 import { fmtDateTime, fmtMsgTime, fmtTime, t, tn } from "../i18n/index.ts";
 import { encryptedMediaUrl } from "../media.ts";
 import type { UserHit } from "../matrix/people.ts";
@@ -2469,20 +2471,23 @@ function LeaveServerModal() {
 /* -------------------------------------------------------------------- toast */
 
 const ERROR_TTL_MS = 9000;
+/** An error with details in the log stays longer: there is a button to press. */
+const ERROR_LOGS_TTL_MS = 20_000;
 
 /** Progress and errors at the bottom. Errors fade after a while or on click. */
 function Toast() {
   const busy = useStore(app, (s) => s.busy);
   const error = useStore(app, (s) => s.error);
   const notice = useStore(app, (s) => s.notice);
+  const logs = !!error && hasLogs() && errorHasLogs(error);
 
   useEffect(() => {
     if (!error) return;
     const timer = window.setTimeout(() => {
       if (app.get().error === error) app.set({ error: "" });
-    }, ERROR_TTL_MS);
+    }, logs ? ERROR_LOGS_TTL_MS : ERROR_TTL_MS);
     return () => window.clearTimeout(timer);
-  }, [error]);
+  }, [error, logs]);
 
   if (!busy && !error && !notice) return null;
   return (
@@ -2490,6 +2495,11 @@ function Toast() {
       {error ? (
         <>
           <span className="toast-text">{error}</span>
+          {logs && (
+            <button className="toast-action" onClick={() => openLogs("app")}>
+              {t("common.showLogs")}
+            </button>
+          )}
           <button className="ghost icon tiny" title={t("common.close")} onClick={() => app.set({ error: "" })}>
             <IconClose />
           </button>

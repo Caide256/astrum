@@ -8,7 +8,7 @@ const guard = require("./guard.cjs");
 const preview = require("./preview.cjs");
 const { publicFetch } = require("./publicfetch.cjs");
 const netcheck = require("./netcheck.cjs");
-const { streamLog, logDir } = require("./streamlog.cjs");
+const { streamLog, appLog, logDir, logFile } = require("./streamlog.cjs");
 const sunshine = require("./sunshine.cjs");
 const tray = require("./tray.cjs");
 const updater = require("./updater.cjs");
@@ -434,8 +434,16 @@ function moonlightBridge() {
   guard.handle(ipcMain, "app:tun-start", (event, wid, base) => startTunnel(event.sender, String(wid), base));
   // the page's own steps of streams, for the same log
   guard.handle(ipcMain, "app:stream-log", (_e, text) => streamLog("page", String(text ?? "").slice(0, 600)));
-  guard.handle(ipcMain, "app:open-logs", () => {
+  // connections of the app: sign-in, sync, the steps into a call
+  guard.handle(ipcMain, "app:app-log", (_e, text) => appLog("page", String(text ?? "").slice(0, 1500)));
+  // the folder, or the folder with the named log picked out in it
+  guard.handle(ipcMain, "app:open-logs", (_e, name) => {
     fs.mkdirSync(logDir(), { recursive: true });
+    const file = name === "app" || name === "streams" ? logFile(name) : "";
+    if (file && fs.existsSync(file)) {
+      shell.showItemInFolder(file);
+      return "";
+    }
     return shell.openPath(logDir());
   });
   // the streamer's answer: its session, key and candidates
@@ -1205,6 +1213,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on("web-contents-created", (_e, contents) => lockContents(contents));
 
   void app.whenReady().then(() => {
+    appLog("app", `start ${app.getVersion()}, ${process.platform} ${process.getSystemVersion()}, Electron ${process.versions.electron}`);
     // no menu bar: Alt would toggle it and Ctrl+R would reload the page mid-call
     if (!DEV_URL) Menu.setApplicationMenu(null);
     allowMedia();

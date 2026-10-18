@@ -63,6 +63,9 @@ export const ru: Record<Key, string> = {
   "voice.err.shareNoVideo": "Демонстрация не включилась: система не отдала картинку",
   "voice.err.switchFailed": "Не удалось сменить окно: {error}",
   "voice.err.noRoom": "Комната канала недоступна",
+  "voice.err.media": "Медиасервер {host} не принял подключение: {error}",
+  "voice.err.triedOthers": "Запасные серверы тоже не подошли ({n}), подробности в логах.",
+  "voice.err.otherServer": "Сервер этого звонка {host} не ответил, ты подключён через {via}. Тех, кто сидит через {host}, может быть не слышно.",
   "voice.err.noFocus": "Не найден адрес голосового сервера: его нет ни в well-known твоего хоумсервера, ни у тех, кто уже в звонке",
   "voice.kick": "Отключить от голосового",
   "voice.kickConfirm": "Отключить {who} от голосового канала?",
@@ -307,8 +310,11 @@ export const ru: Record<Key, string> = {
 
   "rtc.err.membership": "Хоумсервер не принял участие в звонке: {error}",
   "rtc.err.notAllowed": "Похоже, твоего хоумсервера нет в списке разрешённых у lk-jwt-service этого сервера.",
-  "rtc.err.jwt": "lk-jwt-service ответил {status}: {body}.",
-  "rtc.err.jwtEmpty": "В ответе lk-jwt-service нет url или jwt",
+  "rtc.err.jwt": "lk-jwt-service на {host} ответил {status}: {body}.",
+  "rtc.err.jwtEmpty": "В ответе lk-jwt-service на {host} нет url или jwt",
+  "rtc.err.unreachable": "Сервер звонков {host} не ответил ({error})",
+  "rtc.err.timeout": "нет ответа {s} с",
+  "rtc.err.noAnswer": "нет ответа, или ответ без заголовков CORS",
 
   "media.err.corrupt": "Файл повреждён или подменён",
 
@@ -369,6 +375,7 @@ export const ru: Record<Key, string> = {
   "busy.creatingServer": "Создаю сервер...",
   "busy.leavingServer": "Выхожу с сервера...",
   "busy.connecting": "Подключаюсь к {name}...",
+  "busy.connectingVia": "Подключаюсь к {name} через {host}...",
   "busy.name": "Меняю имя...",
   "busy.avatar": "Меняю аватарку...",
 
@@ -546,6 +553,7 @@ export const ru: Record<Key, string> = {
   "common.decline": "Отклонить",
   "common.cancel": "Отмена",
   "common.close": "Закрыть",
+  "common.showLogs": "Посмотреть логи",
   "common.delete": "Удалить",
   "common.download": "Скачать",
   "common.loading": "Загрузка...",

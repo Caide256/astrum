@@ -40,7 +40,7 @@ import * as people from "./matrix/people.ts";
 import { configureMedia, encryptAttachment, mediaUrl, type EncryptedFile } from "./media.ts";
 import { BRAND } from "./brand.ts";
 import { isMxc } from "./mxc.ts";
-import { copyImageToClipboard, copyToClipboard, fetchLinkPreview, flashWindow, idleSeconds, onBeforeQuit, showWindow, type RawPreview } from "./desktop.ts";
+import { appLog, copyImageToClipboard, copyToClipboard, fetchLinkPreview, flashWindow, idleSeconds, onBeforeQuit, showWindow, type RawPreview } from "./desktop.ts";
 import { startHotkeys } from "./hotkeys.ts";
 import { compareText, t } from "./i18n/index.ts";
 import {
@@ -569,6 +569,7 @@ async function connect(s: session.Session): Promise<boolean> {
     c.stopClient();
     client = null;
     configureMedia(null, "");
+    appLog(`the session did not start: ${rawError(e)}`);
     app.set({ offline: false, error: t("login.err.restore", { error: humanError(e) }) });
     return false;
   }
@@ -587,6 +588,7 @@ export async function doLogin(server: string, user: string, password: string): P
   try {
     s = await session.login(server, user, password);
   } catch (e) {
+    appLog(`sign-in at ${server} failed: ${rawError(e)}`);
     app.set({ busy: "", phase: "login", error: loginErrorText(e) });
     return;
   }
@@ -606,6 +608,7 @@ export async function doRegister(
   try {
     s = await session.register(server, username, password, invite);
   } catch (e) {
+    appLog(`registration at ${server} failed: ${rawError(e)}`);
     app.set({ busy: "", phase: "login", error: humanError(e) });
     return;
   }
@@ -768,10 +771,13 @@ function wire(c: MatrixClient): void {
   c.on(UserEvent.DisplayName, () => refreshMe());
   c.on(UserEvent.AvatarUrl, () => refreshMe());
   // Error comes after several failed syncs in a row; a single failed poll is Reconnecting
-  c.on(ClientEvent.Sync, (state: SyncState) => {
+  c.on(ClientEvent.Sync, (state: SyncState, _prev, data) => {
     if (client !== c) return;
     const offline = state === SyncState.Error;
-    if (offline !== app.get().offline) app.set({ offline });
+    if (offline !== app.get().offline) {
+      appLog(offline ? `sync: the homeserver is out of reach (${rawError(data?.error ?? "")})` : "sync: the homeserver answers again");
+      app.set({ offline });
+    }
     // Unread counts arrive with the sync after the timeline events were
     // announced; without a refresh here the badges waited for the next event.
     if (state === SyncState.Syncing) scheduleRooms();
@@ -2763,6 +2769,9 @@ export async function joinVoice(channel: Pick<Channel, "roomId" | "name"> & Part
     return;
   }
   if (app.get().voiceChannel === channel.roomId) return;
+  // a newer join wins over this one: the earlier stops where it is
+  const attempt = ++joinAttempt;
+  const overtaken = () => attempt !== joinAttempt;
   await leaveVoice();
 
   app.set({ busy: t("busy.connecting", { name: channel.name }), error: "" });
@@ -2773,13 +2782,9 @@ export async function joinVoice(channel: Pick<Channel, "roomId" | "name"> & Part
 
     const list = rtc.memberships(room);
     const template = rtc.pickTemplate(list, client.getUserId() ?? "");
-    const fallback = await rtc.focusFromWellKnown(app.get().session?.homeserver ?? "");
-    const focus = rtc.discoverFocus(list, channel.roomId, fallback);
+    const focus = await connectMedia(channel, list, overtaken);
+    if (!focus) return;
     mediaFocus = focus.serviceUrl;
-    if (!focus.serviceUrl) throw new Error(t("voice.err.noFocus"));
-
-    const ticket = await rtc.getSfuTicket(client, focus.serviceUrl, focus.alias);
-    await voice.connect(channel.roomId, ticket.url, ticket.jwt);
 
     const deviceId = client.getDeviceId() ?? "";
     const content = rtc.buildContent(template, deviceId, focus, Date.now());
@@ -2806,9 +2811,161 @@ export async function joinVoice(channel: Pick<Channel, "roomId" | "name"> & Part
     noteCall(channel.roomId);
     refreshOccupants();
   } catch (e) {
+    if (overtaken()) return;
     await voice.disconnect();
-    app.set({ busy: "", error: humanError(e), voiceChannel: null });
+    appLog(`voice: ${channel.name} (${channel.roomId}) failed: ${rawError(e)}`);
+    const text = humanError(e);
+    withLogs(text);
+    app.set({ busy: "", error: text, voiceChannel: null });
   }
+}
+
+/** Bumped by every join: a slower join that was overtaken by a newer one stops. */
+let joinAttempt = 0;
+
+/**
+ * Get into the call's media: ask the media servers in turn (rtc.focusCandidates)
+ * until one lets in. Every step goes to app.log, so a call that does not
+ * connect can be told apart: no answer, a refusal, or a LiveKit that does not
+ * take the connection. Null if a newer join or a leave came first.
+ */
+async function connectMedia(
+  channel: Pick<Channel, "roomId" | "name">,
+  list: rtc.Membership[],
+  overtaken: () => boolean,
+): Promise<rtc.FocusCandidate | null> {
+  const c = client;
+  if (!c) return null;
+  const roomId = channel.roomId;
+  const roomServer = roomId.split(":").slice(1).join(":");
+  const own = await rtc.focusFromWellKnown(app.get().session?.homeserver ?? "");
+  const theirs = roomServer && roomServer !== c.getDomain() ? await rtc.focusFromWellKnown(`https://${roomServer}`) : "";
+  const candidates = rtc.focusCandidates(list, roomId, { own, roomServer: theirs, worked: workedFoci(), nearby: nearbyFoci(roomId) });
+  appLog(
+    `voice: joining ${channel.name} (${roomId}), ${list.filter((m) => !m.expired).length} in the call; media servers: ` +
+      (candidates.map((f) => `${f.serviceUrl} [${f.source}]`).join(", ") || "none"),
+  );
+
+  const failures: string[] = [];
+  let late = false;
+  for (let i = 0; ; i += 1) {
+    // all of them failed: the last resort are the media servers of the homeservers the room's members come from
+    if (i === candidates.length && !late) {
+      late = true;
+      const extra = await memberFoci(roomId, candidates);
+      if (overtaken()) return null;
+      if (extra.length) appLog(`voice: media servers of the members' homeservers: ${extra.map((f) => f.serviceUrl).join(", ")}`);
+      candidates.push(...extra);
+    }
+    const focus = candidates[i];
+    if (!focus) break;
+    if (overtaken()) return null;
+    const host = rtc.hostOf(focus.serviceUrl);
+    if (i > 0) app.set({ busy: t("busy.connectingVia", { name: channel.name, host }) });
+    const started = Date.now();
+    let mediaHost = "";
+    try {
+      const ticket = await rtc.getSfuTicket(c, focus.serviceUrl, focus.alias);
+      mediaHost = rtc.hostOf(ticket.url);
+      appLog(`voice: ${host} let in after ${Date.now() - started} ms, media at ${ticket.url}`);
+      if (overtaken()) return null;
+      await voice.connect(roomId, ticket.url, ticket.jwt);
+    } catch (e) {
+      if (overtaken()) return null;
+      const why = mediaHost ? t("voice.err.media", { host: mediaHost, error: errorMessage(e) }) : humanError(e);
+      appLog(`voice: ${host} failed after ${Date.now() - started} ms: ${mediaHost ? `media ${mediaHost}: ` : ""}${rawError(e)}`);
+      failures.push(why);
+      continue;
+    }
+    if (overtaken()) {
+      await voice.disconnect();
+      return null;
+    }
+    appLog(`voice: in ${channel.name} through ${focus.serviceUrl}`);
+    rememberFocus(focus.serviceUrl);
+    // the call itself is on a server that did not answer: those on it may not be heard
+    const callFocus = candidates.find((f) => f.source === "call");
+    if (i > 0 && callFocus && callFocus !== focus) {
+      const text = t("voice.err.otherServer", { host: rtc.hostOf(callFocus.serviceUrl), via: host });
+      withLogs(text);
+      app.set({ error: text });
+    }
+    return focus;
+  }
+  if (!failures.length) throw new Error(t("voice.err.noFocus"));
+  const more = failures.length > 1 ? ` ${t("voice.err.triedOthers", { n: failures.length - 1 })}` : "";
+  throw new Error(failures[0] + more);
+}
+
+/**
+ * The media servers of the homeservers the room's members come from, minus
+ * those already tried. Asked only when everything else failed: an account of
+ * another homeserver whose own media server does not answer gets in through
+ * the one of the people it calls with.
+ */
+async function memberFoci(roomId: string, tried: rtc.FocusCandidate[]): Promise<rtc.FocusCandidate[]> {
+  const room = client?.getRoom(roomId);
+  if (!client || !room) return [];
+  const skip = new Set([client.getDomain() ?? "", roomId.split(":").slice(1).join(":")]);
+  const servers = [...new Set(room.getJoinedMembers().map((m) => m.userId.split(":").slice(1).join(":")))]
+    .filter((s) => s && !skip.has(s))
+    .slice(0, 4);
+  const urls = await Promise.all(servers.map((s) => rtc.focusFromWellKnown(`https://${s}`)));
+  const seen = new Set(tried.map((f) => f.serviceUrl));
+  const out: rtc.FocusCandidate[] = [];
+  for (const raw of urls) {
+    const url = raw.trim().replace(/\/+$/, "");
+    if (!/^https?:\/\//i.test(url) || seen.has(url)) continue;
+    seen.add(url);
+    out.push({ serviceUrl: url, alias: roomId, source: "member servers" });
+  }
+  return out;
+}
+
+/** Media servers that let this app in before, the latest first: backups for one that does not answer. */
+const WORKED_FOCI_KEY = "app.voice-foci";
+
+function workedFoci(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(WORKED_FOCI_KEY) ?? "[]");
+    return Array.isArray(raw) ? raw.filter((u): u is string => typeof u === "string" && /^https?:\/\//.test(u)).slice(0, 6) : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberFocus(url: string): void {
+  try {
+    localStorage.setItem(WORKED_FOCI_KEY, JSON.stringify([url, ...workedFoci().filter((u) => u !== url)].slice(0, 6)));
+  } catch {
+    // only a backup list
+  }
+}
+
+/**
+ * Media servers the other voice channels use: those of the same server first,
+ * then the rest; within each, the ones of a call going on first.
+ */
+function nearbyFoci(roomId: string): string[] {
+  if (!client) return [];
+  const servers = [...app.get().servers].sort(
+    (a, b) => Number(b.channels.some((ch) => ch.roomId === roomId)) - Number(a.channels.some((ch) => ch.roomId === roomId)),
+  );
+  const out: string[] = [];
+  for (const server of servers) {
+    const live: string[] = [];
+    const old: string[] = [];
+    for (const ch of server.channels) {
+      const room = ch.kind === "voice" && ch.roomId !== roomId ? client.getRoom(ch.roomId) : null;
+      if (!room) continue;
+      for (const m of rtc.memberships(room)) {
+        const url = rtc.focusOf(m);
+        if (url) (m.expired ? old : live).push(url);
+      }
+    }
+    out.push(...live, ...old);
+  }
+  return out;
 }
 
 /**
@@ -3898,11 +4055,44 @@ export async function startVerification(): Promise<void> {
 }
 
 export function humanError(e: unknown): string {
-  const text = e instanceof Error ? e.message : String(e);
+  const text = errorMessage(e);
   if (text.includes("M_FORBIDDEN")) return t("err.forbidden");
   if (text.includes("M_UNKNOWN_TOKEN")) return t("err.token");
-  if (text.includes("Failed to fetch")) return t("err.network");
+  // a request with no answer at all: from fetch itself, or the same wrapped by the Matrix SDK
+  // (an error of this app that already names the server is left as it is)
+  if (e instanceof Error && ((e.name === "TypeError" && text.includes("Failed to fetch")) || e.name === "ConnectionError")) {
+    appLog(`no answer: ${rawError(e)}`);
+    const out = t("err.network");
+    withLogs(out);
+    return out;
+  }
   return text;
+}
+
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** An error for the log: its kind, text and cause, the way it came. */
+function rawError(e: unknown): string {
+  if (!(e instanceof Error)) return String(e);
+  const cause = (e as { cause?: unknown }).cause;
+  const why = cause instanceof Error ? ` (cause: ${cause.name}: ${cause.message})` : cause ? ` (cause: ${String(cause)})` : "";
+  return `${e.name}: ${e.message}${why}`;
+}
+
+/** Error texts the log explains: their toast offers to open it. */
+const loggedErrors: string[] = [];
+
+function withLogs(text: string): void {
+  if (!text || loggedErrors.includes(text)) return;
+  loggedErrors.push(text);
+  if (loggedErrors.length > 30) loggedErrors.shift();
+}
+
+/** Whether an error shown to the user has its details in app.log. */
+export function errorHasLogs(error: string): boolean {
+  return !!error && loggedErrors.some((text) => error.includes(text));
 }
 
 /* ------------------------------------------------------------ older history */

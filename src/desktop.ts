@@ -106,9 +106,19 @@ export function streamLog(text: string): void {
   void bridge?.streamLog?.(text).catch(() => undefined);
 }
 
-/** The folder with the stream log, in the file manager. */
-export function openLogs(): void {
-  void bridge?.openLogs?.().catch(() => undefined);
+/** A step of the app's own connections (sign-in, sync, calls), for app.log in the profile folder. */
+export function appLog(text: string): void {
+  void bridge?.appLog?.(text).catch(() => undefined);
+}
+
+/** Whether there are logs to show: only the desktop app keeps them. */
+export function hasLogs(): boolean {
+  return !!bridge?.openLogs;
+}
+
+/** The logs folder in the file manager, with the named log picked out. */
+export function openLogs(name: "app" | "streams" = "streams"): void {
+  void bridge?.openLogs?.(name).catch(() => undefined);
 }
 
 /**
@@ -280,7 +290,8 @@ type Bridge = {
   sunDrop?: (id: string) => Promise<void>;
   sunPrewarm?: (settings: SunStartSettings) => Promise<void>;
   streamLog?: (text: string) => Promise<void>;
-  openLogs?: () => Promise<string>;
+  appLog?: (text: string) => Promise<void>;
+  openLogs?: (name?: string) => Promise<string>;
   tunStart?: (wid: string, base: number) => Promise<TunReady>;
   tunPeer?: (wid: string, sid: number, key: string, nat: string, cands: string[]) => Promise<{ ok: boolean }>;
   onTunEvent?: (cb: (wid: string, json: string) => void) => () => void;

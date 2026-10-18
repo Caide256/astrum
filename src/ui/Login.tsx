@@ -1,8 +1,9 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 
-import { app, doLogin, doRegister } from "../app.ts";
+import { app, doLogin, doRegister, errorHasLogs } from "../app.ts";
 import { BRAND, LOGO_URL } from "../brand.ts";
 import { DEFAULT_SERVER } from "../config.ts";
+import { hasLogs, openLogs } from "../desktop.ts";
 import { LANGS, setLang, t, useLang, type Lang } from "../i18n/index.ts";
 import { USERNAME_RULE, cleanUsername } from "../matrix/session.ts";
 import { useStore } from "../store.ts";
@@ -76,7 +77,16 @@ export function Login() {
           </button>
         </div>
 
-        {error && <div className="error">{error}</div>}
+        {error && (
+          <div className="error">
+            {error}
+            {hasLogs() && errorHasLogs(error) && (
+              <button type="button" className="link error-logs" onClick={() => openLogs("app")}>
+                {t("common.showLogs")}
+              </button>
+            )}
+          </div>
+        )}
 
         <Field label={t("login.server")}>
           <input value={server} onChange={(e) => setServer(e.target.value)} placeholder="example.org" autoComplete="url" />

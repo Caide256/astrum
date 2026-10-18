@@ -30,6 +30,10 @@ export type Membership = {
 
 export type Focus = { serviceUrl: string; alias: string };
 
+/** Where a media server to try came from, for the log. */
+export type FocusSource = "call" | "own" | "room server" | "worked before" | "server channels" | "old call" | "member servers";
+export type FocusCandidate = Focus & { source: FocusSource };
+
 export type SfuTicket = { url: string; jwt: string };
 
 function deepFind(obj: unknown, key: string): string {
@@ -139,17 +143,57 @@ export function pickTemplate(list: Membership[], me: string): Membership | null 
   return others.find((m) => !m.expired) ?? others[0] ?? null;
 }
 
-export function discoverFocus(list: Membership[], roomId: string, fallbackUrl: string): Focus {
-  let serviceUrl = "";
-  let alias = "";
-  // prefer live participants: an expired entry may point to an old server
-  const ordered = [...list].sort((a, b) => Number(a.expired) - Number(b.expired));
-  for (const m of ordered) {
-    serviceUrl = serviceUrl || deepFind(m.content, "livekit_service_url");
-    alias = alias || deepFind(m.content, "livekit_alias");
-    if (serviceUrl && alias) break;
+/** When a participant joined: the oldest one picks the media server. */
+function joinedAt(m: Membership): number {
+  const own = m.content.created_ts;
+  if (typeof own === "number") return own;
+  const first = Array.isArray(m.content.memberships) ? m.content.memberships[0]?.created_ts : undefined;
+  return typeof first === "number" ? first : m.ts;
+}
+
+/**
+ * Media servers to try, best first. Those already in the call decide, the
+ * oldest first, as Element does ("oldest_membership"): one call has to be on
+ * one server. An empty call goes to the own homeserver's media server, as in
+ * Element; a membership left behind long ago no longer decides it.
+ *
+ * The rest are backups for a server that does not answer: the one of the
+ * room's homeserver, ones that worked here before, ones the other channels of
+ * the server use, and ones named by memberships long gone.
+ */
+export function focusCandidates(
+  list: Membership[],
+  roomId: string,
+  more: { own: string; roomServer: string; worked: string[]; nearby: string[] },
+): FocusCandidate[] {
+  const out: FocusCandidate[] = [];
+  const seen = new Set<string>();
+  const add = (url: string, alias: string, source: FocusSource) => {
+    const key = url.trim().replace(/\/+$/, "");
+    if (!/^https?:\/\//i.test(key) || seen.has(key)) return;
+    seen.add(key);
+    out.push({ serviceUrl: key, alias: alias || roomId, source });
+  };
+  const live = list.filter((m) => !m.expired).sort((a, b) => joinedAt(a) - joinedAt(b));
+  for (const m of live) add(focusOf(m), deepFind(m.content, "livekit_alias"), "call");
+  add(more.own, "", "own");
+  add(more.roomServer, "", "room server");
+  for (const url of more.worked) add(url, "", "worked before");
+  for (const url of more.nearby) add(url, "", "server channels");
+  for (const m of list.filter((m) => m.expired)) add(focusOf(m), deepFind(m.content, "livekit_alias"), "old call");
+  // a server that does not answer can cost seconds: a few backups are enough
+  return out.slice(0, Math.max(MAX_CANDIDATES, live.length));
+}
+
+const MAX_CANDIDATES = 6;
+
+/** The host of a URL for messages: "host:port", or the text itself. */
+export function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
   }
-  return { serviceUrl: serviceUrl || fallbackUrl, alias: alias || roomId };
 }
 
 /**
@@ -201,6 +245,9 @@ export function buildContent(
 
   if (template) {
     content = structuredClone(template.content);
+    // the server this client really went to: a backup one when the template's did not answer
+    setKey(content, "livekit_service_url", focus.serviceUrl);
+    setKey(content, "livekit_alias", focus.alias);
     if (Array.isArray(content.memberships) && content.memberships.length) {
       const one = structuredClone(content.memberships[0]);
       setDevice(one, deviceId);
@@ -298,6 +345,20 @@ export async function cancelLeave(client: MatrixClient, delayId: string): Promis
   }
 }
 
+function setKey(obj: unknown, key: string, value: string): void {
+  if (Array.isArray(obj)) {
+    obj.forEach((v) => setKey(v, key, value));
+    return;
+  }
+  if (obj && typeof obj === "object") {
+    const rec = obj as Record<string, unknown>;
+    for (const [k, v] of Object.entries(rec)) {
+      if (k === key && typeof v === "string") rec[k] = value;
+      else setKey(v, key, value);
+    }
+  }
+}
+
 function setDevice(obj: unknown, deviceId: string): void {
   if (Array.isArray(obj)) {
     obj.forEach((v) => setDevice(v, deviceId));
@@ -353,23 +414,42 @@ export async function retractMembership(
   }
 }
 
-/** lk-jwt-service URL from the own homeserver's well-known. */
+const wellKnown = new Map<string, { at: number; url: string }>();
+const WELL_KNOWN_MS = 10 * 60 * 1000;
+
+/**
+ * lk-jwt-service URL from a homeserver's well-known (its base URL, or
+ * "https://" and the server name). Kept for a while: every join asks.
+ */
 export async function focusFromWellKnown(homeserver: string): Promise<string> {
+  const base = homeserver.trim().replace(/\/+$/, "");
+  if (!base) return "";
+  const kept = wellKnown.get(base);
+  if (kept && Date.now() - kept.at < WELL_KNOWN_MS) return kept.url;
+  let url = "";
   try {
-    const res = await fetch(`${homeserver.replace(/\/+$/, "")}/.well-known/matrix/client`);
-    if (!res.ok) return "";
-    const data = await res.json();
-    const foci = data?.["org.matrix.msc4143.rtc_foci"];
-    if (Array.isArray(foci)) {
-      for (const f of foci) {
-        if (f?.type === "livekit" && f?.livekit_service_url) return String(f.livekit_service_url);
+    const res = await fetch(`${base}/.well-known/matrix/client`, { signal: AbortSignal.timeout(6000) });
+    if (res.ok) {
+      const data = await res.json();
+      const foci = data?.["org.matrix.msc4143.rtc_foci"];
+      if (Array.isArray(foci)) {
+        for (const f of foci) {
+          if (f?.type === "livekit" && f?.livekit_service_url) {
+            url = String(f.livekit_service_url);
+            break;
+          }
+        }
       }
     }
   } catch {
     // no well-known: the URL comes from another participant's membership
   }
-  return "";
+  wellKnown.set(base, { at: Date.now(), url });
+  return url;
 }
+
+/** How long lk-jwt-service may think: it checks the sign-in with the homeserver and creates the room. */
+const TICKET_MS = 15_000;
 
 /** OpenID token to a LiveKit JWT. The service embeds the room name itself. */
 export async function getSfuTicket(
@@ -378,24 +458,39 @@ export async function getSfuTicket(
   alias: string,
 ): Promise<SfuTicket> {
   const openid = await client.getOpenIdToken();
-  const res = await fetch(`${serviceUrl.replace(/\/+$/, "")}/sfu/get`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      room: alias,
-      openid_token: {
-        access_token: openid.access_token,
-        matrix_server_name: openid.matrix_server_name,
-      },
-      device_id: client.getDeviceId(),
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text();
-    const hint = res.status === 401 || res.status === 403 ? ` ${t("rtc.err.notAllowed")}` : "";
-    throw new Error(t("rtc.err.jwt", { status: res.status, body: body.slice(0, 200) }) + hint);
+  const host = hostOf(serviceUrl);
+  let res: Response;
+  try {
+    res = await fetch(`${serviceUrl.replace(/\/+$/, "")}/sfu/get`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        room: alias,
+        openid_token: {
+          access_token: openid.access_token,
+          matrix_server_name: openid.matrix_server_name,
+        },
+        device_id: client.getDeviceId(),
+      }),
+      signal: AbortSignal.timeout(TICKET_MS),
+    });
+  } catch (e) {
+    // no answer at all, a broken certificate, or an answer without CORS headers (a proxy's own error page)
+    const name = e instanceof Error ? e.name : "";
+    const why =
+      name === "TimeoutError"
+        ? t("rtc.err.timeout", { s: TICKET_MS / 1000 })
+        : name === "TypeError"
+          ? t("rtc.err.noAnswer")
+          : String(e instanceof Error ? e.message : e);
+    throw new Error(t("rtc.err.unreachable", { host, error: why }), { cause: e });
   }
-  const data = await res.json();
-  if (!data?.url || !data?.jwt) throw new Error(t("rtc.err.jwtEmpty"));
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    const hint = res.status === 401 || res.status === 403 ? ` ${t("rtc.err.notAllowed")}` : "";
+    throw new Error(t("rtc.err.jwt", { host, status: res.status, body: body.slice(0, 200) }) + hint);
+  }
+  const data = await res.json().catch(() => null);
+  if (!data?.url || !data?.jwt) throw new Error(t("rtc.err.jwtEmpty", { host }));
   return { url: String(data.url), jwt: String(data.jwt) };
 }

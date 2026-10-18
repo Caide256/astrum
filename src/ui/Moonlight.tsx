@@ -471,7 +471,7 @@ export function MoonlightTab() {
           <SunshineSection />
           <div className="section-title">{t("sun.logs.title")}</div>
           <div className="row left">
-            <button className="ghost small" onClick={openLogs}>
+            <button className="ghost small" onClick={() => openLogs("streams")}>
               {t("sun.logs.open")}
             </button>
           </div>

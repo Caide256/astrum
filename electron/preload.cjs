@@ -71,7 +71,8 @@ contextBridge.exposeInMainWorld("desktop", {
   netCheck: () => ipcRenderer.invoke("app:net-check"),
   sunPrewarm: (settings) => ipcRenderer.invoke("app:sun-prewarm", settings),
   streamLog: (text) => ipcRenderer.invoke("app:stream-log", text),
-  openLogs: () => ipcRenderer.invoke("app:open-logs"),
+  appLog: (text) => ipcRenderer.invoke("app:app-log", text),
+  openLogs: (name) => ipcRenderer.invoke("app:open-logs", name),
   tunStart: (wid, base) => ipcRenderer.invoke("app:tun-start", wid, base),
   tunPeer: (wid, sid, key, nat, cands) => ipcRenderer.invoke("app:tun-peer", wid, sid, key, nat, cands),
   onTunEvent: (cb) => {

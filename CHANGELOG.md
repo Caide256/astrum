@@ -5,6 +5,26 @@ GitHub uses the same two sections, and the app shows the one of its language in
 the update window. Mentions like `@everyone` always go in backticks: GitHub takes
 a bare mention for a GitHub user and lists that user as a contributor of the release.
 
+## 0.9.10
+
+<details>
+<summary>English</summary>
+
+- **Calls on servers of other homeservers.** When the media server of a call does not answer, the app no longer gives up: it tries the backups (the own homeserver's, the one of the room's homeserver, ones that worked before, ones other channels use, and last the ones of the homeservers the channel's members come from) and goes in through the first that lets it in. Before, when the media server of the own homeserver did not answer, one could only get into a call where someone already sat through another server.
+- An empty call now goes to the own homeserver's media server, as in Element. Before, a call membership left behind weeks ago could send everyone to a server that no longer takes them.
+- **"Show logs" on connection errors.** The error tells which server did not answer and what it said, and its button opens the log of connections (app.log in the profile folder): every step into a call, sign-in and sync failures. That file is what to send when something does not connect.
+
+</details>
+
+<details>
+<summary>Русский</summary>
+
+- **Звонки на серверах с других хоумсерверов.** Если медиасервер звонка не отвечает, приложение больше не сдаётся: оно пробует запасные (своего хоумсервера, хоумсервера комнаты, те, что уже срабатывали, те, что используют другие каналы, и напоследок медиасерверы хоумсерверов участников канала) и заходит через первый, который пустит. Раньше, если медиасервер своего хоумсервера не отвечал, зайти можно было только в звонок, где уже кто-то сидел через другой сервер.
+- Пустой звонок теперь идёт на медиасервер своего хоумсервера, как в Element. Раньше участие в звонке, оставшееся с прошлых недель, могло отправить всех на сервер, который их уже не пускает.
+- **«Посмотреть логи» при ошибке подключения.** В ошибке написано, какой сервер не ответил и что он сказал, а кнопка открывает лог подключений (app.log в папке профиля): каждый шаг входа в звонок, ошибки входа и синхронизации. Этот файл и надо присылать, если что-то не подключается.
+
+</details>
+
 ## 0.9.9
 
 <details>
