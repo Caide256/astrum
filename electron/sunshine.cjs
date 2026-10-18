@@ -246,7 +246,20 @@ function cleanSettings(raw) {
     udpPort: udp >= 1024 && udp <= 65535 ? udp : 0,
     upnp: s.upnp !== false,
     address: text(s.address, 253).trim().toLowerCase(),
+    fixedFps: s.fixedFps !== false,
   };
+}
+
+/**
+ * The frame rate Sunshine keeps on a still picture. By itself it drops to
+ * half the requested rate when nothing moves; above the rate a viewer asks
+ * for it would encode the same frame again and again for nothing. Viewers of
+ * the app ask for 60 by default, or the monitor's rate if that is lower.
+ */
+function steadyFps(output) {
+  const list = displays();
+  const d = list.find((x) => output && x.id === output) ?? list.find((x) => x.primary) ?? list[0];
+  return Math.max(10, Math.min(60, d?.hz || 60));
 }
 
 /**
@@ -317,6 +330,7 @@ function writeConfig(settings, port) {
   if (settings.output) lines.push(`output_name = ${settings.output}`);
   if (encoder) lines.push(`encoder = ${encoder}`);
   if (settings.maxKbps) lines.push(`max_bitrate = ${settings.maxKbps}`);
+  if (settings.fixedFps) lines.push(`minimum_fps_target = ${steadyFps(settings.output)}`);
   fs.writeFileSync(f("sunshine.conf"), lines.join("\n") + "\n");
   return f("sunshine.conf");
 }

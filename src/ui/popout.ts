@@ -1,3 +1,4 @@
+import { useSyncExternalStore } from "react";
 import type { LocalVideoTrack, RemoteVideoTrack } from "livekit-client";
 
 import { t } from "../i18n/index.ts";
@@ -18,6 +19,27 @@ type Track = LocalVideoTrack | RemoteVideoTrack;
 
 const open = new Map<string, Window>();
 
+/* Which videos are in a window of their own: the mini player leaves those out. */
+const listeners = new Set<() => void>();
+let shown: string[] = [];
+
+function changed(): void {
+  shown = [...open.keys()];
+  listeners.forEach((l) => l());
+}
+
+function subscribe(cb: () => void): () => void {
+  listeners.add(cb);
+  return () => {
+    listeners.delete(cb);
+  };
+}
+
+/** The keys of the videos popped out into windows right now. */
+export function usePoppedOut(): string[] {
+  return useSyncExternalStore(subscribe, () => shown, () => shown);
+}
+
 /**
  * Stopping watching or leaving the call stops the track without an "ended"
  * event, so the call state is checked instead: once the video is gone, the
@@ -33,6 +55,7 @@ export function closePopout(key: string): void {
   const w = open.get(key);
   open.delete(key);
   if (w && !w.closed) w.close();
+  changed();
 }
 
 export function popOut(key: string, track: Track, title: string, onClose?: () => void): void {
@@ -49,6 +72,7 @@ export function popOut(key: string, track: Track, title: string, onClose?: () =>
     return;
   }
   open.set(key, w);
+  changed();
 
   const doc = w.document;
   doc.title = title;
@@ -89,7 +113,8 @@ export function popOut(key: string, track: Track, title: string, onClose?: () =>
   track.mediaStreamTrack.addEventListener("ended", ended);
   w.addEventListener("beforeunload", () => {
     track.mediaStreamTrack.removeEventListener("ended", ended);
-    open.delete(key);
+    if (open.get(key) === w) open.delete(key);
+    changed();
     onClose?.();
   });
 }

@@ -186,6 +186,8 @@ export type AppState = {
   ringing: DirectRing | null;
   /** The own call ringing out in a direct chat, and how it went. */
   calling: OutgoingCall | null;
+  /** The call the app was in when it closed last time, offered back in a bar. */
+  rejoin: { roomId: string; name: string } | null;
   addServerOpen: boolean;
   serverCard: ServerCard | null;
   profileUser: string | null;
@@ -296,6 +298,7 @@ export const app = createStore<AppState>({
   voiceChannel: null,
   ringing: null,
   calling: null,
+  rejoin: null,
   addServerOpen: false,
   serverCard: null,
   profileUser: null,
@@ -531,6 +534,7 @@ async function launch(s: session.Session, c: MatrixClient): Promise<void> {
   restoreChannel();
   startPresence();
   scheduleOwnMembers(8000);
+  offerRejoin();
 }
 
 export async function bootstrap(): Promise<void> {
@@ -677,6 +681,7 @@ export async function doLogout(): Promise<void> {
     occupants: {},
     ringing: null,
     calling: null,
+    rejoin: null,
     profileUser: null,
     userMenu: null,
     settingsOpen: false,
@@ -2797,7 +2802,8 @@ export async function joinVoice(channel: Pick<Channel, "roomId" | "name"> & Part
     keepMembership(membershipInfo);
 
     // microphone problems do not prevent joining, but they are reported
-    app.set({ voiceChannel: channel.roomId, busy: "", error: voice.getState().error });
+    app.set({ voiceChannel: channel.roomId, busy: "", error: voice.getState().error, rejoin: null });
+    noteCall(channel.roomId);
     refreshOccupants();
   } catch (e) {
     await voice.disconnect();
@@ -2882,12 +2888,20 @@ if (typeof window !== "undefined") {
   window.addEventListener("beforeunload", retractOnUnload);
 }
 
-// a real quit, or the installer of an update: leave the call properly first
-onBeforeQuit(() => leaveVoice().catch(() => undefined));
-setBeforeInstall(() => leaveVoice().catch(() => undefined));
+// a real quit, or the installer of an update: leave the call properly first, and come back
+// to it next time: by itself after an update, offered in a bar after a quit
+onBeforeQuit(() => leaveVoice({ keep: true }).catch(() => undefined));
+setBeforeInstall(() => leaveVoice({ keep: true, auto: true }).catch(() => undefined));
 
-export async function leaveVoice(): Promise<void> {
+/**
+ * Leave the call. Leaving on purpose forgets it; `keep` (the app closes)
+ * remembers it for the next start, `auto` to go back in without asking.
+ */
+export async function leaveVoice(opts: { keep?: boolean; auto?: boolean } = {}): Promise<void> {
   stopCalling();
+  const left = app.get().voiceChannel;
+  if (opts.keep && left) noteCall(left, !!opts.auto);
+  else forgetCall();
   const info = membershipInfo;
   membershipInfo = null;
   if (info) stopMembership(info);
@@ -2897,6 +2911,87 @@ export async function leaveVoice(): Promise<void> {
   }
   app.set({ voiceChannel: null, callView: false, cameraPickerOpen: false, lastFocus: null });
   refreshOccupants();
+}
+
+/* ------------------------------------------------------- back to the call */
+
+/**
+ * The call the app was in when it closed: a restart for an update, the
+ * computer shutting down, a quit from the tray. Leaving a call on purpose
+ * forgets it. After an update the app goes back in by itself; otherwise a
+ * bar at the top offers it, as Discord does.
+ */
+const LAST_CALL_KEY = "app.last-call";
+/** Older than this, a call is not offered any more. */
+const REJOIN_OFFER_MS = 12 * 60 * 60_000;
+/** An update restarts within minutes: longer than this, it is offered instead. */
+const REJOIN_AUTO_MS = 10 * 60_000;
+type LastCall = { roomId: string; at: number; auto: boolean };
+let noteTimer = 0;
+
+function readLastCall(): LastCall | null {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAST_CALL_KEY) ?? "null") as Partial<LastCall> | null;
+    if (!raw || typeof raw.roomId !== "string" || !raw.roomId.startsWith("!")) return null;
+    return { roomId: raw.roomId, at: Number(raw.at) || 0, auto: raw.auto === true };
+  } catch {
+    return null;
+  }
+}
+
+/** Remember the call; while it lasts the time is renewed, so a long call still counts as recent. */
+function noteCall(roomId: string, auto = false): void {
+  try {
+    localStorage.setItem(LAST_CALL_KEY, JSON.stringify({ roomId, at: Date.now(), auto }));
+  } catch {
+    // storage unavailable: nothing to offer next time
+  }
+  window.clearInterval(noteTimer);
+  if (auto) return;
+  noteTimer = window.setInterval(() => {
+    const vc = app.get().voiceChannel;
+    if (vc) noteCall(vc);
+    else window.clearInterval(noteTimer);
+  }, 60_000);
+}
+
+function forgetCall(): void {
+  window.clearInterval(noteTimer);
+  try {
+    localStorage.removeItem(LAST_CALL_KEY);
+  } catch {
+    // storage unavailable
+  }
+}
+
+function offerRejoin(): void {
+  const last = readLastCall();
+  if (!last || !client || app.get().voiceChannel) return;
+  const name = callPlaceName(last.roomId);
+  const age = Date.now() - last.at;
+  if (!name || client.getRoom(last.roomId)?.getMyMembership() !== "join" || age > REJOIN_OFFER_MS) {
+    forgetCall();
+    return;
+  }
+  if (last.auto && age < REJOIN_AUTO_MS) void rejoinCall(last.roomId);
+  else app.set({ rejoin: { roomId: last.roomId, name } });
+}
+
+async function rejoinCall(roomId: string): Promise<void> {
+  const channel = app.get().servers.flatMap((g) => g.channels).find((c) => c.roomId === roomId);
+  // a direct call comes back without ringing: the other person is either still there or gone
+  await joinVoice(channel ?? { roomId, name: callPlaceName(roomId) });
+}
+
+export function acceptRejoin(): void {
+  const r = app.get().rejoin;
+  app.set({ rejoin: null });
+  if (r) void rejoinCall(r.roomId);
+}
+
+export function dismissRejoin(): void {
+  app.set({ rejoin: null });
+  forgetCall();
 }
 
 /* ------------------------------------------------------------- direct calls */

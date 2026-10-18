@@ -5,6 +5,32 @@ GitHub uses the same two sections, and the app shows the one of its language in
 the update window. Mentions like `@everyone` always go in backticks: GitHub takes
 a bare mention for a GitHub user and lists that user as a contributor of the release.
 
+## 0.9.9
+
+<details>
+<summary>English</summary>
+
+- **Back to the call after a restart.** After an update the app goes back into the call it was in by itself; after a restart of the computer or a quit, a bar at the top offers "Reconnect", as in Discord. Leaving a call on purpose forgets it.
+- **Code blocks look better:** long lines wrap instead of scrolling sideways, the copy button sits in the corner and shows on hover instead of taking a line of its own, the language is a small label next to it.
+- **Sunshine streams keep their frame rate:** "Fix the frame rate" (on by default) in the stream settings keeps Sunshine from halving the frame rate on a still picture: viewers get a steady 60 frames (or the monitor's rate if it is lower).
+- **Bitrate of Sunshine streams:** the automatic one is as in Moonlight now (20 Mbit/s for 1080p at 60 frames, about 40 for 1440p, 80 for 4K, no discount for HEVC and AV1), and it can be set by hand from 5 to 150 Mbit/s in Settings, Streams.
+- A stream popped out into a window of its own is not shown in the mini player at the same time; once that window closes, the mini player shows it again.
+- **Servers can be put in your own order** by dragging them in the bar on the left. The order follows your account to other devices.
+
+</details>
+
+<details>
+<summary>Русский</summary>
+
+- **Возврат в звонок после перезапуска.** После обновления приложение само возвращается в звонок, в котором было. После перезагрузки компьютера или выхода сверху появляется плашка «Подключиться», как в Discord. Если выйти из звонка самому, он забывается.
+- **Код-блоки выглядят лучше:** длинные строки переносятся, а не уезжают вбок. Кнопка копирования сидит в углу и появляется при наведении, а не занимает отдельную строку. Язык подписан маленькой меткой рядом с ней.
+- **Стримы через Sunshine держат частоту кадров.** Галка «Фиксировать частоту кадров» (по умолчанию включена) в настройках стрима не даёт Sunshine снижать частоту вдвое на неподвижной картинке: зрители получают ровные 60 кадров (или частоту экрана, если она ниже).
+- **Битрейт стримов через Sunshine.** Авто теперь как в Moonlight: 20 Мбит/с для 1080p при 60 кадрах, около 40 для 1440p, 80 для 4K, без скидки для HEVC и AV1. А в Настройках, Стримы его можно выставить вручную от 5 до 150 Мбит/с.
+- Стрим, вынесенный в отдельное окно, не показывается одновременно в мини-плеере. Когда окно закрыто, мини-плеер снова его показывает.
+- **Серверы можно расставить в своём порядке** перетаскиванием в панели слева. Порядок переезжает с аккаунтом на другие устройства.
+
+</details>
+
 ## 0.9.8
 
 <details>

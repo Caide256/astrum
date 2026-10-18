@@ -40,7 +40,8 @@ export type MlHost = {
 export type MlCodec = "h264" | "hevc" | "av1";
 
 /** 0 height means the size of the source. */
-export type MlQuality = { height: number; fps: number; codec: MlCodec };
+/** `kbps`: the bitrate set by hand, 0 for the automatic one. */
+export type MlQuality = { height: number; fps: number; codec: MlCodec; kbps: number };
 
 /**
  * Where joining a stream is: this side's end of the tunnel, the streamer's
@@ -77,7 +78,10 @@ export type MlState = {
 };
 
 const KEY = "app.moonlight";
-const DEFAULT_QUALITY: MlQuality = { height: 0, fps: 60, codec: "h264" };
+const DEFAULT_QUALITY: MlQuality = { height: 0, fps: 60, codec: "h264", kbps: 0 };
+/** The bitrate set by hand goes from here to there, in kbit/s. */
+export const ML_KBPS_MIN = 5_000;
+export const ML_KBPS_MAX = 150_000;
 /** Video packets through the tunnel: room for its header, under any usual MTU. */
 const TUNNEL_PACKET = 1200;
 
@@ -98,6 +102,7 @@ function load(): { hosts: MlHost[]; quality: MlQuality } {
         height: ML_HEIGHTS.includes(Number(q.height)) ? Number(q.height) : DEFAULT_QUALITY.height,
         fps: ML_FPS.includes(Number(q.fps)) ? Number(q.fps) : DEFAULT_QUALITY.fps,
         codec: ML_CODECS.includes(q.codec as MlCodec) ? (q.codec as MlCodec) : "h264",
+        kbps: Number(q.kbps) >= ML_KBPS_MIN && Number(q.kbps) <= ML_KBPS_MAX ? Math.round(Number(q.kbps)) : 0,
       },
     };
   } catch {
@@ -128,11 +133,15 @@ export function setQuality(patch: Partial<MlQuality>): void {
  * The bitrate for a picture: about what Moonlight itself picks (20 Mbit/s for
  * 1080p at 60), less for HEVC and AV1, which pack the same picture tighter.
  */
-export function autoKbps(width: number, height: number, fps: number, codec: MlCodec): number {
+/**
+ * The bitrate Moonlight starts with: 20 Mbit/s for 1080p at 60 frames, in
+ * proportion to the picture, about 40 for 1440p and 80 for 4K. HEVC and AV1
+ * get no discount: they spend the same bits on a better picture.
+ */
+export function autoKbps(width: number, height: number, fps: number): number {
   const pixels = (width * height) / (1920 * 1080);
   const rate = fps <= 30 ? 0.6 : fps <= 60 ? 1 : 1.5;
-  const k = codec === "av1" ? 0.65 : codec === "hevc" ? 0.75 : 1;
-  return Math.round(Math.max(3000, Math.min(150_000, 20_000 * pixels * rate * k)) / 500) * 500;
+  return Math.round(Math.max(3000, Math.min(ML_KBPS_MAX, 20_000 * pixels * rate)) / 500) * 500;
 }
 
 /** The picture size for a source: the chosen height, never bigger than the source, its shape kept. */
@@ -299,7 +308,7 @@ class Session {
     const size = pictureFor({ w: info.w, h: info.h }, q);
     const fps = Math.min(q.fps, Math.max(30, info.fps));
     const codec = (await decodes(q.codec)) ? q.codec : "h264";
-    const kbps = autoKbps(size.width, size.height, fps, codec);
+    const kbps = q.kbps || autoKbps(size.width, size.height, fps);
     this.set({ width: size.width, height: size.height, kbps });
     this.log(`start: port ${info.port}, ${size.width}x${size.height} ${fps} fps ${codec} ${kbps} kbps`);
 

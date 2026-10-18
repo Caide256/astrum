@@ -525,6 +525,38 @@ export function setChannelOrder(spaceId: string, ids: string[] | null): void {
   orders.set(next);
 }
 
+/* ----------------------------------------------------------- server order */
+
+/** The own order of the servers in the bar, by space id; servers not in it go last. Synced with the account. */
+const SERVER_ORDER_KEY = "app.server-order";
+
+function cleanServerOrder(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.filter((x): x is string => typeof x === "string" && x.startsWith("!")))].slice(0, 500);
+}
+
+const serverOrder = cell<string[]>(cleanServerOrder(loadJson<string[]>(SERVER_ORDER_KEY, [])));
+
+export function useServerOrder(): string[] {
+  return serverOrder.use();
+}
+
+export function setServerOrder(ids: string[]): void {
+  const next = cleanServerOrder(ids);
+  saveJson(SERVER_ORDER_KEY, next);
+  serverOrder.set(next);
+}
+
+/** Servers in the own order: the ones placed first, the rest after them as they come. */
+export function arrangeServers<T extends { spaceId: string }>(list: T[], order: string[]): T[] {
+  if (!order.length) return list;
+  const rank = new Map(order.map((id, i) => [id, i]));
+  return list
+    .map((g, i) => ({ g, r: rank.get(g.spaceId) ?? order.length + i }))
+    .sort((a, b) => a.r - b.r)
+    .map((x) => x.g);
+}
+
 const TYPE = `${BRAND.appId}.prefs`;
 const SYNCED_KEY = "app.prefs-synced";
 const PUSH_DELAY_MS = 3000;
@@ -542,6 +574,7 @@ type Synced = VoicePrefs & {
   tile: TileLook;
   look: ChatLook;
   order: ChannelOrders;
+  serverOrder: string[];
   serverProfiles: ServerProfiles;
   notifyMore: NotifyPrefs;
   view: ViewPrefs;
@@ -567,6 +600,7 @@ function collect(origin: string): Synced {
     tile: tile.get(),
     look: look.get(),
     order: orders.get(),
+    serverOrder: serverOrder.get(),
     serverProfiles: serverProfiles.get(),
     notifyMore: notifyPrefs.get(),
     view: view.get(),
@@ -591,6 +625,7 @@ function essence(p: Partial<Synced>): string {
     p.tile ?? null,
     p.look ?? null,
     p.order ?? null,
+    p.serverOrder ?? null,
     p.serverProfiles ?? null,
     p.notifyMore ?? null,
     p.view ?? null,
@@ -626,6 +661,11 @@ function apply(remote: Partial<Synced>, all: boolean): void {
       const next = cleanOrders(remote.order);
       saveJson(ORDER_KEY, next);
       orders.set(next);
+    }
+    if (Array.isArray(remote.serverOrder)) {
+      const next = cleanServerOrder(remote.serverOrder);
+      saveJson(SERVER_ORDER_KEY, next);
+      serverOrder.set(next);
     }
     if (remote.serverProfiles && typeof remote.serverProfiles === "object") {
       const next = cleanServerProfiles(remote.serverProfiles);
@@ -701,6 +741,7 @@ export function startPrefsSync(c: MatrixClient): void {
     tile.on(schedule),
     look.on(schedule),
     orders.on(schedule),
+    serverOrder.on(schedule),
     serverProfiles.on(schedule),
     notifyPrefs.on(schedule),
     view.on(schedule),

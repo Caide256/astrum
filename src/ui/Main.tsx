@@ -9,6 +9,7 @@ import {
   type DragEvent,
   type FormEvent,
   type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type UIEvent,
 } from "react";
 
@@ -19,8 +20,10 @@ import {
   addServer,
   app,
   askNotifyPermission,
+  acceptRejoin,
   avatarMxc,
   callDirect,
+  dismissRejoin,
   callPlaceName,
   channelMembers,
   closeMenus,
@@ -89,7 +92,7 @@ import {
 import { fmtDateTime, fmtMsgTime, fmtTime, t, tn } from "../i18n/index.ts";
 import { encryptedMediaUrl } from "../media.ts";
 import type { UserHit } from "../matrix/people.ts";
-import { hasOwnOrder, idsHidden, isMuted, setChannelOrder, setMuted, useChannelOrders, useMutes } from "../prefs.ts";
+import { arrangeServers, hasOwnOrder, idsHidden, isMuted, setChannelOrder, setMuted, setServerOrder, useChannelOrders, useMutes, useServerOrder } from "../prefs.ts";
 import type { Channel, Server } from "../matrix/servers.ts";
 import { useStore } from "../store.ts";
 import { voice, type NetSample, type NetStats, type VoiceMember } from "../voice/voice.ts";
@@ -229,8 +232,85 @@ function PersonRow({
 
 /* ------------------------------------------------------------- server bar */
 
+/**
+ * The servers in the bar can be put in an own order by dragging them, with
+ * pointer events like the channels: a button inside would swallow HTML drag
+ * and drop. The order follows the account to other devices.
+ */
+function useServerDrag(ids: string[]) {
+  const [drag, setDrag] = useState<string | null>(null);
+  const [over, setOverState] = useState<{ id: string; after: boolean } | null>(null);
+  const overRef = useRef<{ id: string; after: boolean } | null>(null);
+  const press = useRef<{ id: string; x: number; y: number; moved: boolean } | null>(null);
+  const swallowClick = useRef(false);
+  const latest = useRef(ids);
+  latest.current = ids;
+  const setOver = (next: { id: string; after: boolean } | null) => {
+    const cur = overRef.current;
+    if (cur?.id === next?.id && cur?.after === next?.after) return;
+    overRef.current = next;
+    setOverState(next);
+  };
+
+  useEffect(() => {
+    const move = (e: globalThis.PointerEvent) => {
+      const p = press.current;
+      if (!p) return;
+      if (!p.moved) {
+        if (Math.abs(e.clientX - p.x) + Math.abs(e.clientY - p.y) < 6) return;
+        p.moved = true;
+        setDrag(p.id);
+      }
+      const el = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>(".server-item[data-id]");
+      if (!el || el.dataset.id === p.id) {
+        setOver(null);
+        return;
+      }
+      const r = el.getBoundingClientRect();
+      setOver({ id: el.dataset.id ?? "", after: e.clientY > r.top + r.height / 2 });
+    };
+    const up = () => {
+      const p = press.current;
+      press.current = null;
+      if (!p?.moved) return;
+      // the click that ends a drag must not open the server
+      swallowClick.current = true;
+      window.setTimeout(() => (swallowClick.current = false), 0);
+      const target = overRef.current;
+      if (target) {
+        const rest = latest.current.filter((id) => id !== p.id);
+        const at = rest.indexOf(target.id);
+        if (at !== -1) {
+          rest.splice(target.after ? at + 1 : at, 0, p.id);
+          setServerOrder(rest);
+        }
+      }
+      setDrag(null);
+      setOver(null);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+  }, []);
+
+  const onPointerDown = (id: string) => (e: ReactPointerEvent<HTMLElement>) => {
+    if (e.button !== 0) return;
+    press.current = { id, x: e.clientX, y: e.clientY, moved: false };
+  };
+  const mark = (id: string): string => (drag === id ? "dragging" : over?.id === id && drag ? (over.after ? "drop-after" : "drop-before") : "");
+  return { onPointerDown, mark, swallowed: () => swallowClick.current };
+}
+
 function ServerBar() {
-  const servers = useStore(app, (s) => s.servers);
+  const unordered = useStore(app, (s) => s.servers);
+  const order = useServerOrder();
+  const servers = arrangeServers(unordered, order);
+  const drag = useServerDrag(servers.map((g) => g.spaceId));
   const active = useStore(app, (s) => s.activeServer);
   const view = useStore(app, (s) => s.view);
   const directs = useStore(app, (s) => s.directs);
@@ -259,12 +339,19 @@ function ServerBar() {
         const fresh = !muted && g.channels.some((c) => c.unread > 0 && !roomMuted(c.roomId) && !shown(c.roomId));
         return (
           // the pill on the left: short for unread, taller on hover, long for the open server
-          <div key={g.spaceId} className={`server-item ${on ? "active" : ""} ${fresh ? "unread" : ""} ${muted ? "muted" : ""}`}>
+          <div
+            key={g.spaceId}
+            data-id={g.spaceId}
+            className={`server-item ${on ? "active" : ""} ${fresh ? "unread" : ""} ${muted ? "muted" : ""} ${drag.mark(g.spaceId)}`}
+            onPointerDown={drag.onPointerDown(g.spaceId)}
+          >
             <span className="server-pill" />
             <button
               className={`server-btn ${on ? "active" : ""}`}
               title={g.name}
-              onClick={() => selectServer(g.spaceId)}
+              onClick={() => {
+                if (!drag.swallowed()) selectServer(g.spaceId);
+              }}
               onContextMenu={(e) => {
                 e.preventDefault();
                 openPlaceMenu("server", g.spaceId, e.clientX, e.clientY);
@@ -2414,6 +2501,26 @@ function Toast() {
   );
 }
 
+/** The call the app was in when it closed last time: one click back in, as in Discord. */
+function RejoinBar() {
+  const rejoin = useStore(app, (s) => s.rejoin);
+  const directs = useStore(app, (s) => s.directs);
+  if (!rejoin) return null;
+  const direct = directs.some((d) => d.roomId === rejoin.roomId);
+  return (
+    <div className="rejoin-bar" role="status">
+      {direct ? <IconPhone /> : <IconSpeaker />}
+      <span className="ellipsis">{direct ? t("rejoin.direct", { name: rejoin.name }) : t("rejoin.channel", { name: rejoin.name })}</span>
+      <button className="small rejoin-join" onClick={acceptRejoin}>
+        {t("rejoin.join")}
+      </button>
+      <button className="ghost icon tiny" title={t("common.close")} onClick={dismissRejoin}>
+        <IconClose />
+      </button>
+    </div>
+  );
+}
+
 /** Shown while the sync loop cannot reach the homeserver. Voice keeps its own connection. */
 function OfflineBar() {
   const offline = useStore(app, (s) => s.offline);
@@ -2466,6 +2573,7 @@ export function Main() {
       <IncomingCall />
       <Toast />
       <OfflineBar />
+      <RejoinBar />
       <AddServerModal />
       <LeaveServerModal />
       <Settings />

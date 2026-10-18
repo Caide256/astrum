@@ -60,6 +60,7 @@ const DEFAULTS: SunSettings = {
   udpPort: 0,
   upnp: true,
   address: "",
+  fixedFps: true,
 };
 
 function load(): SunSettings {
@@ -76,6 +77,7 @@ function load(): SunSettings {
       udpPort: udp >= 1024 && udp <= 65535 ? udp : 0,
       upnp: raw?.upnp !== false,
       address: typeof raw?.address === "string" ? raw.address.trim().slice(0, 253) : "",
+      fixedFps: raw?.fixedFps !== false,
     };
   } catch {
     return DEFAULTS;

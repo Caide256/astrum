@@ -44,8 +44,9 @@ function CodeBlock({ lang, code }: { lang: string; code: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="md-pre">
+      {/* the language and the copy button sit in the corner over the code, not on a line of their own */}
       <div className="md-pre-bar">
-        <span>{lang}</span>
+        {lang && <span>{lang}</span>}
         <button
           className="ghost icon tiny"
           title={copied ? t("md.copied") : t("md.copy")}

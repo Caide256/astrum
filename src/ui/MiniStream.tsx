@@ -5,7 +5,7 @@ import { t } from "../i18n/index.ts";
 import { usePlayerPrefs } from "../prefs.ts";
 import { useStore } from "../store.ts";
 import { voice, type VoiceVideo } from "../voice/voice.ts";
-import { popOut } from "./popout.ts";
+import { popOut, usePoppedOut } from "./popout.ts";
 import { VideoView } from "./Stage.tsx";
 import { IconClose, IconPopout, IconSwap, IconVolume, IconVolumeOff } from "./icons.tsx";
 
@@ -77,6 +77,8 @@ export function MiniStream() {
   const [corner, setCorner] = useState<Corner>(loadCorner);
   const [free, setFree] = useState<Free | null>(loadFree);
   const prefs = usePlayerPrefs();
+  // a video in a window of its own is not shown here twice; once that window closes, it is again
+  const popped = usePoppedOut();
   const [drag, setDrag] = useState<{ x: number; y: number } | null>(null);
   const [picking, setPicking] = useState(false);
   const [, relayout] = useState(0);
@@ -91,9 +93,10 @@ export function MiniStream() {
 
   const inCall = callView && activeChannel === voiceChannel;
   // watched shares first, then cameras; the own camera only if nothing else is there
-  const shares = state.videos.filter((v) => v.screen);
-  const cams = state.videos.filter((v) => !v.screen && !v.local);
-  const own = state.videos.filter((v) => !v.screen && v.local);
+  const here = state.videos.filter((v) => !popped.includes(v.key));
+  const shares = here.filter((v) => v.screen);
+  const cams = here.filter((v) => !v.screen && !v.local);
+  const own = here.filter((v) => !v.screen && v.local);
   const choices = [...shares, ...cams, ...(shares.length || cams.length ? [] : own)];
   const pinned = choices.find((v) => tileKey(v) === lastFocus);
   // a camera shows only when it was picked; a watched share shows on its own

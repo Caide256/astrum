@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import { avatarMxc, displayName, flashNotice } from "../app.ts";
 import { openLogs } from "../desktop.ts";
 import { fmtDateTime, t, type Key } from "../i18n/index.ts";
-import { ML_CODECS, ML_FPS, ML_HEIGHTS, autoKbps, forgetHost, hasMoonlight, ml, pictureFor, setQuality, type MlCodec, type MlStep, type MlWatch } from "../moonlight.ts";
+import { ML_CODECS, ML_FPS, ML_HEIGHTS, ML_KBPS_MAX, ML_KBPS_MIN, autoKbps, forgetHost, hasMoonlight, ml, pictureFor, setQuality, type MlCodec, type MlStep, type MlWatch } from "../moonlight.ts";
 import { setPlayerPrefs, usePlayerPrefs } from "../prefs.ts";
 import { useStore } from "../store.ts";
 import {
@@ -124,11 +124,33 @@ function QualitySection() {
       </div>
       <div className="field">
         <label>{t("ml.bitrateAuto")}</label>
-        <div className="ml-rate">
-          <b>{t("ml.mbps", { n: mbps(autoKbps(sample.width, sample.height, q.fps, q.codec)) })}</b>
-          <span className="state">{q.height === 0 ? t("ml.bitrateAuto.source") : t("ml.bitrateAuto.fixed", { size: HEIGHT_NAMES[q.height] ?? "" })}</span>
+        <div className="seg">
+          <button className={q.kbps ? "" : "on"} onClick={() => setQuality({ kbps: 0 })}>
+            {t("ml.bitrate.auto")}
+          </button>
+          <button className={q.kbps ? "on" : ""} onClick={() => setQuality({ kbps: q.kbps || autoKbps(sample.width, sample.height, q.fps) })}>
+            {t("ml.bitrate.manual")}
+          </button>
         </div>
-        <span className="state">{t("ml.bitrateAuto.hint")}</span>
+        {q.kbps ? (
+          <div className="ml-rate">
+            <input
+              type="range"
+              min={ML_KBPS_MIN / 1000}
+              max={ML_KBPS_MAX / 1000}
+              step={1}
+              value={Math.round(q.kbps / 1000)}
+              onChange={(e) => setQuality({ kbps: Number(e.target.value) * 1000 })}
+            />
+            <b>{t("ml.mbps", { n: mbps(q.kbps) })}</b>
+          </div>
+        ) : (
+          <div className="ml-rate">
+            <b>{t("ml.mbps", { n: mbps(autoKbps(sample.width, sample.height, q.fps)) })}</b>
+            <span className="state">{q.height === 0 ? t("ml.bitrateAuto.source") : t("ml.bitrateAuto.fixed", { size: HEIGHT_NAMES[q.height] ?? "" })}</span>
+          </div>
+        )}
+        <span className="state">{q.kbps ? t("ml.bitrate.manual.hint") : t("ml.bitrateAuto.hint")}</span>
       </div>
     </>
   );
@@ -278,6 +300,7 @@ export function SunSourceFields() {
       </div>
       <Toggle checked={settings.audio} onChange={(audio) => setSunSettings({ audio })} title={t("sun.audio")} hint={t("sun.audio.hint")} />
       {noSound && <div className="note warn">{t("sun.audio.failed")}</div>}
+      <Toggle checked={settings.fixedFps} onChange={(fixedFps) => setSunSettings({ fixedFps })} title={t("sun.fixedFps")} hint={t("sun.fixedFps.hint")} />
     </>
   );
 }

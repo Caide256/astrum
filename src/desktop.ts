@@ -182,6 +182,8 @@ export type SunStartSettings = {
   upnp: boolean;
   /** The outside address (an IP or a DynDNS name) of a port forwarded by hand. */
   address: string;
+  /** Sunshine keeps the frame rate up on a still picture instead of halving it. */
+  fixedFps: boolean;
 };
 
 export type SunStarted = {
