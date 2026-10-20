@@ -5,6 +5,34 @@ GitHub uses the same two sections, and the app shows the one of its language in
 the update window. Mentions like `@everyone` always go in backticks: GitHub takes
 a bare mention for a GitHub user and lists that user as a contributor of the release.
 
+## 0.9.12
+
+<details>
+<summary>English</summary>
+
+- **Fixed: the app froze for good** on a channel with a code block holding a long line of words and dots (an address repeated many times, say). Guessing the language of the code took longer with every character, and the window stopped answering, at every start, since the app opens the last channel by itself. Coloring now has a time limit: a block it cannot finish quickly is shown plain.
+- **When the window stops answering**, the app asks whether to restart it. The restarted window does not open the last channel by itself, in case the hang came from it. Hangs are written to app.log.
+- Other messages that slowed the window down are read quickly now: a long run of backticks or of "[" took seconds every time its channel opened, and quotes nested thousands of levels deep showed the message as broken. A code block with a very long line is shown without colors.
+- **Memory:** pictures and clips seen are let go once they take more than 256 MB, the ones seen longest ago first. Before, all of them stayed in memory until sign-out, for days in the tray.
+- Joining a call right after the network came back no longer fails for 10 minutes with "no address of the voice server": a request that got no answer is not remembered any more.
+
+If 0.9.11 already froze for you, close it in the Task Manager and install this version by hand from the release page: the frozen window cannot show the update.
+
+</details>
+
+<details>
+<summary>Русский</summary>
+
+- **Исправлено: программа намертво зависала** на канале, где есть блок кода с длинной строкой из слов и точек (например, много раз повторённый адрес). Угадывание языка кода с каждым символом думало всё дольше, окно переставало отвечать, причём при каждом запуске, потому что программа сама открывает последний канал. Теперь у раскраски есть лимит времени: блок, который не раскрасился быстро, показывается без цветов.
+- **Если окно перестало отвечать**, программа предлагает его перезапустить. После перезапуска последний канал не открывается сам: вдруг зависание из-за него. Зависания пишутся в app.log.
+- Другие сообщения, которые тормозили окно, теперь читаются быстро: длинная серия обратных кавычек или «[» стоила секунды при каждом открытии канала, а цитаты, вложенные тысячи раз, показывали сообщение сломанным. Блок кода с очень длинной строкой показывается без цветов.
+- **Память:** картинки и клипы, которые ты смотрел, выгружаются, когда занимают больше 256 МБ, начиная с самых давних. Раньше всё это висело в памяти до выхода из аккаунта, сутками в трее.
+- Вход в звонок сразу после того, как вернулась сеть, больше не ломается на 10 минут с «не найден адрес голосового сервера»: запрос без ответа больше не запоминается.
+
+Если 0.9.11 у тебя уже зависла, закрой её через диспетчер задач и поставь эту версию вручную со страницы релиза: зависшее окно не может показать обновление.
+
+</details>
+
 ## 0.9.11
 
 <details>

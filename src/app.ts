@@ -1387,8 +1387,24 @@ function restoreView(): void {
   app.set({ view: last.view, activeServer: last.server });
 }
 
+/**
+ * The page was restarted after the window hung (electron/main.cjs, watchHang):
+ * the channel open last is not opened by itself once, in case the hang came
+ * from it. The person opens a channel with a click.
+ */
+let safeStart = typeof location !== "undefined" && new URLSearchParams(location.search).has("safe");
+
 /** Open the channel last opened here, or the first text channel. */
 function restoreChannel(): void {
+  if (safeStart && app.get().servers.length + app.get().directs.length > 0) {
+    safeStart = false;
+    appLog("the page started after a hang: no channel is opened by itself");
+    const text = t("app.safeStart");
+    withLogs(text);
+    app.set({ error: text });
+    return;
+  }
+  if (safeStart) return;
   let s = app.get();
   if (s.activeChannel) return;
   // no servers yet but an invite is waiting: show it instead of emptiness
@@ -2204,17 +2220,6 @@ export async function markServerRead(spaceId: string): Promise<void> {
 }
 
 /** A readable name for a muted chat, server or person. */
-export function muteLabel(kind: "rooms" | "servers" | "users", id: string): string {
-  if (kind === "users") return `${displayName(id)} (${id})`;
-  if (kind === "servers") return app.get().servers.find((g) => g.spaceId === id)?.name ?? id;
-  const direct = app.get().directs.find((d) => d.roomId === id);
-  if (direct) return direct.name;
-  const home = serverOf(id);
-  const channel = home?.channels.find((c) => c.roomId === id) ?? app.get().loose.find((c) => c.roomId === id);
-  const name = channel?.name ?? client?.getRoom(id)?.name ?? id;
-  return home ? `${home.name} · ${name}` : name;
-}
-
 export function openPlaceMenu(kind: "room" | "server", id: string, x: number, y: number): void {
   app.set({ placeMenu: { kind, id, x, y }, userMenu: null, streamMenu: null, screenMenu: null });
 }
@@ -4304,22 +4309,6 @@ export function mentionCandidates(roomId: string | null, query: string): Mention
       insert: (count.get(local) ?? 0) > 1 ? m.userId : `@${local}`,
     }))
     .concat(groups);
-}
-
-/** Everyone this account shares a room with, by name: for picking whose stream a Moonlight host is. */
-export function knownPeople(): { userId: string; name: string }[] {
-  const c = client;
-  if (!c) return [];
-  const self = c.getUserId();
-  const seen = new Map<string, string>();
-  for (const room of c.getRooms()) {
-    if (room.getMyMembership() !== "join") continue;
-    for (const m of room.getJoinedMembers()) {
-      if (m.userId !== self && !seen.has(m.userId)) seen.set(m.userId, people.plainName(m) || people.localName(m.userId));
-      if (seen.size > 800) break;
-    }
-  }
-  return [...seen.entries()].map(([userId, name]) => ({ userId, name })).sort((a, b) => compareText(a.name, b.name));
 }
 
 /** Channel members for the right column, highest role first. */

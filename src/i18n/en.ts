@@ -514,6 +514,7 @@ export const en = {
 
   "err.forbidden": "The server refused: wrong username or password, or no access",
   "err.token": "The session expired, sign in again",
+  "app.safeStart": "The window froze and was restarted. The channel open last was not opened, so it does not freeze again: open the one you need.",
   "err.network": "Could not reach the server: check the address and that it is online",
 
   "notify.inRoom": "{who} in {room}",

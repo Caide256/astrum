@@ -1,5 +1,5 @@
 const electron = require("electron");
-const { app, BrowserWindow, Menu, desktopCapturer, globalShortcut, ipcMain, shell, session } = electron;
+const { app, BrowserWindow, Menu, desktopCapturer, dialog, globalShortcut, ipcMain, shell, session } = electron;
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -926,6 +926,48 @@ function watchBounds(win) {
   win.on("unmaximize", store);
 }
 
+/** The app's page; `safe` asks it not to open the last channel by itself (after a hang). */
+function loadPage(win, safe) {
+  if (DEV_URL) void win.loadURL(safe ? `${DEV_URL}${DEV_URL.includes("?") ? "&" : "?"}safe=1` : DEV_URL);
+  else void win.loadFile(path.join(__dirname, "..", "dist", "index.html"), safe ? { query: { safe: "1" } } : undefined);
+}
+
+/**
+ * A page caught in a loop leaves a dead window, and the next start would open
+ * the same channel and hang again. When the window stops answering, the person
+ * is asked; a restart loads the page anew without opening the last channel.
+ */
+function watchHang(win) {
+  let asking = false;
+  win.on("unresponsive", () => {
+    appLog("app", "the window stopped answering");
+    if (asking || win.isDestroyed()) return;
+    asking = true;
+    const ru = app.getLocale().toLowerCase().startsWith("ru");
+    const options = {
+      type: "warning",
+      title: brand.name,
+      message: ru ? "Окно не отвечает" : "The window is not responding",
+      detail: ru
+        ? "Перезапустить его? Канал, открытый последним, не откроется сам: вдруг зависание из-за него."
+        : "Restart it? The channel open last will not open by itself, in case the hang comes from it.",
+      buttons: ru ? ["Перезапустить", "Подождать"] : ["Restart", "Wait"],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    };
+    const asked = win.isVisible() ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options);
+    void asked.then(({ response }) => {
+      asking = false;
+      if (response !== 0 || win.isDestroyed()) return;
+      appLog("app", "the page is restarted without the last channel");
+      win.webContents.forcefullyCrashRenderer();
+      loadPage(win, true);
+    });
+  });
+  win.on("responsive", () => appLog("app", "the window answers again"));
+}
+
 function createWindow() {
   const bounds = savedBounds();
   const win = new BrowserWindow({
@@ -965,6 +1007,7 @@ function createWindow() {
     if (leaveCall(() => !win.isDestroyed() && win.close())) e.preventDefault();
   });
   win.on("focus", () => win.flashFrame(false));
+  watchHang(win);
   // right click in a text field: fixes for a misspelled word, cut, copy, paste
   win.webContents.on("context-menu", (_e, params) => editMenu(win.webContents, params));
 
@@ -999,11 +1042,7 @@ function createWindow() {
     app.quit();
   });
 
-  if (DEV_URL) {
-    void win.loadURL(DEV_URL);
-  } else {
-    void win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
-  }
+  loadPage(win, false);
 
   if (process.env.APP_SELFTEST) win.webContents.once("did-finish-load", () => void selftest(win));
   return win;

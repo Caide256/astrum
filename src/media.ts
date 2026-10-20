@@ -15,6 +15,46 @@ let client: MatrixClient | null = null;
 let token = "";
 
 const cache = new Map<string, string>();
+/**
+ * Downloaded files live in memory as blob URLs. Past this much the least
+ * recently used are let go: the app stays open for days, and every picture
+ * and clip seen would stay in memory otherwise.
+ */
+const KEEP_BYTES = 256 * 1024 * 1024;
+/** The newest few stay whatever their size: one of them is likely on screen or playing. */
+const KEEP_NEWEST = 8;
+const sizes = new Map<string, number>();
+let kept = 0;
+
+function forget(key: string): void {
+  const url = cache.get(key);
+  if (url === undefined) return;
+  cache.delete(key);
+  kept -= sizes.get(key) ?? 0;
+  sizes.delete(key);
+  if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+}
+
+function remember(key: string, url: string, size: number): void {
+  forget(key);
+  cache.set(key, url);
+  sizes.set(key, size);
+  kept += size;
+  // a Map keeps the order of insertion: the first keys are the ones used longest ago
+  for (const k of cache.keys()) {
+    if (kept <= KEEP_BYTES || cache.size <= KEEP_NEWEST) break;
+    forget(k);
+  }
+}
+
+/** A kept URL, moved to the end as just used. */
+function recall(key: string): string {
+  const url = cache.get(key);
+  if (url === undefined) return "";
+  cache.delete(key);
+  cache.set(key, url);
+  return url;
+}
 const inflight = new Map<string, Promise<string>>();
 /** When a download last failed: tried again only after a pause, never remembered for good. */
 const failedAt = new Map<string, number>();
@@ -23,10 +63,7 @@ const RETRY_MS = 15_000;
 export function configureMedia(c: MatrixClient | null, accessToken: string): void {
   client = c;
   token = accessToken;
-  for (const url of cache.values()) {
-    if (url.startsWith("blob:")) URL.revokeObjectURL(url);
-  }
-  cache.clear();
+  for (const key of [...cache.keys()]) forget(key);
   inflight.clear();
   failedAt.clear();
 }
@@ -45,7 +82,7 @@ function httpOf(mxc: string, size: number, authed: boolean): string {
 /** A ready URL if already downloaded, so placeholders do not flash. */
 export function peekMedia(mxc: string, size = 0): string {
   if (!mxc) return "";
-  return cache.get(keyOf(mxc, size)) ?? "";
+  return recall(keyOf(mxc, size));
 }
 
 async function fetchBlob(http: string, authed: boolean): Promise<Blob | null> {
@@ -65,7 +102,7 @@ async function fetchBlob(http: string, authed: boolean): Promise<Blob | null> {
  * remembered as a broken link: a picture whose first request failed (a
  * moment after upload, a network hiccup) loads on the next try.
  */
-async function download(mxc: string, size: number): Promise<string> {
+async function download(mxc: string, size: number): Promise<{ url: string; bytes: number } | null> {
   const tries: [number, boolean][] = size
     ? [
         [size, true],
@@ -81,16 +118,16 @@ async function download(mxc: string, size: number): Promise<string> {
     const http = httpOf(mxc, sz, authed);
     if (!http) continue;
     const blob = await fetchBlob(http, authed);
-    if (blob) return URL.createObjectURL(blob);
+    if (blob) return { url: URL.createObjectURL(blob), bytes: blob.size };
   }
-  return "";
+  return null;
 }
 
 export function mediaUrl(mxc: string, size = 0): Promise<string> {
   if (!isMxc(mxc) || !client) return Promise.resolve("");
 
   const key = keyOf(mxc, size);
-  const ready = cache.get(key);
+  const ready = recall(key);
   if (ready) return Promise.resolve(ready);
 
   const running = inflight.get(key);
@@ -99,14 +136,14 @@ export function mediaUrl(mxc: string, size = 0): Promise<string> {
 
   const task = (async () => {
     try {
-      const url = await download(mxc, size);
-      if (url) {
-        cache.set(key, url);
+      const got = await download(mxc, size);
+      if (got) {
+        remember(key, got.url, got.bytes);
         failedAt.delete(key);
       } else {
         failedAt.set(key, Date.now());
       }
-      return url;
+      return got?.url ?? "";
     } finally {
       inflight.delete(key);
     }
@@ -186,7 +223,7 @@ export async function decryptAttachment(data: ArrayBuffer, file: EncryptedFile):
 export function encryptedMediaUrl(file: EncryptedFile, mime: string): Promise<string> {
   if (!client || !isMxc(file?.url)) return Promise.resolve("");
   const key = `enc:${file.url}`;
-  const ready = cache.get(key);
+  const ready = recall(key);
   if (ready) return Promise.resolve(ready);
   const running = inflight.get(key);
   if (running) return running;
@@ -198,7 +235,7 @@ export function encryptedMediaUrl(file: EncryptedFile, mime: string): Promise<st
       if (!res.ok) throw new Error(String(res.status));
       const plain = await decryptAttachment(await res.arrayBuffer(), file);
       const url = URL.createObjectURL(new Blob([plain], { type: safeMime(mime || file.mimetype || "") }));
-      cache.set(key, url);
+      remember(key, url, plain.byteLength);
       return url;
     } catch {
       return "";
@@ -226,7 +263,7 @@ export function attachmentUrl(
   const url = file?.url ?? mxc;
   if (!client || !isMxc(url)) return Promise.resolve("");
   const key = file ? `enc:${file.url}` : mxc;
-  const ready = cache.get(key);
+  const ready = recall(key);
   if (ready) return Promise.resolve(ready);
   const running = inflight.get(key);
   if (running) return running;
@@ -261,7 +298,7 @@ export function attachmentUrl(
       if (!data) return "";
       const plain = file ? await decryptAttachment(data, file) : data;
       const blobUrl = URL.createObjectURL(new Blob([plain], { type: safeMime(mime || file?.mimetype || "") }));
-      cache.set(key, blobUrl);
+      remember(key, blobUrl, plain.byteLength);
       return blobUrl;
     } catch {
       return "";
@@ -275,5 +312,5 @@ export function attachmentUrl(
 
 /** An attachment that is already downloaded, so the player starts without a spinner. */
 export function peekAttachment(mxc: string, file: EncryptedFile | null): string {
-  return cache.get(file ? `enc:${file.url}` : mxc) ?? "";
+  return recall(file ? `enc:${file.url}` : mxc);
 }

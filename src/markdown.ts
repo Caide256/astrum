@@ -51,6 +51,8 @@ export type Block =
 const ESCAPABLE = /[\\`*_~|[\]()#>+\-.!<{}]/;
 const URL_AT = /^(?:https?:\/\/|mailto:)[^\s<>"]+/i;
 const TRAILING = /[.,:;!?)\]}'"»]+$/;
+const LINK = /^\[([^\]\n]+)\]\(\s*<?([^()\s<>]+)>?\s*\)/;
+const LINK_TAIL = /^\]\(\s*<?[^()\s<>]+>?\s*\)/;
 const WORD = /[\p{L}\p{N}]/u;
 
 function safeHref(href: string): string {
@@ -65,10 +67,16 @@ function pushText(out: Inline[], v: string): void {
   else out.push({ t: "text", v });
 }
 
+/** The index after the run of backticks that starts at `i`. */
+function runEnd(src: string, i: number): number {
+  let j = i;
+  while (src[j] === "`") j += 1;
+  return j;
+}
+
 /** Skip a code span that starts at `i`; returns the index after it, or -1 if it does not close. */
 function skipCode(src: string, i: number): number {
-  let n = 1;
-  while (src[i + n] === "`") n += 1;
+  const n = runEnd(src, i) - i;
   const end = src.indexOf("`".repeat(n), i + n);
   return end === -1 ? -1 : end + n;
 }
@@ -82,8 +90,9 @@ function findClose(src: string, from: number, marker: string): number {
       continue;
     }
     if (c === "`") {
+      // an unclosed run is passed whole: stepping into it would search it again for every backtick
       const after = skipCode(src, j);
-      if (after !== -1) j = after - 1;
+      j = (after === -1 ? runEnd(src, j) : after) - 1;
       continue;
     }
     if (marker === "*" && src.startsWith("**", j)) {
@@ -118,6 +127,9 @@ const PAIRS: { marker: string; t: "b" | "i" | "u" | "s" | "spoiler" }[] = [
 export function parseInline(src: string): Inline[] {
   const out: Inline[] = [];
   let i = 0;
+  // the next "]" and whether a link can end there: found once, not again for every "[" before it
+  let close = -2;
+  let closes = false;
   while (i < src.length) {
     const ch = src[i];
 
@@ -142,6 +154,11 @@ export function parseInline(src: string): Inline[] {
         i = after;
         continue;
       }
+      // no closing run: the whole run is text, or every backtick of it would search to the end again
+      const end = runEnd(src, i);
+      pushText(out, src.slice(i, end));
+      i = end;
+      continue;
     }
 
     // ***both*** is bold around italic
@@ -170,7 +187,11 @@ export function parseInline(src: string): Inline[] {
     if (matched) continue;
 
     if (ch === "[") {
-      const link = /^\[([^\]\n]+)\]\(\s*<?([^()\s<>]+)>?\s*\)/.exec(src.slice(i));
+      if (close !== -1 && close < i) {
+        close = src.indexOf("]", i);
+        closes = close !== -1 && LINK_TAIL.test(src.slice(close));
+      }
+      const link = closes ? LINK.exec(src.slice(i)) : null;
       const href = link ? safeHref(link[2]) : "";
       if (link && href) {
         out.push({ t: "link", href, c: parseInline(link[1]) });
@@ -232,6 +253,9 @@ const TABLE_SEP = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 
 type Ctx = { keys: Map<string, number> };
 
+/** Quotes nest only this deep: each level is a call of its own, and ">" a thousand times would overflow the stack. */
+const MAX_DEPTH = 20;
+
 function taskKey(ctx: Ctx, text: string): string {
   const base = text.trim().replace(/\s+/g, " ").toLowerCase().slice(0, 200);
   const n = (ctx.keys.get(base) ?? 0) + 1;
@@ -265,7 +289,7 @@ function alignOf(cell: string): Align {
   return left && right ? "center" : right ? "right" : left ? "left" : null;
 }
 
-function parseList(lines: string[], at: number, ctx: Ctx): { block: Block; next: number } {
+function parseList(lines: string[], at: number, ctx: Ctx, depth: number): { block: Block; next: number } {
   const first = LIST.exec(lines[at]) as RegExpExecArray;
   const indent = first[1].length;
   const ordered = /\d/.test(first[2]);
@@ -299,13 +323,13 @@ function parseList(lines: string[], at: number, ctx: Ctx): { block: Block; next:
       task: task ? task[1] !== " " : null,
       key: task ? taskKey(ctx, text) : "",
       c: parseInline(text),
-      sub: r.subLines.length ? parseBlocks(r.subLines, ctx) : [],
+      sub: r.subLines.length ? parseBlocks(r.subLines, ctx, depth + 1) : [],
     };
   });
   return { block: { t: "list", ordered, start, items }, next: i };
 }
 
-function parseBlocks(lines: string[], ctx: Ctx): Block[] {
+function parseBlocks(lines: string[], ctx: Ctx, depth = 0): Block[] {
   const out: Block[] = [];
   let para: string[] = [];
   const flush = () => {
@@ -348,27 +372,27 @@ function parseBlocks(lines: string[], ctx: Ctx): Block[] {
       continue;
     }
 
-    if (/^\s*>>>\s?/.test(line)) {
+    if (depth < MAX_DEPTH && /^\s*>>>\s?/.test(line)) {
       flush();
       const rest = [line.replace(/^\s*>>>\s?/, ""), ...lines.slice(i + 1)];
-      out.push({ t: "quote", c: parseBlocks(rest, ctx) });
+      out.push({ t: "quote", c: parseBlocks(rest, ctx, depth + 1) });
       break;
     }
 
-    if (QUOTE.test(line)) {
+    if (depth < MAX_DEPTH && QUOTE.test(line)) {
       flush();
       const inner: string[] = [];
       while (i < lines.length && QUOTE.test(lines[i])) {
         inner.push((QUOTE.exec(lines[i]) as RegExpExecArray)[1]);
         i += 1;
       }
-      out.push({ t: "quote", c: parseBlocks(inner, ctx) });
+      out.push({ t: "quote", c: parseBlocks(inner, ctx, depth + 1) });
       continue;
     }
 
     if (LIST.test(line)) {
       flush();
-      const { block, next } = parseList(lines, i, ctx);
+      const { block, next } = parseList(lines, i, ctx, depth);
       out.push(block);
       i = next;
       continue;

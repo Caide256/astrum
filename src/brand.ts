@@ -1,4 +1,4 @@
-import raw from "../brand.json";
+import raw from "../brand.json" with { type: "json" };
 
 /**
  * Product name, logo and update source from brand.json. The file is read at

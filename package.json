@@ -1,6 +1,6 @@
 {
   "name": "matrix-voice-client",
-  "version": "0.9.11",
+  "version": "0.9.12",
   "license": "GPL-3.0-only",
   "description": "Discord-like desktop client for Matrix: voice, screen sharing and chats",
   "private": true,
@@ -9,9 +9,9 @@
   "scripts": {
     "dev": "vite",
     "desktop": "node scripts/dev-desktop.mjs",
-    "desktop:build": "npm run native:build && vite build && electron-builder --config electron-builder.config.cjs --publish never && node scripts/release-files.cjs",
+    "desktop:build": "node scripts/parsers-check.mjs && npm run native:build && vite build && electron-builder --config electron-builder.config.cjs --publish never && node scripts/release-files.cjs",
     "build": "tsc --noEmit && vite build",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit && node scripts/parsers-check.mjs",
     "preview": "vite preview",
     "native:build": "cargo build --release --offline --manifest-path native/helper/Cargo.toml"
   },

@@ -35,6 +35,25 @@ export type Highlighted = { lang: string; label: string; tokens: Token[] };
 
 /** Longer code is shown plain: thousands of colored pieces are not worth the wait. */
 const MAX_CHARS = 60_000;
+/** A block with a longer line is shown plain too: the line scanners take time by the square of a line. */
+const MAX_LINE = 2000;
+
+/**
+ * A scanner that stops moving or thinks too long gives the block up, and it
+ * is shown as plain text: colors are not worth a frozen window.
+ */
+class GiveUp extends Error {}
+const BUDGET_MS = 150;
+let deadline = 0;
+let steps = 0;
+
+/** One step of a scanner loop at `at`; `last` is where the previous step was. */
+function step(at: number, last: number): number {
+  if (at === last) throw new GiveUp();
+  steps += 1;
+  if ((steps & 1023) === 0 && Date.now() > deadline) throw new GiveUp();
+  return at;
+}
 
 class Out {
   list: Token[] = [];
@@ -474,7 +493,9 @@ function scanC(code: string, s: Compiled, out: Out): void {
   // the next word starts a command (shell)
   let cmd = true;
 
+  let last = -1;
   while (i < n) {
+    last = step(i, last);
     const c = code[i];
     if (c === "\n") {
       out.add(null, c);
@@ -628,7 +649,9 @@ function scanMarkup(code: string, out: Out): void {
   const n = code.length;
   const lower = code.toLowerCase();
   let i = 0;
+  let last = -1;
   while (i < n) {
+    last = step(i, last);
     if (code.startsWith("<!--", i)) {
       const end = code.indexOf("-->", i + 4);
       const to = end === -1 ? n : end + 3;
@@ -659,7 +682,9 @@ function scanMarkup(code: string, out: Out): void {
       i += open.length;
       let selfClosed = false;
       let afterEq = false;
+      let lastAttr = -1;
       while (i < n) {
+        lastAttr = step(i, lastAttr);
         const c = code[i];
         if (c === ">") {
           out.add("punc", ">");
@@ -748,7 +773,9 @@ function scanCss(code: string, out: Out, scss: boolean): void {
   let mode: "sel" | "decl" | "val" = "sel";
   // inside parentheses of a selector or an at-rule: (max-width: 600px), :nth-child(2n)
   let paren = 0;
+  let last = -1;
   while (i < n) {
+    last = step(i, last);
     const c = code[i];
     const take = (kind: Kind | null, end: number) => {
       out.add(kind, code.slice(i, end));
@@ -836,9 +863,12 @@ function scanCss(code: string, out: Out, scss: boolean): void {
         }
       }
       if (code.startsWith("--", i)) {
+        // "--" alone is no custom property: taken as a sign, so the scan moves on
         const w = sticky(/--[\w-]+/y, code, i);
-        take("var", i + w.length);
-        continue;
+        if (w) {
+          take("var", i + w.length);
+          continue;
+        }
       }
       const w = sticky(CSS_WORD, code, i);
       if (w) {
@@ -892,7 +922,9 @@ function scanCss(code: string, out: Out, scss: boolean): void {
 function scanJson(code: string, out: Out): void {
   const n = code.length;
   let i = 0;
+  let last = -1;
   while (i < n) {
+    last = step(i, last);
     const c = code[i];
     if (c === '"') {
       const end = stringEnd(code, i + 1, '"');
@@ -945,7 +977,9 @@ const YAML_LIT = new Set(["true", "false", "yes", "no", "on", "off", "null", "~"
 function scanValue(text: string, out: Out, plainIsString: boolean, lits: Set<string>, semicolon = false): void {
   let i = 0;
   const n = text.length;
+  let last = -1;
   while (i < n) {
+    last = step(i, last);
     const c = text[i];
     if ((c === "#" || (semicolon && c === ";")) && (i === 0 || text[i - 1] === " " || text[i - 1] === "\t")) {
       out.add("com", text.slice(i));
@@ -1235,7 +1269,7 @@ const SIGNS: [string, RegExp, number, number?][] = [
   ["sql", /\b(inner|left|right|full)?\s*join\b[\s\S]+?\bon\b/i, 2],
   ["sql", /\b(group|order)\s+by\b/i, 2],
 
-  ["css", /^\s*[.#]?[\w-]+([\s,>+~]*[.#:]{0,2}[\w-]+)*\s*\{\s*$/m, 1],
+  ["css", /^[ \t]*[.#]?[\w-][\w.#:>+~, \t-]*\{[ \t]*$/m, 1],
   [
     "css",
     /^\s*-{0,2}[a-z][\w-]*\s*:\s*[^;{}\n]*(\d(px|em|rem|%|vh|vw|s|ms|fr|deg)\b|#[\da-fA-F]{3,8}\b|\b(none|auto|block|flex|grid|inherit|solid|bold|center|absolute|relative|hidden|pointer|transparent)\b)[^;{}\n]*;\s*$/m,
@@ -1257,6 +1291,9 @@ const SIGNS: [string, RegExp, number, number?][] = [
   ["markdown", /\*\*[^*\n]+\*\*/, 1],
   ["markdown", /\[[^\]\n]+\]\([^)\n]+\)/, 2],
 ];
+
+/** Only the start of a long line is looked at when guessing. */
+const MAX_SIGN_LINE = 300;
 
 /** YAML is a list of "key: value" lines with no braces or semicolons; counted apart. */
 function yamlScore(code: string): number {
@@ -1296,7 +1333,11 @@ function looksLikeJson(code: string): boolean {
 
 /** The language of a piece of code, "" if it looks like none. */
 export function detectLanguage(code: string): string {
-  const sample = code.length > 6000 ? code.slice(0, 6000) : code;
+  const head = code.length > 6000 ? code.slice(0, 6000) : code;
+  const sample = head
+    .split("\n")
+    .map((line) => (line.length > MAX_SIGN_LINE ? line.slice(0, MAX_SIGN_LINE) : line))
+    .join("\n");
   if (!sample.trim()) return "";
   if (looksLikeJson(sample)) return "json";
   const score = new Map<string, number>();
@@ -1339,11 +1380,25 @@ function fenceLang(word: string): Lang | "" | null {
 export function highlight(code: string, fence: string): Highlighted {
   const named = fenceLang(fence);
   const label = fence.trim();
-  if (named === "" || code.length > MAX_CHARS) return { lang: "", label, tokens: [{ k: null, v: code }] };
+  if (named === "" || code.length > MAX_CHARS || code.split("\n").some((l) => l.length > MAX_LINE)) {
+    return { lang: "", label, tokens: [{ k: null, v: code }] };
+  }
   // a known name, or a guess when there is none (an unknown name keeps its label, the code stays plain)
   const lang = named ?? (label ? undefined : byId.get(detectLanguage(code)));
   if (!lang) return { lang: "", label, tokens: [{ k: null, v: code }] };
   const out = new Out();
+  deadline = Date.now() + BUDGET_MS;
+  steps = 0;
+  try {
+    scan(code, lang, out);
+  } catch (e) {
+    if (!(e instanceof GiveUp)) throw e;
+    return { lang: "", label: label || lang.name, tokens: [{ k: null, v: code }] };
+  }
+  return { lang: lang.id, label: lang.name, tokens: out.list };
+}
+
+function scan(code: string, lang: Lang, out: Out): void {
   switch (lang.family) {
     case "c":
       scanC(code, compile(lang), out);
@@ -1370,5 +1425,4 @@ export function highlight(code: string, fence: string): Highlighted {
       scanMarkdown(code, out);
       break;
   }
-  return { lang: lang.id, label: lang.name, tokens: out.list };
 }

@@ -152,10 +152,6 @@ function cleanMutes(raw: Partial<Mutes> | null | undefined): Mutes {
 
 const mutes = cell<Mutes>(cleanMutes(loadJson<Partial<Mutes>>(MUTES_KEY, NO_MUTES)));
 
-export function getMutes(): Mutes {
-  return mutes.get();
-}
-
 export const useMutes = mutes.use;
 
 function saveMutes(next: Mutes): void {
@@ -295,10 +291,6 @@ function applyPrivacy(p: Privacy): void {
 }
 applyPrivacy(privacy.get());
 
-export function getPrivacy(): Privacy {
-  return privacy.get();
-}
-
 export const usePrivacy = privacy.use;
 
 export function setPrivacy(patch: Partial<Privacy>): void {
@@ -311,12 +303,6 @@ export function setPrivacy(patch: Partial<Privacy>): void {
 /** Ids and domains are hidden right now: by the setting or by the streamer mode. */
 export function idsHidden(): boolean {
   const p = privacy.get();
-  return p.hideIds || p.streamer;
-}
-
-/** A hook form of idsHidden: the component redraws when it changes. */
-export function useIdsHidden(): boolean {
-  const p = privacy.use();
   return p.hideIds || p.streamer;
 }
 

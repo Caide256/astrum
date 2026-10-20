@@ -440,11 +440,12 @@ export async function focusFromWellKnown(homeserver: string): Promise<string> {
           }
         }
       }
+      // only an answer is kept: a request that failed (no network yet) is asked again next time
+      wellKnown.set(base, { at: Date.now(), url });
     }
   } catch {
     // no well-known: the URL comes from another participant's membership
   }
-  wellKnown.set(base, { at: Date.now(), url });
   return url;
 }
 

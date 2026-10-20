@@ -662,7 +662,11 @@ button.small {
   font-size: 12px;
   color: var(--muted);
   max-width: 70vw;
-  z-index: 20;
+  z-index: 70;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  animation: toast-in 0.2s ease-out;
 }
 
 /* a field with a button next to it */
@@ -1939,7 +1943,7 @@ button.hangup:hover:not(:disabled) {
 
 .ctile-actions {
   display: flex;
-  gap: 6px;
+  gap: 10px;
   flex-wrap: wrap;
   justify-content: center;
 }
@@ -3607,10 +3611,6 @@ button.file-chip .state {
   transform-origin: top right;
 }
 
-.toast {
-  animation: toast-in 0.2s ease-out;
-}
-
 /* switching a channel, a server or a settings tab fades the content in instead of jumping */
 .timeline {
   animation: fade-in 0.2s ease-out;
@@ -4212,12 +4212,6 @@ button.wide-button {
 }
 
 /* -------------------------------------------------------------- toast actions */
-
-.toast {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
 
 .toast.bad {
   border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
@@ -5947,12 +5941,6 @@ button.attention {
   flex: none;
 }
 
-.ctile-actions {
-  display: flex;
-  gap: 10px;
-  justify-content: center;
-}
-
 .invite-accept {
   display: inline-flex;
   align-items: center;
@@ -6788,10 +6776,6 @@ button.unread-bar:active:not(:disabled) {
 }
 
 /* ------------------------------------------------------------------ toast */
-
-.toast {
-  z-index: 70;
-}
 
 .toast.good {
   color: var(--text);

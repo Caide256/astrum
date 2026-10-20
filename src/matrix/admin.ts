@@ -87,11 +87,6 @@ export function levelAbove(roles: RoleDef[], below: number): number | null {
   return level > below && level < top ? level : null;
 }
 
-/** Thresholds for permissions: every role plus "owner only". */
-export function permLevels(roles: RoleDef[]): { level: number; label: string }[] {
-  return [{ level: OWNER_LEVEL, label: t("role.ownerOnly") }, ...roles.map((r) => ({ level: r.level, label: r.name }))];
-}
-
 /* --------------------------------------------------------- channel access */
 
 /**
